@@ -1,74 +1,101 @@
-'''
-Nanodrive ADwin Confocal Scan Fast Module
-
-This module implements fast raster scanning for confocal microscopy using:
-- MCL NanoDrive for sample stage positioning
-- ADwin Gold II for photon counting and timing
-- Optimized waveform-based scanning for speed
-
-The fast method uses pre-loaded waveforms and compensates for warm-up/cool-down
-movements to achieve accurate positioning while maintaining high scan rates.
-'''
-
+from __future__ import annotations
+import sys
+import ctypes
+import time
+from typing import Optional
+from src.Controller import amcam
+from src.Controller import Amscope_MU_Camera
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
+from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen
+from PyQt5.QtWidgets import (
+    QApplication,
+    QWidget,
+    QLabel,
+    QCheckBox,
+    QVBoxLayout,
+    QHBoxLayout,
+    QDesktopWidget,
+    QMessageBox,
+)
+from src.core import Parameter, Experiment
+from src.core.helper_functions import get_configured_nv_positioning_folder
+from time import sleep
+import pyqtgraph as pg
 import numpy as np
 from pyqtgraph.exporters import ImageExporter
 from pathlib import Path
-
-from src.core import Parameter, Experiment
-from src.core.helper_functions import get_configured_confocal_scans_folder
-from src.core.adwin_helpers import get_adwin_binary_path
-from time import sleep
-import pyqtgraph as pg
-
-class NanodriveAdwinConfocalScanFast(Experiment):
+class NV_positioning_experiment(Experiment):
     '''
-    Fast confocal microscope scan using MCL NanoDrive and ADwin Gold II.
-    
-    This class runs a confocal microscope scan using the MCL NanoDrive to move 
-    the sample stage and the ADwin Gold II to get count data. The code loads a 
-    waveform on the nanodrive, starts the Adwin process, triggers a waveform 
-    acquisition, then reads the count data array from the Adwin.
-
-    To get accurate counts, the loaded waveforms are extended to compensate for 
-    'warm up' and 'cool down' movements. The data arrays are then manipulated 
-    to get the counts for the inputed region.
-
+    NV_positioning_experiment:
+    Using microdrive, nanodrive, and camera, this experiment:
+     - shows live imaging
+     - moves the microdrive to corners of the sample
+     - lets the user select 4 corners of the sample (4 pictures)
+     - Goes to NV center
+     - lets user select NV location
+     - After taking the sample and putting it back, lets the user select 4 corners of the sample
+     - applies algorithm to find NV
+     - moves microdrive to and then nanodrive to NV
     Hardware Dependencies:
-    - MCL NanoDrive: For precise sample stage positioning
-    - ADwin Gold II: For photon counting and timing control
-    - ADbasic Binary: One_D_Scan.TB2 for counter operations
+    - Newport_Conex_CC
+    - Amscope camera
+    - Nanodrive
     '''
 
     _DEFAULT_SETTINGS = [
-        Parameter('point_a',
-                  [Parameter('x',5.0,float,'x-coordinate start in microns'),
-                   Parameter('y',5.0,float,'y-coordinate start in microns')
+        Parameter('old_bottom_left',
+                  [Parameter('x',50.0,float,' old_bottom_left x-coordinate in microns'),
+                   Parameter('y',5.0,float,'old_bottom_left y-coordinate in microns')
                    ]),
-        Parameter('point_b',
-                  [Parameter('x',95.0,float,'x-coordinate end in microns'),
-                   Parameter('y', 95.0, float, 'y-coordinate end in microns')
+        Parameter('old_bottom_right',
+                  [Parameter('x',50.0,float, 'old_bottom_right x-coordinate in microns'),
+                   Parameter('y', 50.0, float, 'old_bottom_right y-coordinate in microns')
                    ]),
+        Parameter('old_top_left',
+                  [Parameter('x',50.0,float,'old_top_left x-coordinate in microns'),
+                   Parameter('y', 50.0, float, 'old_top_left y-coordinate in microns')
+                   ]),
+        Parameter('old_top_right',
+                  [Parameter('x',50.0,float,'old_top_right x-coordinate in microns'),
+                   Parameter('y', 50.0, float, 'old_top_right y-coordinate in microns')
+                   ]),
+        Parameter('new_bottom_left',
+                  [Parameter('x', 50.0, float, 'new_bottom_left x-coordinate in microns'),
+                   Parameter('y', 5.0, float, 'new_bottom_left y-coordinate in microns')
+                   ]),
+        Parameter('new_bottom_right',
+                  [Parameter('x', 50.0, float, 'new_bottom_right x-coordinate end in microns'),
+                   Parameter('y', 50.0, float, 'new_bottom_right y-coordinate end in microns')
+                   ]),
+        Parameter('new_top_left',
+                  [Parameter('x', 50.0, float, 'new_top_left x-coordinate end in microns'),
+                   Parameter('y', 50.0, float, 'new_top_left y-coordinate end in microns')
+                   ]),
+        Parameter('new_top_right',
+                  [Parameter('x', 50.0, float, 'new_top_right x-coordinate in microns'),
+                   Parameter('y', 50.0, float, 'new_top_right y-coordinate in microns')
+                   ]),
+        Parameter('old_NV_location',
+                  [Parameter('x', 50.0, float, 'old_NV_location x-coordinate in microns'),
+                   Parameter('y', 50.0, float, 'old_NV_location y-coordinate in microns'),
+                   Parameter('z', 50.0, float, 'old_NV_location z-coordinate in microns')
+                   ]),
+        Parameter('positions',
+                  [Parameter('folderpath', str(get_configured_nv_positioning_folder()), str,
+                             'folder location to save positions of points')]),
         Parameter('z_pos',50.0,float,'z position of nanodrive; useful for z-axis sweeps to find NVs'),
-        Parameter('resolution', 1.0, [2.0,1.0,0.5,0.25,0.1,0.05,0.025,0.001], 'Resolution of each pixel in microns. Limited to give '),
+        Parameter('resolution', 1.0, [2.0,1.0,0.5,0.25,0.1,0.05,0.025,0.001], 'Resolution of each pixel in microns (nanodrive). Limited to give '),
         Parameter('time_per_pt', 2.0, [2.0,5.0], 'Time in ms at each point to get counts; same as load_rate for nanodrive. Wroking values 2 or 5 ms'),
-        Parameter('ending_behavior', 'return_to_origin', ['return_to_inital_pos', 'return_to_origin', 'leave_at_corner'],'Nanodrive position after scan'),
-        Parameter('3D_scan',#using experiment iterator to sweep z-position can give an effective 3D scan as successive images. Useful for finding where NVs are in focal plane
-                  [Parameter('enable',False,bool,'T/F to enable 3D scan'),
-                         Parameter('folderpath',str(get_configured_confocal_scans_folder()),str,'folder location to save images at each z-value')]),
-        #!!! If you see horizontial lines in the confocal image, the adwin arrays likely are corrupted. The fix is to reboot the adwin. You will nuke all
-        #other process, variables, and arrays in the adwin. This parameter is added to make that easy to do in the GUI.
-        Parameter('reboot_adwin',False,bool,'Will reboot adwin when experiment is executed. Useful is data looks fishy'),
-        Parameter('cropping', #nested cause it does not need changed often
-                  [Parameter('crop_data',True,bool,'Current logic scans over a larger area then crops data to requested size. Added for ease of seeing full image')]),
+        Parameter('ending_behavior', 'return_to_inital_pos', ['return_to_inital_pos', 'return_to_origin', 'leave_at_corner'],'Nanodrive position after scan'),
         #clocks currently not implemented
         Parameter('laser_clock', 'Pixel', ['Pixel','Line','Frame','Aux'], 'Nanodrive clocked used for turning laser on and off')
     ]
 
-    #For actual experiment use LP100 [MCL_NanoDrive({'serial':2849})]. For testing using HS3 ['serial':2850]
-    #_DEVICES = {'nanodrive': MCLNanoDrive(settings={'serial':2849}), 'adwin':AdwinGoldDevice()}  # Removed - devices now passed via constructor
+    #_DEVICES
     _DEVICES = {
         'nanodrive': 'nanodrive',
-        'adwin': 'adwin'
+        'microdrive': 'microdrive',
+        'amscope_camera': 'amscope_camera'
     }
     _EXPERIMENTS = {}
 
@@ -82,9 +109,11 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         super().__init__(name, settings=settings, sub_experiments=experiments, devices=devices, log_function=log_function, data_path=data_path)
         #get instances of devices
         self.nd = self.devices['nanodrive']['instance']
-        self.adw = self.devices['adwin']['instance']
+        self.md = self.devices['microdrive']['instance']
+        self.cam = self.devices['amscope_camera']['instance']
 
-    def setup_scan(self):
+
+    """def setup_scan(self):
         '''
         Gets paths for adbasic file and loads them onto ADwin.
         '''
@@ -107,9 +136,9 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         self.nd.update({'z_pos': z_pos})
 
         # tracker to only save 3D image slice once
-        self.data_collected = False
+        self.data_collected = False"""
 
-    def after_scan(self):
+    """def after_scan(self):
         '''
         Cleans up adwin and moves nanodrive to specified position
         '''
@@ -120,15 +149,17 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         if self.settings['ending_behavior'] == 'return_to_inital_pos':
             self.nd.update({'x_pos': self.x_inital, 'y_pos': self.y_inital})
         elif self.settings['ending_behavior'] == 'return_to_origin':
-            self.nd.update({'x_pos': 0.0, 'y_pos': 0.0})
+            self.nd.update({'x_pos': 0.0, 'y_pos': 0.0})"""
 
     def _function(self):
-        """
+        '''
         This is the actual function that will be executed. It uses only information that is provided in the settings property
         will be overwritten in the __init__
-        """
-        if self.settings['reboot_adwin'] == True:
-            self.adw.reboot_adwin()
+        '''
+        # Set the data folder path at runtime to ensure correct path resolution
+        if not self.settings['positions']['folderpath']:
+            self.settings['positions']['folderpath'] = str(get_configured_nv_positioning_folder())
+
         self.setup_scan()
         sleep(0.1)
 
@@ -160,7 +191,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         self.z_inital = self.nd.read_probes('z_pos')
         self.settings['z_pos'] = self.z_inital
 
-        #makes sure data is getting recorded. If still equal none after running experiment data is not being stored or not measured
+        #makes sure data is getting recorded. If still equal none after running experiment, ten data is not being stored or not measured
         self.data['x_pos'] = None
         self.data['y_pos'] = None
         self.data['raw_counts'] = None
@@ -299,9 +330,9 @@ class NanodriveAdwinConfocalScanFast(Experiment):
 
         self.after_scan()
 
-    def _plot(self, axes_list, data=None):
+    """def _plot(self, axes_list, data=None):
         '''
-        This function plots the data. It is triggered when the updateProgress signal is emited and when after the _function is executed.
+        This function plots the data. It is triggered when the updateProgress signal is emitted and when after the _function is executed.
         For the scan, image can only be plotted once all data is gathered so self.running prevents a plotting call for the updateProgress signal.
         '''
         def create_img(add_colobar=True):
@@ -329,7 +360,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         if data is None:
             data = self.data
         if data is not None or data is not {}:
-            #for colorbar to display graident without artificial zeros
+            #for colorbar to display gradient without artificial zeros
             try: #sometimes when data is inputted as argument it does not have 'count_img' key; this try/except prevents error if that happens
                 non_zero_values = data['count_img'][data['count_img'] > 0]
             except KeyError:
@@ -371,14 +402,14 @@ class NanodriveAdwinConfocalScanFast(Experiment):
 
                 except RuntimeError:
                     # sometimes when clicking other experiments ImageItem is deleted but _plot_refresh is false. This ensures the image can be replotted
-                    create_img(add_colobar=False)
+                    create_img(add_colobar=False)"""
 
-    def _update(self,axes_list):
+    """def _update(self,axes_list):
         self.count_image.setImage(self.data['count_img'], autoLevels=False)
         self.count_image.setLevels([np.min(self.data['count_img']), np.max(self.data['count_img'])])
-        self.colorbar.setLevels([np.min(self.data['count_img']), np.max(self.data['count_img'])])
+        self.colorbar.setLevels([np.min(self.data['count_img']), np.max(self.data['count_img'])])"""
 
-    def correct_step(self, old_step):
+    """def correct_step(self, old_step):
         '''
         Increases resolution by one threshold if the step size does not give enough points for a good y-array.
         For good y-array len() > 90
@@ -398,4 +429,238 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         elif old_step == 0.025:
             return 0.001
         else:
-            raise KeyError 
+            raise KeyError """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper widgets
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SnapWin(QWidget):
+    """Separate window that shows still‑image captures."""
+
+    def __init__(self, w: int, h: int):
+        super().__init__()
+        self.setWindowTitle("Snapshot")
+        self.setFixedSize(w, h)
+        self.label = QLabel(self)
+        self.label.resize(w, h)
+        self.label.setScaledContents(False)
+
+    def show_frame(self, qimg: QImage):
+        self.label.setPixmap(QPixmap.fromImage(qimg))
+        self.show()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main camera window
+# ──────────────────────────────────────────────────────────────────────────────
+
+class MainWin(QWidget):
+    """Live‑view window. Compatible with the legacy *app.py* launcher."""
+
+    eventImage = pyqtSignal(int)
+
+    def __init__(
+        self,
+        gain: int = 100,
+        integration_time_us: int = 10_000,
+        res: str = "low",
+    ) -> None:
+        super().__init__()
+        self.hcam: Optional[Amscope_MU_Camera.Amscope_MU_Camera] = None
+        self.buf: Optional[ctypes.Array] = None
+        self.w = self.h = 0
+        self.gain = gain
+        self.integration = integration_time_us  # already in µs
+        self.res = res.lower()
+
+        # frame counter for FPS display
+        self._frame_accum = 0
+        self._last_tick = time.perf_counter()
+
+        self._init_ui()
+        self._init_camera()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+
+    def _init_ui(self) -> None:
+        # center the window on whatever display we’re on
+        self.setFixedSize(820, 640)  # temp; corrected once cam opens
+        geo = self.frameGeometry()
+        geo.moveCenter(QDesktopWidget().availableGeometry().center())
+        self.move(geo.topLeft())
+
+        # widgets
+        self.label = QLabel(self)
+        self.label.setScaledContents(False)  # don’t resample!
+
+        self.cb_auto = QCheckBox("Auto Exposure", self)
+        self.cb_auto.stateChanged.connect(self._on_auto_exp_toggled)
+
+        self.cb_fps = QCheckBox("Show FPS", self)
+
+        # layout
+        cols = QVBoxLayout(self)
+        cols.addWidget(self.label, stretch=1)
+        row = QHBoxLayout()
+        row.addWidget(self.cb_auto)
+        row.addWidget(self.cb_fps)
+        row.addStretch(1)
+        cols.addLayout(row)
+
+    # ── Camera setup ──────────────────────────────────────────────────────────
+
+    def _init_camera(self) -> None:
+        cams = amcam.Amcam.EnumV2()
+        if not cams:
+            self.setWindowTitle("No camera found")
+            self.cb_auto.setEnabled(False)
+            return
+
+        self.camname = cams[0].displayname
+        self.setWindowTitle(self.camname)
+        self.eventImage.connect(self._on_event_image)
+
+        try:
+            self.hcam = Amscope_MU_Camera.Amscope_MU_Camera()
+        except amcam.HRESULTException as ex:
+            QMessageBox.warning(self, "", f"Failed to open camera (hr=0x{ex.hr:x})")
+            return
+
+        # basic settings
+        self.hcam.set_ExpoAGain(self.gain)
+        self._clamp_and_set_exposure(self.integration)
+        self._apply_resolution(self.res)
+
+        # negotiate RGB/BGR for zero‑copy into QImage
+        if sys.platform != "win32":
+            self.hcam.put_Option(amcam.AMCAM_OPTION_BYTEORDER, 1)  # BGR on Linux/mac
+
+        # internal buffer (mutable)
+        stride = ((self.w * 24 + 31) // 32) * 4
+        self.buf = ctypes.create_string_buffer(stride * self.h)
+
+        # resize widget exactly to sensor size (no scaling cost)
+        self.setFixedSize(self.w, self.h + 40)  # + controls bar
+        self.label.setFixedSize(self.w, self.h)
+
+        # reflect current auto‑exposure state
+        self.cb_auto.setChecked(self.hcam.get_AutoExpoEnable())
+
+        # start stream
+        try:
+            self.hcam.StartPullModeWithCallback(self._camera_cb, self)
+        except amcam.HRESULTException as ex:
+            QMessageBox.warning(self, "", f"Stream start failed (hr=0x{ex.hr:x})")
+            return
+
+    def _clamp_and_set_exposure(self, target_us: int) -> None:
+        lo, hi, _ = self.hcam.get_ExpTimeRange()
+        self.hcam.put_ExpoTime(max(lo, min(target_us, hi)))
+
+    def _apply_resolution(self, res: str) -> None:
+        match res:
+            case "high":
+                self.hcam.put_eSize(0)  # 2560×1922
+            case "mid":
+                self.hcam.put_eSize(1)  # 1280×960
+            case _:
+                self.hcam.put_eSize(2)  # 640×480
+        self.w, self.h = self.hcam.get_Size()
+
+    # ── Toupcam callback (runs in SDK thread) ─────────────────────────────––
+
+    @staticmethod
+    def _camera_cb(event: int, ctx: "MainWin") -> None:
+        if event == amcam.AMCAM_EVENT_IMAGE:
+            try:
+                ctx.hcam.PullImageV2(ctx.buf, 24, None)
+            except amcam.HRESULTException:
+                return  # drop frame
+            ctx.eventImage.emit(event)
+        elif event == amcam.AMCAM_EVENT_STILLIMAGE:
+            try:
+                ctx.hcam.PullStillImageV2(ctx.buf, 24, None)
+            except amcam.HRESULTException:
+                return
+            ctx.eventImage.emit(event)
+
+    # ── Qt slot (runs in GUI thread) ─────────────────────────────────────────
+
+    @pyqtSlot(int)
+    def _on_event_image(self, event: int) -> None:
+        # stride is constant → safe
+        stride = ((self.w * 24 + 31) // 32) * 4
+        qimg = QImage(self.buf, self.w, self.h, stride, QImage.Format_RGB888)
+        # Draw cross lines at center
+        painter = QPainter(qimg)
+        pen = QPen(Qt.red, 1)
+        painter.setPen(pen)
+        cx, cy = self.w // 2, self.h // 2  # image center
+        line_len = 20  # length of line arms, adjust as you like
+        # horizontal line
+        painter.drawLine(cx - line_len, cy, cx + line_len, cy)
+        # vertical line
+        painter.drawLine(cx, cy - line_len, cx, cy + line_len)
+        painter.end()
+        # end overlay
+        #qimg.save("frame.png")
+        """import numpy as np
+
+        arr = np.frombuffer(self.buf, dtype=np.uint8).reshape((self.h, self.w, 3))
+        print(arr)  # Show pixel data
+        import matplotlib.pyplot as plt
+
+        plt.imshow(arr)
+        plt.show()"""
+
+        if event == amcam.AMCAM_EVENT_IMAGE:
+            self.label.setPixmap(QPixmap.fromImage(qimg))
+            self._update_fps()
+        else:  # still image
+            if not hasattr(self, "_snap_win"):
+                self._snap_win = SnapWin(self.w, self.h)
+            self._snap_win.show_frame(qimg)
+
+    # ── Misc callbacks ──────────────────────────────────────────────────────
+
+    def _on_auto_exp_toggled(self, state: int) -> None:
+        if self.hcam:
+            self.hcam.put_AutoExpoEnable(state == Qt.Checked)
+
+    def _update_fps(self) -> None:
+        if not self.cb_fps.isChecked():
+            return
+        self._frame_accum += 1
+        now = time.perf_counter()
+        if now - self._last_tick >= 1.0:
+            fps = self._frame_accum / (now - self._last_tick)
+            self.setWindowTitle(f"{self.camname} – {fps:.1f} fps")
+            self._frame_accum = 0
+            self._last_tick = now
+
+    # ── API for *app.py* ────────────────────────────────────────────────────
+
+    def snap(self):
+        if self.hcam:
+            self.hcam.Snap(0)
+
+    # ── Cleanup ─────────────────────────────────────────────────────────────
+
+    def closeEvent(self, evt):  # noqa: N802 (Qt override)
+        if self.hcam:
+            self.hcam.close()
+            self.hcam = None
+        super().closeEvent(evt)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stand‑alone entry point (for direct testing)  →   $ python -m amcam_qt_app
+# ──────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    w = MainWin()
+    w.show()
+    sys.exit(app.exec())

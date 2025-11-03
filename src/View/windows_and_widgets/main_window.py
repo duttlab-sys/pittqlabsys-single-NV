@@ -12,12 +12,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+from .agilent_8596E_GUI import SpectrumAnalyzerView
+from .display_GUI import Display_View
+from .positioning_stages_GUI import positioning_stages_view
 from PyQt5 import QtGui, QtCore, QtWidgets
 from PyQt5.uic import loadUiType
 from PyQt5.QtCore import QThread, pyqtSlot, Qt
+from PyQt5 import QtCore
+from PyQt5.QtWidgets import QWidget, QSizePolicy, QSpacerItem
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 import pyqtgraph as pg
-
 from src.core import Parameter, Device, Experiment, Probe
 from src.core.experiment_iterator import ExperimentIterator
 from src.core.read_probes import ReadProbes
@@ -211,6 +215,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         super(MainWindow, self).__init__()
         gui_logger.debug("Calling setupUi()")
         self.setupUi(self)
+        self.spectrum_tab = SpectrumAnalyzerView()
+        self.tabWidget.addTab(self.spectrum_tab, "Spectrum Analyzer")
+        self.positioning_tab = positioning_stages_view()
+        self.tabWidget.addTab(self.positioning_tab, "Positioning")
+        self.display_choice = self.positioning_tab.display_choice()
+        self.snapshot_or_live = self.positioning_tab.snapshot_or_live()
+        self.positioning_tab.display_choice_changed.connect(self.update_display_choice)
+        self.positioning_tab.snapshot_mode_changed.connect(self.update_snapshot_mode)
         gui_logger.debug("setupUi() completed successfully")
         
         # Fix for macOS menu bar issue - ensure menu bar is properly attached to main window
@@ -506,14 +518,24 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         else:
             self.probe_file.close()
 
-
-
     def switch_tab(self):
         """
         takes care of the action that happen when switching between tabs
         e.g. activates and deactives probes
         """
         current_tab = str(self.tabWidget.tabText(self.tabWidget.currentIndex()))
+        if current_tab == "Positioning":
+            self.load_display_widget()
+            self.resize(self.sizeHint())
+        else:
+            if hasattr(self, "Display_View_widget") and self.Display_View_widget is not None:
+                self.Display_View_widget.close()
+                self.Display_View_widget.setParent(None)
+                self.Display_View_widget.deleteLater()
+                self.Display_View_widget = None  # prevent multiple deletions
+
+                # Show original contents again
+                self.restore_layout_contents()
         if self.current_experiment is None:
             if current_tab == 'Probes':
                 self.read_probes.start()
@@ -530,6 +552,63 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         else:
             self.log('updating probes / devices disabled while experiment is running!')
+
+    def update_display_choice(self, new_display_choice):
+        print("update_display_choice called")
+        self.display_choice = new_display_choice
+        self.reload_display_widget()
+
+    def update_snapshot_mode(self, mode):
+        print("update_snapshot_mode called", mode)
+        self.snapshot_or_live = mode
+        self.reload_display_widget()
+
+    def reload_display_widget(self):
+        print("reload_display_widget called, snapshot or live:", self.snapshot_or_live)
+        #if hasattr(self, 'Display_View_widget'):
+        self.Display_View_widget.update_choices(self.display_choice, self.snapshot_or_live)
+
+    def remove_and_store_layout_contents(self, layout):
+        self._stored_layout_items = []
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            sub_layout = item.layout()
+            spacer = item.spacerItem()
+
+            if widget:
+                widget.setParent(None)
+                self._stored_layout_items.append(('widget', widget))
+            elif sub_layout:
+                self._stored_layout_items.append(('layout', sub_layout))
+            elif spacer:
+                self._stored_layout_items.append(('spacer', spacer))
+
+    def restore_layout_contents(self):
+        for item_type, item in self._stored_layout_items:
+            if item_type == 'widget':
+                self.verticalLayout_2.addWidget(item)
+                item.show()
+            elif item_type == 'layout':
+                self.verticalLayout_2.addLayout(item)
+            elif item_type == 'spacer':
+                self.verticalLayout_2.addItem(item)
+
+    def load_display_widget(self):
+        print("Loading Display_View_widget...")  # Debug line
+        # Hide original layout contents
+        self.remove_and_store_layout_contents(self.verticalLayout_2)
+        # Create and add display view widget
+        self.Display_View_widget = Display_View(self.display_choice, self.snapshot_or_live)
+        self.Display_View_widget.setMinimumHeight(500)
+        self.Display_View_widget.setMinimumWidth(500)
+
+        # ensure it expands to fill space
+        self.Display_View_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.verticalLayout_2.addWidget(self.Display_View_widget)
+        self.Display_View_widget.show()
+        self.verticalLayout_2.update()
+        self.verticalLayout_2.activate()
 
     def refresh_devices(self):
         """

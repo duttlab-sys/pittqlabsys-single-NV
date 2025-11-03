@@ -16,7 +16,7 @@ class MCLNanoDrive(Device):
     """
     This class implements the Mad City Labs NanoDrive. The class loads the madlib.dll library to communicate with the device.
     """
-    _DEFAULT_SETTINGS = Parameter([Parameter('serial',2850,[2850,2849],'serial of specific Nano Drive. Dutt labs LP100:2849 & HS3:2850 (20 bit systems)'),
+    _DEFAULT_SETTINGS = Parameter([Parameter('serial',2849,[2850,2849],'serial of specific Nano Drive. Dutt labs LP100:2849 & HS3:2850 (20 bit systems)'),
                                    Parameter('x_pos',0,float,'position of x axis in microns'),
                                    Parameter('y_pos', 0, float, 'position of y axis in microns'),
                                    Parameter('z_pos', 0, float, 'position of z axis in microns'),
@@ -56,7 +56,8 @@ class MCLNanoDrive(Device):
                                         Parameter('polarity', 'low-to-high', ['low-to-high', 'high-to-low'],'low-to-high:0, high-to-low:1'),
                                         Parameter('binding', 'read', ['x', 'y', 'z', 'aux', 'read', 'load', 'none'],'axis/event to bind to'),
                                         Parameter('pulse', False, bool,'Value is abitrary! Updating value will trigger 250ns pulse')
-                                       ])
+                                       ]),
+                                   Parameter('server_port', 5001, int, 'server_port'),
                                    ])
 
     def __init__(self, name=None, settings=None):
@@ -326,6 +327,7 @@ class MCLNanoDrive(Device):
             axis = self._axis_to_internal(key)
             self.DLL.MCL_SingleReadN.restype = c_double
             value = self._check_error(self.DLL.MCL_SingleReadN(axis, self.handle))
+            print(value)
 
         elif key == 'read_waveform':    #reads waveform for given axis and stores sensor data in read_waveform
             ArrayType = c_double * self.settings['num_datapoints']  #creates empty array with correct number of datapoints
@@ -413,6 +415,7 @@ class MCLNanoDrive(Device):
         Returns:
             float: Current position in micrometers
         """
+        print(axis)
         if axis not in ['x', 'y', 'z']:
             raise ValueError(f"Invalid axis: {axis}. Must be 'x', 'y', or 'z'")
         return self.read_probes(f'{axis}_pos')
@@ -569,6 +572,7 @@ class MCLNanoDrive(Device):
         raise Exception(message)
     def _check_error(self, value):  #returns inputed value if not an error value. If error value raises error encounted
         check_error = self.mcl_error_dic.get(value, lambda:value)
+        print(check_error)
         return check_error()
 
     def _axis_to_internal(self, axis):
@@ -694,5 +698,5 @@ class MCLNanoDrive(Device):
 
 if __name__ == '__main__':
     nd = MCLNanoDrive()
-    print(nd.is_connected)
-    nd.close()
+    #print(nd.is_connected)
+    #nd.close()
