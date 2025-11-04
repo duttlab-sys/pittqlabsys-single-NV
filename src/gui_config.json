@@ -1,0 +1,237 @@
+{
+    "gui_settings": {
+        "experiments_folder": "",
+        "data_folder": ""
+    },
+    "experiments_hidden_parameters": {},
+    "devices": {
+        "sg384": {
+            "class": "SG384Generator",
+            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\sg384.py",
+            "info": "\n    Stanford Research Systems SG384 concrete implementation.\n    Adds any SG384-specific settings and maps them to SCPI.\n    ",
+            "settings": {
+                "connection_type": "LAN",
+                "ip_address": "192.168.2.217",
+                "port": 5025,
+                "connection_timeout": 10.0,
+                "socket_timeout": 5.0,
+                "visa_resource": "",
+                "baud_rate": 115200,
+                "frequency": 1000000000.0,
+                "power": -10,
+                "phase": 0,
+                "amplitude": -10,
+                "enable_output": false,
+                "enable_modulation": true,
+                "modulation_type": "FM",
+                "modulation_function": "Sine",
+                "pulse_modulation_function": "Square",
+                "modulation_depth": 1000000.0,
+                "dev_width": 1000000.0,
+                "mod_rate": 10000000.0,
+                "sweep_function": "Triangle",
+                "sweep_rate": 1.0,
+                "sweep_deviation": 1000000.0,
+                "sweep_center_frequency": 2870000000.0,
+                "sweep_max_frequency": 4100000000.0,
+                "sweep_min_frequency": 1900000000.0
+            }
+        },
+        "spectrum_analyzer": {
+            "class": "Agilent8596E",
+            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\Agilent8596E.py",
+            "info": null,
+            "settings": {
+                "connection_type": "GPIB",
+                "port": 18,
+                "GPIB_num": 0,
+                "center frequency": 300,
+                "span": 0.2,
+                "sweep time": 256000,
+                "resolution band width": 0.1,
+                "video band width": 1,
+                "video average": 100,
+                "server_port": 5001
+            }
+        },
+        "adwin": {
+            "class": "AdwinGoldDevice",
+            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\adwin_gold.py",
+            "info": "\n    This class implements the ADwin Gold II by booting it with the T11 processor. It does not yet implement TiCO processes.\n    Processes should be written in an ADbasic script and then loaded using this controller (note the inital processes delay set in each script).\n    The processor and priority can be changed for each process and is left to the user writing the ADbasic script.\n    ",
+            "settings": {
+                "process_1": {
+                    "load": "",
+                    "delay": 3000,
+                    "running": false
+                },
+                "process_2": {
+                    "load": "",
+                    "delay": 3000,
+                    "running": false
+                },
+                "process_3": {
+                    "load": "",
+                    "delay": 3000,
+                    "running": false
+                },
+                "process_4": {
+                    "load": "",
+                    "delay": 3000,
+                    "running": false
+                },
+                "process_5": {
+                    "load": "",
+                    "delay": 3000,
+                    "running": false
+                },
+                "process_6": {
+                    "load": "",
+                    "delay": 3000,
+                    "running": false
+                },
+                "process_7": {
+                    "load": "",
+                    "delay": 3000,
+                    "running": false
+                },
+                "process_8": {
+                    "load": "",
+                    "delay": 3000,
+                    "running": false
+                },
+                "process_9": {
+                    "load": "",
+                    "delay": 3000,
+                    "running": false
+                },
+                "process_10": {
+                    "load": "",
+                    "delay": 3000,
+                    "running": false
+                },
+                "server_port": 5003
+            }
+        },
+        "microdrive": {
+            "class": "Newport_CONEX_CC_xy_stage",
+            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\newport_conex_cc.py",
+            "info": null,
+            "settings": {
+                "connection_type": "SERIAL",
+                "xport": 14,
+                "x-address": 1,
+                "yport": 15,
+                "y-address": 1,
+                "x-position": 0,
+                "y-position": 0,
+                "server_port": 5004
+            }
+        },
+        "amscope_camera": {
+            "class": "Amscope_MU_Camera",
+            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\Amscope_MU_Camera.py",
+            "info": "This class implements the Windfreak SynthUSBII. The device plugs into a usb port and is communicated with using pyvisa.",
+            "settings": {
+                "exposure gain": 100,
+                "exposure time": 10000,
+                "brightness": 0,
+                "saturation": 128,
+                "contrast": 0,
+                "Gamma": 100,
+                "Temp": 6503,
+                "Tint": 1000,
+                "Hue": 0,
+                "server_port": 5005
+            }
+        },
+        "nanodrive": {
+            "class": "MCLNanoDrive",
+            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\nanodrive.py",
+            "info": "\n    This class implements the Mad City Labs NanoDrive. The class loads the madlib.dll library to communicate with the device.\n    ",
+            "settings": {
+                "serial": 2849,
+                "x_pos": 49.01204072271929,
+                "y_pos": 67.0161195414037,
+                "z_pos": 36.59552024519127,
+                "read_rate": 2.0,
+                "load_rate": 2.0,
+                "num_datapoints": 1,
+                "axis": "x",
+                "load_waveform": [
+                    0
+                ],
+                "read_waveform": [
+                    0
+                ],
+                "mult_ax": {
+                    "waveform": [
+                        [
+                            0
+                        ],
+                        [
+                            0
+                        ],
+                        [
+                            0
+                        ]
+                    ],
+                    "time_step": 1.0,
+                    "iterations": 1
+                },
+                "Pixel": {
+                    "mode": "low",
+                    "polarity": "low-to-high",
+                    "binding": "read",
+                    "pulse": false
+                },
+                "Line": {
+                    "mode": "low",
+                    "polarity": "low-to-high",
+                    "binding": "load",
+                    "pulse": false
+                },
+                "Frame": {
+                    "mode": "low",
+                    "polarity": "low-to-high",
+                    "binding": "read",
+                    "pulse": false
+                },
+                "Aux": {
+                    "mode": "low",
+                    "polarity": "low-to-high",
+                    "binding": "read",
+                    "pulse": false
+                },
+                "server_port": 5001
+            }
+        },
+        "awg520": {
+            "class": "AWG520Device",
+            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\awg520.py",
+            "info": "Device wrapper for Tektronix AWG520 using your Device framework.",
+            "settings": {
+                "ip_address": "192.168.2.51",
+                "scpi_port": 4000,
+                "ftp_port": 21,
+                "ftp_user": "usr",
+                "ftp_pass": "pw",
+                "seq_file": "scan.seq",
+                "enable_iq": false
+            }
+        },
+        "mux_control": {
+            "class": "MUXControlDevice",
+            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\mux_control.py",
+            "info": "\n    Device wrapper for Arduino-based MUX controller.\n    \n    The MUX controller uses a 74HC4051 8-channel multiplexer to switch between\n    3 different trigger sources:\n    1. Confocal trigger (Y0) - from MCL nanodrive\n    2. CW-ESR trigger (Y1) - from PTS Arduino  \n    3. Pulsed ESR trigger (Y2) - from AWG\n    \n    Hardware Setup:\n    - Arduino pins 2,3,4 control multiplexer select lines S0, S1, S2\n    - Pin 5 (Z) is the common I/O line\n    - Commands: \"1\"=confocal, \"2\"=cw-esr, \"3\"=pulsed\n    ",
+            "settings": {
+                "port": "COM3",
+                "baudrate": 9600,
+                "timeout": 5000,
+                "auto_connect": true
+            }
+        }
+    },
+    "experiments": {},
+    "probes": {},
+    "last_save_path": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\gui_config.json"
+}
