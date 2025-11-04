@@ -32,6 +32,7 @@ tomli==2.0.1
 typing_extensions==4.12.2
 tzdata==2024.1
 zipp==3.19.2
+# Core scientific computing and data handling
 pyqtgraph>=0.12.4
 # Hardware control (optional - only needed for hardware tests)
 ADwin>=0.17.0

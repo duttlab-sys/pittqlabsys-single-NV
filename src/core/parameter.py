@@ -269,13 +269,15 @@ class Parameter(dict):
             valid = True
         elif isinstance(value, dict) and isinstance(valid_values, dict):
             # check that all values actually exist in valid_values
-            # assert value.keys() & valid_values.keys() == value.keys() # python 3 syntax
-            assert set(value.keys()) & set(valid_values.keys()) == set(value.keys())  # python 2
-            # valid = True
-            for k, v in value.items():
-                valid = Parameter.is_valid(v, valid_values[k])
-                if not valid:
-                    break
+            # Allow partial updates - only check that all keys in value exist in valid_values
+            if not set(value.keys()).issubset(set(valid_values.keys())):
+                valid = False
+            else:
+                # valid = True
+                for k, v in value.items():
+                    valid = Parameter.is_valid(v, valid_values[k])
+                    if not valid:
+                        break
 
         elif isinstance(value, dict) and valid_values == Parameter:
             valid = True

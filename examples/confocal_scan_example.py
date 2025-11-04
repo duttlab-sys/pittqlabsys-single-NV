@@ -29,73 +29,138 @@ import time
 sys.path.insert(0, str(Path(__file__).parent / '..'))
 
 
-def create_devices(use_real_hardware=False):
+def create_devices(use_real_hardware=False, config_path=None):
     """
-    Create device instances based on hardware flag.
+    Create device instances using the device config manager.
     
     Args:
         use_real_hardware (bool): If True, use real hardware; if False, use mock hardware
+        config_path (str): Path to config.json file. If None, uses default.
         
     Returns:
-        dict: Dictionary of device instances
+        dict: Dictionary of device instances in the correct format
     """
     if use_real_hardware:
-        print("Using real hardware...")
+        print("Using real hardware from config...")
         try:
-            from src.Controller import MCLNanoDrive, AdwinGoldDevice
-            devices = {
-                'nanodrive': MCLNanoDrive(settings={'serial': 2849}),
-                'adwin': AdwinGoldDevice()
+            from src.core.device_config import load_devices_from_config
+            from pathlib import Path
+            
+            # Use provided config path or default
+            if config_path is None:
+                config_path = Path(__file__).parent.parent / "src" / "config.json"
+            
+            # Load devices from config
+            loaded_devices, failed_devices = load_devices_from_config(config_path)
+            
+            if failed_devices:
+                print(f"⚠️  Some devices failed to load: {list(failed_devices.keys())}")
+                for device_name, error in failed_devices.items():
+                    print(f"  - {device_name}: {error}")
+            
+            if not loaded_devices:
+                print("❌ No devices loaded from config, falling back to mock hardware...")
+                return create_mock_devices()
+            
+            # Convert to the format expected by experiments
+            # Map device names to the keys expected by NanodriveAdwinConfocalScanFast
+            device_mapping = {
+                'nanodrive': 'nanodrive',
+                'adwin': 'adwin'
             }
-            print("✅ Real hardware initialized successfully")
+            
+            devices = {}
+            for device_name, device_instance in loaded_devices.items():
+                if device_name in device_mapping:
+                    mapped_name = device_mapping[device_name]
+                    devices[mapped_name] = {'instance': device_instance}
+                else:
+                    # Keep other devices with their original names for compatibility
+                    devices[device_name] = {'instance': device_instance}
+            
+            print(f"✅ Real hardware initialized successfully: {list(devices.keys())}")
             return devices
+            
         except Exception as e:
-            print(f"❌ Failed to initialize real hardware: {e}")
+            print(f"❌ Failed to load real hardware from config: {e}")
             print("Falling back to mock hardware...")
-            return None
+            return create_mock_devices()
     else:
         print("Using mock hardware...")
-        return None
+        return create_mock_devices()
 
 
-def run_confocal_scan(use_real_hardware=False, save_data=True, show_plot=True):
+def create_mock_devices():
+    """Create mock device instances using our refactored mock devices."""
+    try:
+        from src.Controller import MockMCLNanoDrive, MockAdwinGoldDevice
+        devices = {
+            'nanodrive': {'instance': MockMCLNanoDrive(settings={'serial': 2849})},
+            'adwin': {'instance': MockAdwinGoldDevice()}
+        }
+        print("✅ Mock hardware initialized successfully")
+        return devices
+    except Exception as e:
+        print(f"❌ Failed to initialize mock hardware: {e}")
+        raise
+
+
+def test_experiment_creation():
+    """Test that the experiment can be created successfully."""
+    try:
+        # Create mock devices
+        devices = create_mock_devices()
+        
+        # Create experiment
+        from src.Model.experiments.nanodrive_adwin_confocal_scan_fast import NanodriveAdwinConfocalScanFast
+        experiment = NanodriveAdwinConfocalScanFast(
+            devices=devices,
+            name="ConfocalScan_Test",
+            settings={
+                'scan_range': {'x_start': 30.0, 'x_stop': 40.0, 'y_start': 30.0, 'y_stop': 40.0},
+                'scan_points': {'x_points': 5, 'y_points': 5},
+                'integration_time': 0.1,
+                'settle_time': 0.01
+            }
+        )
+        
+        print("✅ Experiment created successfully")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Test failed: {e}")
+        return False
+
+
+def run_confocal_scan(use_real_hardware=False, save_data=True, show_plot=True, config_path=None):
     """
-    Run a confocal scan experiment.
+    Run a confocal scan experiment using ConfocalScan_Fast.
     
     Args:
         use_real_hardware (bool): Whether to use real hardware
         save_data (bool): Whether to save scan data
         show_plot (bool): Whether to show the plot
+        config_path (str): Path to config.json file
         
     Returns:
         dict: Scan results or None if failed
     """
     print("\n" + "="*60)
-    print("CONFOCAL SCAN EXAMPLE")
+    print("CONFOCAL SCAN FAST EXAMPLE")
     print("="*60)
     
     print("\nInitializing ConfocalScan_Fast experiment...")
     
     # Check if we can import the experiment class
     try:
-        from src.Model.experiments.confocal import ConfocalScan_Fast
+        from src.Model.experiments.nanodrive_adwin_confocal_scan_fast import NanodriveAdwinConfocalScanFast
     except Exception as e:
-        print(f"❌ Cannot import ConfocalScan_Fast: {e}")
+        print(f"❌ Cannot import NanodriveAdwinConfocalScanFast: {e}")
         print("This usually means required hardware devices are not available on this platform.")
         return None
     
-    # Create devices - use the mock devices from Controller module
-    from src.Controller import MCLNanoDrive, AdwinGoldDevice
-    devices = {
-        'nanodrive': {'instance': MCLNanoDrive(settings={'serial': 2849})},
-        'adwin': {'instance': AdwinGoldDevice()}
-    }
-    
-    if use_real_hardware:
-        # Try to use real hardware if requested
-        real_devices = create_devices(use_real_hardware)
-        if real_devices is not None:
-            devices = real_devices
+    # Create devices using device config manager
+    devices = create_devices(use_real_hardware, config_path)
     
     # Define scan parameters - using smaller area for faster testing
     scan_settings = {
@@ -125,9 +190,9 @@ def run_confocal_scan(use_real_hardware=False, save_data=True, show_plot=True):
     print("Setting up scan...")
     
     try:
-        experiment = ConfocalScan_Fast(
+        experiment = NanodriveAdwinConfocalScanFast(
             devices=devices,
-            name="ConfocalScan_Example",
+            name="ConfocalScan_Fast_Example",
             settings=scan_settings,
             log_function=print
         )
@@ -178,9 +243,11 @@ def run_confocal_scan(use_real_hardware=False, save_data=True, show_plot=True):
 def save_confocal_csv_data(experiment, scan_settings, use_real_hardware):
     """Save confocal scan data in CSV format for easy analysis."""
     try:
-        # Create output directory
-        output_dir = Path(__file__).parent / "scan_data"
-        output_dir.mkdir(exist_ok=True)
+        # Use configured data folder
+        from src.core.helper_functions import get_configured_data_folder
+        base_data_dir = get_configured_data_folder()
+        output_dir = base_data_dir / "confocal_scans"
+        output_dir.mkdir(parents=True, exist_ok=True)
         
         # Generate timestamp
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -322,21 +389,36 @@ def generate_confocal_plot(experiment, scan_settings, use_real_hardware):
 
 def main():
     """Main function to parse arguments and run the scan."""
-    parser = argparse.ArgumentParser(description="Run a confocal scan example")
+    parser = argparse.ArgumentParser(description="Run a confocal scan fast example")
     parser.add_argument("--real-hardware", action="store_true", 
                        help="Use real hardware instead of mock hardware")
     parser.add_argument("--no-plot", action="store_true",
                        help="Skip plotting the results")
     parser.add_argument("--no-save", action="store_true",
                        help="Skip saving scan data")
+    parser.add_argument("--test-only", action="store_true",
+                       help="Only test experiment creation, do not run full scan")
+    parser.add_argument("--config", type=str, default=None,
+                       help="Path to config.json file (default: src/config.json)")
     
     args = parser.parse_args()
+    
+    # Test experiment creation first
+    if args.test_only:
+        print("🧪 Testing experiment creation...")
+        if test_experiment_creation():
+            print("✅ Experiment creation test passed!")
+            return 0
+        else:
+            print("❌ Experiment creation test failed!")
+            return 1
     
     # Run the scan
     results = run_confocal_scan(
         use_real_hardware=args.real_hardware,
         save_data=not args.no_save,
-        show_plot=not args.no_plot
+        show_plot=not args.no_plot,
+        config_path=args.config
     )
     
     if results is None:
