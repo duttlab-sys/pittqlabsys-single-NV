@@ -1,5 +1,5 @@
 # Versin: 50.19367.20210815
-# We use ctypes to call into the dll/libamcam.so/libamcam.dylib API,
+# We use ctypes to call into the amcam.dll/libamcam.so/libamcam.dylib API,
 # the python class Amcam is a thin wrapper class to the native api of amcam.dll/libamcam.so/libamcam.dylib.
 # So the manual en.html(English) and hans.html(Simplified Chinese) are also applicable for programming with amcam.py.
 # See them in the 'doc' directory:
@@ -7,7 +7,7 @@
 #    (2) hans.html, Simplified Chinese
 #
 import sys, ctypes, os.path
-import weakref
+
 AMCAM_MAX = 128
 
 AMCAM_FLAG_CMOS                = 0x00000001          # cmos sensor
@@ -530,28 +530,12 @@ class Amcam:
 
     @staticmethod
     def __eventCallbackFun(nEvent, ctx):
-        try:
-            real_ctx = ctx() if isinstance(ctx, weakref.ReferenceType) else ctx
-            if real_ctx is None:
-                return  # Widget was deleted, exit safely
-
-            real_ctx.__callbackFun(nEvent)  # safe to call now
-        except Exception as e:
-            print(f"Callback error: {e}")
+        if ctx:
+            ctx.__callbackFun(nEvent)
 
     def __callbackFun(self, nEvent):
-        ctx = self.__ctx() if isinstance(self.__ctx, weakref.ReferenceType) else self.__ctx
-        if ctx is not None:
-            self.__fun(nEvent, ctx)
-
-    """@staticmethod
-    def __eventCallbackFun(nEvent, ctx):
-        if ctx:
-            ctx.__callbackFun(nEvent)"""
-
-    """def __callbackFun(self, nEvent):
         if self.__fun:
-            self.__fun(nEvent, self.__ctx)"""
+            self.__fun(nEvent, self.__ctx)
 
     def StartPullModeWithCallback(self, fun, ctx):
         self.__fun = fun
@@ -1278,11 +1262,9 @@ class Amcam:
             try:
                 dir = os.path.dirname(os.path.realpath(__file__))
                 if sys.platform == 'win32':
-                    _this_dir = os.path.dirname(__file__)
-                    cls.__lib = ctypes.windll.LoadLibrary(os.path.join(_this_dir, 'amcam.dll'))
+                    cls.__lib = ctypes.windll.LoadLibrary(os.path.join(dir, 'amcam.dll'))
                 elif sys.platform.startswith('linux'):
-                    _this_dir = os.path.dirname(__file__)
-                    cls.__lib = ctypes.cdll.LoadLibrary(os.path.join(_this_dir, 'libamcam.so'))
+                    cls.__lib = ctypes.cdll.LoadLibrary(os.path.join(dir, 'libamcam.so'))
                 else:
                     cls.__lib = ctypes.cdll.LoadLibrary(os.path.join(dir, 'libamcam.dylib'))
             except OSError:
@@ -1290,12 +1272,9 @@ class Amcam:
 
             if cls.__lib is None:
                 if sys.platform == 'win32':
-                    _this_dir = os.path.dirname(__file__)
-                    cls.__lib = ctypes.windll.LoadLibrary(os.path.join(_this_dir, 'amcam.dll'))
+                    cls.__lib = ctypes.windll.LoadLibrary('amcam.dll')
                 elif sys.platform.startswith('linux'):
-                    _this_dir = os.path.dirname(__file__)
-                    cls.__lib = ctypes.cdll.LoadLibrary(os.path.join(_this_dir, 'libamcam.so'))
-
+                    cls.__lib = ctypes.cdll.LoadLibrary('libamcam.so')
                 else:
                     cls.__lib = ctypes.cdll.LoadLibrary('libamcam.dylib')
 

@@ -15,8 +15,8 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 from __future__ import annotations
-from src.Controller import amcam
-
+#from src.Controller import amcam
+from src.Controller import toupcam
 from src.core import Device,Parameter
 
 _DEFAULT_AUTO_EXPOSURE_TARGET  = 120
@@ -163,13 +163,16 @@ class Amscope_MU_Camera(Device):
 
     def __init__(self, name=None, settings=None):
         # the object of Amcam must be obtained by classmethod Open or OpenByIndex, it cannot be obtained by obj = amcam.Amcam()
-        cams = amcam.Amcam.EnumV2()
+        ###cams = amcam.Amcam.EnumV2()
+        cams = toupcam.Toupcam.EnumV2()
         if not cams:
             print("no camera found")
 
         try:
-            self.amscope_cam = amcam.Amcam.Open(cams[0].id)
-        except amcam.HRESULTException as ex:
+            ###self.amscope_cam = amcam.Amcam.Open(cams[0].id)
+            self.amscope_cam = toupcam.Toupcam.Open(cams[0].id)
+        ###except amcam.HRESULTException as ex:
+        except toupcam.HRESULTException as ex:
             print("failed to open camera", ex)
             return
 

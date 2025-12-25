@@ -152,5 +152,6 @@ class spex_spectrometer(Device):
 if __name__ == "__main__":
     s=spex_spectrometer()
     s.update({"gain": 1.5})
+    print('hello i ran')
     print(s.read_probes("gain"))
     s.close()

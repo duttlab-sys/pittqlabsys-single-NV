@@ -20,4 +20,4 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src'
 from src.app import launch_gui
 
 if __name__ == "__main__":
-    launch_gui() 
+    launch_gui()

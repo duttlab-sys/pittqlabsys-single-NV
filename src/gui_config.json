@@ -37,23 +37,6 @@
                 "sweep_min_frequency": 1900000000.0
             }
         },
-        "spectrum_analyzer": {
-            "class": "Agilent8596E",
-            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\Agilent8596E.py",
-            "info": null,
-            "settings": {
-                "connection_type": "GPIB",
-                "port": 18,
-                "GPIB_num": 0,
-                "center frequency": 300,
-                "span": 0.2,
-                "sweep time": 256000,
-                "resolution band width": 0.1,
-                "video band width": 1,
-                "video average": 100,
-                "server_port": 5001
-            }
-        },
         "adwin": {
             "class": "AdwinGoldDevice",
             "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\adwin_gold.py",
@@ -150,9 +133,9 @@
             "info": "\n    This class implements the Mad City Labs NanoDrive. The class loads the madlib.dll library to communicate with the device.\n    ",
             "settings": {
                 "serial": 2849,
-                "x_pos": 49.011882872453526,
-                "y_pos": 67.0153974446786,
-                "z_pos": 36.593534485198745,
+                "x_pos": 0.013695474020480524,
+                "y_pos": 0.01917939786698018,
+                "z_pos": 31.908822958849473,
                 "read_rate": 2.0,
                 "load_rate": 2.0,
                 "num_datapoints": 1,
@@ -222,10 +205,9 @@
         "mux_control": {
             "class": "MUXControlDevice",
             "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\mux_control.py",
-            "info": "\n    Device wrapper for Arduino-based MUX controller.\n    \n    The MUX controller uses a 74HC4051 8-channel multiplexer to switch between\n    3 different trigger sources:\n    1. Confocal trigger (Y0) - from MCL nanodrive\n    2. CW-ESR trigger (Y1) - from PTS Arduino  \n    3. Pulsed ESR trigger (Y2) - from AWG\n    \n    Hardware Setup:\n    - Arduino pins 2,3,4 control multiplexer select lines S0, S1, S2\n    - Pin 5 (Z) is the common I/O line\n    - Commands: \"1\"=confocal, \"2\"=cw-esr, \"3\"=pulsed\n    ",
+            "info": "\n    Device wrapper for MUX controller.\n    \n    The MUX controller uses a multiplexer to switch between\n    3 different trigger sources:\n    1. Confocal trigger - from MCL nanodrive\n    2. CW-ESR trigger - from PTS Arduino  (old setup)\n    3. Pulsed ESR trigger - from AWG\n    - Commands: \"1\"=confocal, \"2\"=cw-esr, \"3\"=pulsed\n    ",
             "settings": {
-                "port": "COM3",
-                "baudrate": 9600,
+                "port": 502,
                 "timeout": 5000,
                 "auto_connect": true
             }

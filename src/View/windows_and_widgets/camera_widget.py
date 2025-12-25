@@ -5,7 +5,8 @@ import sys
 import ctypes
 import time
 from typing import Optional
-from src.Controller import amcam
+#from src.Controller import amcam
+from src.Controller import toupcam
 from src.Controller import Amscope_MU_Camera
 from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen
@@ -103,7 +104,8 @@ class Amscope_Camera_View(QWidget):
     # ── Camera setup ──────────────────────────────────────────────────────────
 
     def _init_camera(self) -> None:
-        cams = amcam.Amcam.EnumV2()
+        #cams = amcam.Amcam.EnumV2()
+        cams = toupcam.Toupcam.EnumV2()
         if not cams:
             self.setWindowTitle("No camera found")
             self.cb_auto.setEnabled(False)
@@ -115,7 +117,8 @@ class Amscope_Camera_View(QWidget):
 
         try:
             self.hcam = Amscope_MU_Camera.Amscope_MU_Camera()
-        except amcam.HRESULTException as ex:
+        #except amcam.HRESULTException as ex:
+        except toupcam.HRESULTException as ex:
             QMessageBox.warning(self, "", f"Failed to open camera (hr=0x{ex.hr:x})")
             return
 
@@ -126,7 +129,8 @@ class Amscope_Camera_View(QWidget):
 
         # negotiate RGB/BGR for zero‑copy into QImage
         if sys.platform != "win32":
-            self.hcam.put_Option(amcam.AMCAM_OPTION_BYTEORDER, 1)  # BGR on Linux/mac
+            #self.hcam.put_Option(amcam.AMCAM_OPTION_BYTEORDER, 1)  # BGR on Linux/mac
+            self.hcam.put_Option(toupcam.TOUPCAM_OPTION_BYTEORDER, 1)  # BGR on Linux/mac
 
         # internal buffer (mutable)
         stride = ((self.w * 24 + 31) // 32) * 4
@@ -146,7 +150,8 @@ class Amscope_Camera_View(QWidget):
             # We use:
             self_ref = weakref.ref(self)  # weak reference
             self.hcam.StartPullModeWithCallback(self._camera_cb, self_ref)
-        except amcam.HRESULTException as ex:
+        #except amcam.HRESULTException as ex:
+        except toupcam.HRESULTException as ex:
             QMessageBox.warning(self, "", f"Stream start failed (hr=0x{ex.hr:x})")
             return
 
@@ -168,16 +173,20 @@ class Amscope_Camera_View(QWidget):
 
     @staticmethod
     def _camera_cb(event: int, ctx: "Amscope_Camera_View") -> None:
-        if event == amcam.AMCAM_EVENT_IMAGE:
+        #if event == amcam.AMCAM_EVENT_IMAGE:
+        if event == toupcam.TOUPCAM_EVENT_IMAGE:
             try:
                 ctx.hcam.PullImageV2(ctx.buf, 24, None)
-            except amcam.HRESULTException:
+            #except amcam.HRESULTException:
+            except toupcam.HRESULTException:
                 return  # drop frame
             ctx.eventImage.emit(event)
-        elif event == amcam.AMCAM_EVENT_STILLIMAGE:
+        #elif event == amcam.AMCAM_EVENT_STILLIMAGE:
+        elif event == toupcam.TOUPCAM_EVENT_STILLIMAGE:
             try:
                 ctx.hcam.PullStillImageV2(ctx.buf, 24, None)
-            except amcam.HRESULTException:
+            #except amcam.HRESULTException:
+            except toupcam.HRESULTException:
                 return
             ctx.eventImage.emit(event)
 
@@ -189,7 +198,8 @@ class Amscope_Camera_View(QWidget):
         qimg = QImage(self.buf, self.w, self.h, stride, QImage.Format_RGB888)
         # qimg.save("frame.png")
 
-        if event == amcam.AMCAM_EVENT_IMAGE:
+        #if event == amcam.AMCAM_EVENT_IMAGE:
+        if event == toupcam.TOUPCAM_EVENT_IMAGE:
             pixmap = QPixmap.fromImage(qimg)
             self.label.setPixmap(pixmap)
             self._update_fps()

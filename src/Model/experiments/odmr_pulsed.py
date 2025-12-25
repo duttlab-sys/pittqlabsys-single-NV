@@ -29,8 +29,13 @@ from src.Model.awg_file import AWGFile
 from src.Model.sequence import Sequence
 from src.Model.pulses import Pulse
 from src.Controller.awg520 import AWG520Device
+from src.Controller.Proteus_device import ProteusDevice
 from src.Controller.adwin_gold import AdwinGoldDevice
-
+import numpy as np
+# testing aom with worst case scenario: longest pulse durations and shortest waiting time:
+# from scc papers, longest shelving is 300 ns, longest ionization is 500 ns, short readout: 3ms, and short initialization 1 us
+# Connect to instrument(PXI)
+sid = 6  # PXI slot of AWT on chassis
 
 class ODMRPulsedExperiment(Experiment):
     """
@@ -84,7 +89,7 @@ class ODMRPulsedExperiment(Experiment):
     ]
     
     _DEVICES = {
-        'awg520': 'awg520',
+        'proteus': 'proteus',
         'adwin': 'adwin',
         'sg384': 'sg384'  # String reference to device loaded from config
     }
@@ -94,13 +99,18 @@ class ODMRPulsedExperiment(Experiment):
     def __init__(self, devices=None, experiments=None, name=None, settings=None, log_function=None, data_path=None, config_path: Optional[Path] = None):
         """Initialize the ODMR Pulsed experiment."""
         super().__init__(name=name, settings=settings, devices=devices, sub_experiments=experiments, log_function=log_function, data_path=data_path)
-        
+
         # Setup logging
         self.logger = logging.getLogger(__name__)
+        self.repeat_count = None
         
         # Configuration
-        self.config_path = config_path or self.get_config_path("config.json")
+        self.config_path = config_path or self.get_config_path("D:\\Duttlab\\Experiments\\AQuISS_default_save_location\\experiments_auto_generated\\ODMRPulsedExperiment.json")
         self.config = self._load_config()
+        # self.adw = self.devices['adwin']['instance']
+        #self.proteus = self.devices['proteus']['instance']
+        # self.ag384 = self.devices['sg384']['instance']
+        self.proteus = ProteusDevice()
         
         # Sequence components
         self.sequence_parser = SequenceTextParser()
@@ -112,7 +122,7 @@ class ODMRPulsedExperiment(Experiment):
             connection_file=str(connection_file),
             config_file=str(self.config_path)
         )
-        
+
         self.awg_optimizer = AWG520SequenceOptimizer()
         
         # Experiment parameters (will be set from _DEFAULT_SETTINGS)
@@ -130,7 +140,7 @@ class ODMRPulsedExperiment(Experiment):
         self.scan_sequences = []
         self.current_scan_point = 0
         
-        # ADwin parameters (from your code)
+        # ADwin parameters
         self.count_time = 300             # ns
         self.reset_time = 2000            # ns
         self.repetitions_per_point = 50000  # 50K reps for statistics
@@ -168,18 +178,26 @@ class ODMRPulsedExperiment(Experiment):
         try:
             # Parse sequence text using the sequence language parser
             self.sequence_description = self.sequence_parser.parse_text(sequence_text)
-            
+            print(f"Sequence description: {self.sequence_description}")
+            self.repeat_count = self.sequence_description.repeat_count
             if self.sequence_description:
                 self.logger.info(f"Sequence loaded: {self.sequence_description.name}")
+                print(f"Sequence loaded: {self.sequence_description.name}")
                 self.logger.info(f"Variables: {len(self.sequence_description.variables)}")
+                print(f"Variables: {len(self.sequence_description.variables)}")
                 self.logger.info(f"Pulses: {len(self.sequence_description.pulses)}")
+                print(f"Pulses: {len(self.sequence_description.pulses)}")
+                self.logger.info(f"Markers: {len(self.sequence_description.markers)}")
+                print(f"MKRs: {len(self.sequence_description.markers)}")
                 return True
             else:
                 self.logger.error("Failed to parse sequence text")
+                print("Failed to parse sequence text")
                 return False
                 
         except Exception as e:
             self.logger.error(f"Error loading sequence: {e}")
+            print(f"Error loading sequence: {e}")
             return False
     
     def load_sequence_from_file(self, sequence_file: Path) -> bool:
@@ -228,12 +246,16 @@ class ODMRPulsedExperiment(Experiment):
             if not self.sequence_description:
                 self.logger.error("No sequence description loaded")
                 return False
-            
+            print("before building scan sequences")
             # Build scan sequences
             self.scan_sequences = self.sequence_builder.build_scan_sequences(
                 self.sequence_description
             )
-            
+            print("after building scan sequences")
+            print(self.scan_sequences)
+            """
+            for i, sequence in enumerate(self.scan_sequences):
+                #print("sequences before calibration")
             # Apply hardware calibration
             for i, sequence in enumerate(self.scan_sequences):
                 calibrated_sequence = self.hardware_calibrator.calibrate_sequence(
@@ -241,6 +263,8 @@ class ODMRPulsedExperiment(Experiment):
                     self.sequence_description.sample_rate
                 )
                 self.scan_sequences[i] = calibrated_sequence
+                print("sequences after calibration")
+                print(self.scan_sequences[i])"""
             
             self.logger.info(f"Built {len(self.scan_sequences)} scan sequences")
             return True
@@ -248,102 +272,277 @@ class ODMRPulsedExperiment(Experiment):
         except Exception as e:
             self.logger.error(f"Error building scan sequences: {e}")
             return False
-    
+
     def generate_awg_files(self) -> bool:
         """
-        Generate AWG520 waveform and sequence files using the proper pipeline.
-        
-        Returns:
-            True if files generated successfully
+        Generate Proteus AWG waveforms with maximum timing resolution.
+        One continuous waveform per channel.
+        one segment and one task entry per channel.
+        64-sample alignment is applied at the end of each waveform.
         """
+
+        def prepare_markers_for_tabor(markers_array: np.ndarray) -> np.ndarray:
+            """
+            Correct Proteus marker packing for 16-bit DAC mode.
+            markers_array: 1 marker value per waveform sample (0 or 255)
+            """
+
+            # Convert to binary 0/1
+            m = (markers_array > 0).astype(np.uint8)
+
+            # Ensure multiple of 4 samples
+            if len(m) % 4 != 0:
+                m = np.pad(m, (0, 4 - len(m) % 4))
+
+            # One marker byte per 4 waveform samples
+            marker_bytes = np.zeros(len(m) // 4, dtype=np.uint8)
+
+            for i in range(len(marker_bytes)):
+                block = m[i * 4:(i + 1) * 4]
+
+                if np.any(block):
+                    # Marker 1 ON for all 4 samples → 0b00010001
+                    marker_bytes[i] = 0x11
+                else:
+                    marker_bytes[i] = 0x00
+
+            return marker_bytes
+
         try:
             if not self.scan_sequences:
                 self.logger.error("No scan sequences available")
                 return False
-            
-            # Create AWG file handler
-            awg_file = AWGFile(out_dir=self.output_dir)
-            
-            # Generate waveforms for each sequence using the proper pipeline
-            waveform_files = []
-            for i, sequence in enumerate(self.scan_sequences):
-                # Use AWG520SequenceOptimizer to properly optimize the sequence
-                optimized_sequence = self.awg_optimizer.optimize_sequence_for_awg520(sequence)
-                
-                # Get waveform data from the optimized sequence
-                waveform_data = optimized_sequence.get_waveform_data()
-                
-                # Generate waveform files for each channel
-                for channel in [1, 2]:  # AWG520 has 2 channels
-                    # Get the appropriate waveform data for this channel
-                    if f"channel_{channel}" in waveform_data:
-                        iq_data = waveform_data[f"channel_{channel}"]
+            # ------------------------------------------------------------
+            # DAC configuration
+            # ------------------------------------------------------------
+            max_dac = 65535
+            half_dac = max_dac // 2
+            ALIGNMENT = 64  # Proteus requirement (segment length)
+
+            # ------------------------------------------------------------
+            # Determine all channels, initialize buffers
+            # ------------------------------------------------------------
+            all_channels = set()
+            channels = set()
+            marker_indices = set()
+            marker_channels = set()
+            for sequence in self.scan_sequences:
+                # ++++++++++++++++++++++
+                print(f"to waveform output: {sequence.to_waveform()}")
+                # ++++++++++++++++++++++
+                for _, pulse_ in enumerate(sequence.pulses):
+                    pulse = pulse_[1]
+                    ch = int(pulse.name.split("_")[-1])
+                    channels.add(ch)
+                    all_channels.add(ch)
+
+                for marker in sequence.markers:
+                    mkr_index = int(marker.name.split('_')[-2])
+                    marker_indices.add(mkr_index)
+                    mk_ch = int(marker.name.split("_")[-1])
+                    marker_channels.add(mk_ch)
+                    all_channels.add(mk_ch)
+
+            print(f"channels: {channels}")
+
+            channel_waveforms = {
+                ch: [] for ch in all_channels
+            }
+            channel_markers = {
+                ch: [] for ch in all_channels
+            }
+            for ch in all_channels:
+                self.proteus.driver.set_channel(ch)
+                self.proteus.driver.delete_all_segment()
+                analog_voltage = 1
+                self.proteus.driver.set_voltage(analog_voltage)
+                sampleRateDAC = 1E9
+                self.proteus.driver.apply_sampling_configuration(sampleRateDAC)
+
+            # ------------------------------------------------------------
+            # Build continuous waveform per channel (sample-accurate)
+            # ------------------------------------------------------------
+            for sequence in self.scan_sequences:
+                seq_waveforms = sequence.to_waveform()
+                for ch, data in seq_waveforms.items():
+                    envelope = data["envelope"]
+                    markers = data["markers"]
+                    if not np.all(markers == 0):
+                        print(f"channel {ch}: Found non-zero markers")
+                        print(f"unique values {np.unique(markers)}")
+
+                    channel_waveforms[ch].append(envelope)
+                    channel_markers[ch].append(markers)
+            # ------------------------------------------------------------
+            # Upload one segment per channel
+            # ------------------------------------------------------------
+            segment_index = 1
+            segment_for_channel = {}
+
+            for ch in sorted(all_channels):
+                self.proteus.driver.set_channel(ch)
+
+                waveform = np.concatenate(channel_waveforms[ch])
+                print(f"waveform: {waveform}")
+
+                # Apply required alignment
+                rem = len(waveform) % ALIGNMENT
+                print(f"rem: {rem}")
+                if rem:
+                    waveform = np.pad(waveform, (0, ALIGNMENT - rem))
+                    print(f"waveform: {waveform}")
+
+                # Scale to DAC
+                dac_wave = np.clip(waveform, -1.0, 1.0)
+                dac_wave = ((dac_wave + 1.0) * half_dac).astype(np.uint16)
+
+                # Define and select segment
+                self.proteus.driver.define_trace(segment_index, len(dac_wave))
+                self.proteus.driver.select_segment(segment_index)
+
+                # Upload waveform
+                self.proteus.driver.write_trace_data(dac_wave)  # write, and wait while *OPC completes
+                resp = self.proteus.driver.query_error()
+                print('analog upload result: "{0}" after writing trace binary values'.format(resp))
+
+                segment_for_channel[ch] = segment_index
+                # Handle markers for this channel
+                if ch in channel_markers:
+                    markers = np.concatenate(channel_markers[ch])
+                    print(f"\n=== MARKER VALUE ANALYSIS ===")
+                    print(f"Markers dtype: {markers.dtype}")
+                    print(f"Min value: {np.min(markers)}")
+                    print(f"Max value: {np.max(markers)}")
+                    print(f"Unique values: {np.unique(markers)}")
+
+                    rem = len(waveform) % ALIGNMENT
+                    if rem:
+                        waveform_padded_len = len(waveform) + (ALIGNMENT - rem)
                     else:
-                        # Fallback: use the first available waveform
-                        iq_data = list(waveform_data.values())[0] if waveform_data else np.zeros(1000)
-                    
-                    # Generate marker data (this would come from the sequence markers)
-                    marker_data = np.zeros(len(iq_data), dtype=int)
-                    
-                    # Generate waveform file
-                    wfm_path = awg_file.write_waveform(
-                        iq_data, 
-                        marker_data,
-                        f"scan_point_{i:03d}",
-                        channel=channel
-                    )
-                    waveform_files.append(wfm_path)
-                    self.logger.info(f"Generated waveform: {wfm_path}")
-            
-            # Generate sequence file using the optimized sequence entries
-            if self.scan_sequences:
-                # Use the first sequence to get the optimized sequence entries
-                first_sequence = self.scan_sequences[0]
-                optimized_sequence = self.awg_optimizer.optimize_sequence_for_awg520(first_sequence)
-                sequence_entries = optimized_sequence.get_sequence_entries()
-                
-                # Convert to the format expected by AWGFile.write_sequence
-                seq_entries = []
-                for i, entry in enumerate(sequence_entries):
-                    # Format: ch1_wfm, ch2_wfm, repeat, wait, goto, logic
-                    seq_entry = (
-                        f"scan_point_{i:03d}_1.wfm",  # ch1_wfm
-                        f"scan_point_{i:03d}_2.wfm",  # ch2_wfm
-                        self.repetitions_per_point,    # repeat count
-                        0,                             # wait (no wait)
-                        (i + 1) % len(sequence_entries) + 1,  # goto next
-                        0                              # logic (no logic)
-                    )
-                    seq_entries.append(seq_entry)
-                
-                # Create sequence file
-                seq_path = awg_file.write_sequence(
-                    seq_entries,
-                    "odmr_pulsed_scan"
-                )
-                
-                self.logger.info(f"Generated sequence file: {seq_path}")
-            
+                        waveform_padded_len = len(waveform)
+
+                    print(f"Waveform after padding: {waveform_padded_len} samples")
+                    print(f"Markers before padding: {len(markers)} samples")
+
+                    # Now pad/truncate markers to match waveform length
+                    if len(markers) < waveform_padded_len:
+                        # Pad markers with zeros
+                        markers = np.pad(markers, (0, waveform_padded_len - len(markers)), mode='constant')
+                        print(f"Markers padded to match waveform: {len(markers)} samples")
+                    elif len(markers) > waveform_padded_len:
+                        # Truncate markers
+                        markers = markers[:waveform_padded_len]
+                        print(f"Markers truncated to match waveform: {len(markers)} samples")
+                    else:
+                        print(f"Markers already match waveform length")
+
+                    if not np.all(markers == 0):
+
+                        # Convert to uint8
+                        markers = markers.astype(np.uint8)
+
+                        # Now prepare for Tabor
+                        tabor_markers = prepare_markers_for_tabor(markers)
+
+                        # For 16-bit mode, marker bytes should be waveform_bytes / 4
+                        expected_marker_bytes = len(dac_wave) // 4
+                        actual_marker_bytes = len(tabor_markers)
+
+                        if actual_marker_bytes != expected_marker_bytes:
+                            if actual_marker_bytes < expected_marker_bytes:
+                                tabor_markers = np.pad(tabor_markers, (0, expected_marker_bytes - actual_marker_bytes),
+                                                       mode='constant')
+                            else:
+                                tabor_markers = tabor_markers[:expected_marker_bytes]
+
+                        self.proteus.driver.write_marker_data(tabor_markers)
+                        resp = self.proteus.driver.query_error()
+                        print(f'Marker upload result: {resp}')
+                        # proteus P1284M only has 1 marker per channel, for other awgs, please implement code that handels that
+                        # I have already coded the marker index here: mkr_index = int(marker.name.split('_')[-2]) so if the user
+                        # gives marker, laser_int_1 on channel 4 at 0ns, 500ns then you know whatever is after laser_init_ is the index
+                        marker_index = 1
+                        self.proteus.driver.set_marker(marker_index)
+                        # Verify Proteus marker settings
+                        resp = self.proteus.driver.get_marker()
+                        print(f"Selected marker: {resp}")
+                        resp = self.proteus.driver.get_marker_state()
+                        print(f"Marker state: {resp}")
+                        resp = self.proteus.driver.query_error()
+                        print(f"System error: {resp}")
+
+                        resp = self.proteus.driver.get_marker_ptop_voltage()
+                        print(f"Marker voltage PTOP setting: {resp}")
+
+                        resp = self.proteus.driver.get_marker_voltage()
+                        print(f"Marker voltage LEV setting: {resp}")
+                        self.proteus.driver.set_marker_ptop_voltage(0.5)
+                        resp = self.proteus.driver.get_marker_ptop_voltage()
+                        print(f"Marker voltage PTOP setting: {resp}")
+                        resp = self.proteus.driver.get_marker_voltage_offset()
+                        print(f"Marker voltage offset setting: {resp}")
+                        self.proteus.driver.set_marker_voltage_offset(0.347)
+                        resp = self.proteus.driver.get_marker_voltage_offset()
+                        print(f"Marker voltage offset setting: {resp}")
+
+                        # Check for errors
+                        resp = self.proteus.driver.query_error()
+                        print(f'Marker upload result: {resp}')
+                    else:
+                        print(f"Channel {ch}: Markers are all zeros, skipping marker upload")
+
+                segment_index += 1
+
+            # ------------------------------------------------------------
+            # Build ONE task entry per channel
+            # ------------------------------------------------------------
+
+            # Task must be set per channel
+            for ch in sorted(all_channels):
+                self.proteus.driver.set_channel(ch)
+                print(f"state before: {self.proteus.driver.get_continuous_run_state()}")
+                self.proteus.driver.set_continuous_run(0)
+                print(f"state after: {self.proteus.driver.get_continuous_run_state()}")
+                task_table_length = 1
+                self.proteus.driver.set_task_table_length(task_table_length)
+                self.proteus.driver.set_task_number(1)
+                self.proteus.driver.set_task_type("SING")
+                self.proteus.driver.set_task_loop(1)
+                self.proteus.driver.set_next1_task(0)
+                self.proteus.driver.set_task_segment_number(segment_for_channel[ch])
+                #self.proteus.driver.set_task_loop(self.repeat_count)
+                self.proteus.driver.write_composer_array_to_task_table()
+
+                # ------------------------------------------------------------
+                # Enable TASK mode and output
+                # ------------------------------------------------------------
+            self.proteus.driver.set_task_sync()
+            for ch in sorted(all_channels):
+                self.proteus.driver.set_channel(ch)
+                self.proteus.driver.set_marker(1)
+                self.proteus.driver.set_marker_state('ON')
+                self.proteus.driver.set_output("ON")
+                self.proteus.driver.set_waveform_type("TASK")
+            self.proteus.driver._close()
             return True
-            
         except Exception as e:
-            self.logger.error(f"Error generating AWG files: {e}")
+            self.logger.exception("Error generating AWG files")
             return False
-    
+
     def show_sequence_preview(self, num_points: int = 10) -> None:
         """
         Show sequence preview window with first N scan points.
-        
+
         Args:
             num_points: Number of scan points to preview
         """
         if not self.scan_sequences:
             messagebox.showerror("Error", "No scan sequences available. Build sequences first.")
             return
-        
+
         # Limit to available sequences
         preview_sequences = self.scan_sequences[:min(num_points, len(self.scan_sequences))]
-        
+
         # Create preview window
         preview_window = SequencePreviewWindow(preview_sequences, self.sequence_description)
         preview_window.show()
@@ -597,24 +796,44 @@ class ODMRPulsedExperiment(Experiment):
             Sequence text in the sequence language format
         """
         sequence_text = """
-sequence: name=odmr_pulsed, type=odmr, duration=2μs, sample_rate=1GHz, repeat=50000
+sequence: name=odmr_pulsed, type=odmr, duration=2.0000000000000003μs, sample_rate=1GHz, repeat_count=50000
 
 # Define scan variables (single variable for simplicity)
-variable pulse_duration, start=50ns, stop=500ns, steps=20
+#variable pulse_amplitude, start=0.1V, stop=1V, steps=20
 
 # Define the ODMR pulse sequence
-# pi/2 pulse for initialization (duration will be varied by the scanner)
-# Channel 1: IQ modulator I input (microwave pulses)
-pi/2 pulse on channel 1 at 0ns, gaussian, 100ns, 1.0
+#pi/2 pulse on channel 1 at 0ns, gaussian, 100ns, pulse_amplitude
+#pi/2 pulse on channel 2 at 0ns, gaussian, 100ns, pulse_amplitude
+#wait pulse on channel 1 at 100ns, square, 200ns, 0.0
+#wait pulse on channel 2 at 100ns, square, 200ns, 0.0
+#pi pulse on channel 1 at 300ns, gaussian, 100ns, pulse_amplitude
+#pi pulse on channel 2 at 300ns, gaussian, 100ns, pulse_amplitude
 
-# pi pulse for refocusing (duration will be varied by the scanner)
-pi pulse on channel 1 at 200ns, gaussian, 100ns, 1.0
+variable pulse_duration, start=50ns, stop=500ns, steps=20
+marker, laser_int_1 on channel 4 at 0ns, 500ns
+pi/2 pulse on channel 1 at 500ns, gaussian, pulse_duration, 1.0
+pi/2 pulse on channel 2 at 500ns, gaussian, pulse_duration, 1.0
+wait pulse on channel 1 at pulse_duration+0.000000500, square, 2*pulse_duration, 0.0
+wait pulse on channel 2 at pulse_duration+0.000000500, square, 2*pulse_duration, 0.0
+pi pulse on channel 1 at 3*pulse_duration+0.000000500, gaussian, pulse_duration, 1.0
+pi pulse on channel 2 at 3*pulse_duration+0.000000500, gaussian, pulse_duration, 1.0
+marker, laser_readout_1 on channel 3 at 4*pulse_duration+0.000000500, 500ns
+
+#pi/2 pulse on channel 1 at 0ns, gaussian, pulse_duration, 1.0
+#pi/2 pulse on channel 2 at 0ns, gaussian, pulse_duration, 1.0
+#pi/2 pulse on channel 3 at 0ns, gaussian, pulse_duration, 1.0
+#wait pulse on channel 1 at pulse_duration, square, 2*pulse_duration, 0.0
+#wait pulse on channel 2 at pulse_duration, square, 2*pulse_duration, 0.0
+#wait pulse on channel 3 at pulse_duration, square, 2*pulse_duration, 0.0
+#pi pulse on channel 1 at 3*pulse_duration, gaussian, pulse_duration, 1.0
+#pi pulse on channel 2 at 3*pulse_duration, gaussian, pulse_duration, 1.0
+#pi pulse on channel 3 at 3*pulse_duration, gaussian, pulse_duration, 1.0
 
 # Channel 2: IQ modulator Q input (for complex microwave pulses)
 # For simple ODMR, we can use channel 2 for additional microwave control
 # or leave it empty if not needed
 
-# Laser control via AWG520 markers:
+# Laser control via proteus markers:
 # ch1_marker2: laser_switch (triggers laser on/off)
 # ch2_marker2: counter_trigger (triggers ADwin counting)
 # Note: Marker control is handled automatically by the AWG520SequenceOptimizer
@@ -676,91 +895,153 @@ pi/2 pulse on channel 1 at 0ns, gaussian, 50ns, 1.0
             'output_directory': str(self.output_dir)
         }
 
+    """def _function(self):
+        # Set parameters
+        self.set_microwave_parameters(2.87e9, -10.0, 25.0)
+        self.set_laser_parameters(1.0, 532)
+        self.set_delay_parameters(25.0, 50.0, 15.0)
+
+        # Create and load example sequence
+        sequence_text = self.create_example_odmr_sequence()
+        print("Example ODMR Sequence:")
+        print(sequence_text)
+        print("\n" + "=" * 50 + "\n")
+
+        if self.load_sequence_from_text(sequence_text):
+            print("Sequence loaded successfully")
+
+            # Build sequences
+            if self.build_scan_sequences():
+                print("Scan sequences built successfully")
+
+                # Generate AWG files
+                if self.generate_awg_files():
+                    print("AWG files generated successfully")
+                    # Run experiment (with mock devices)
+                    print("Running experiment with mock devices...")
+                    results = self.run_experiment(frequency_range=[2.87e9, 2.88e9, 2.89e9])
+            
+                    if results['success']:
+                        print("Experiment completed successfully!")
+                        print(f"Frequencies scanned: {[f / 1e9 for f in results['frequencies']]} GHz")
+                        print(
+                            f"Signal counts shape: {len(results['signal_counts'])} frequencies x {len(results['signal_counts'][0])} points")
+                    else:
+                        print(f"Experiment failed: {results['error']}")
+                    
+                else:
+                    print("Failed to generate AWG files")
+
+            else:
+                print("Failed to build scan sequences")
+
+        else:
+            print("Failed to load sequence")
+        self.show_sequence_preview(10)
+        print("\nODMR Pulsed Experiment ready!")"""
+
+
 
 class SequencePreviewWindow:
     """Window for previewing sequence scan points."""
-    
+
     def __init__(self, sequences: List[Sequence], description):
         """Initialize preview window."""
         self.sequences = sequences
         self.description = description
         self.window = None
-        
+        self.sequence_builder = SequenceBuilder()
+        self.anim = None
+
     def show(self):
         """Show the preview window."""
         # Create main window
         self.window = tk.Tk()
         self.window.title("ODMR Pulsed Sequence Preview")
         self.window.geometry("800x600")
-        
+
         # Create notebook for different views
         notebook = ttk.Notebook(self.window)
         notebook.pack(fill='both', expand=True, padx=10, pady=10)
-        
+
         # Tab 1: Sequence overview
         overview_frame = ttk.Frame(notebook)
         notebook.add(overview_frame, text="Overview")
         self._create_overview_tab(overview_frame)
-        
+
         # Tab 2: Sequence plots
         plots_frame = ttk.Frame(notebook)
         notebook.add(plots_frame, text="Plots")
         self._create_plots_tab(plots_frame)
-        
+
         # Tab 3: Parameters
         params_frame = ttk.Frame(notebook)
         notebook.add(params_frame, text="Parameters")
         self._create_parameters_tab(params_frame)
-        
+
         # Show window
         self.window.mainloop()
-    
+
     def _create_overview_tab(self, parent):
         """Create overview tab."""
         # Sequence info
         info_frame = ttk.LabelFrame(parent, text="Sequence Information", padding=10)
         info_frame.pack(fill='x', padx=10, pady=5)
-        
+
         ttk.Label(info_frame, text=f"Name: {self.description.name}").pack(anchor='w')
         ttk.Label(info_frame, text=f"Total scan points: {len(self.sequences)}").pack(anchor='w')
         ttk.Label(info_frame, text=f"Variables: {len(self.description.variables)}").pack(anchor='w')
         ttk.Label(info_frame, text=f"Pulses per sequence: {len(self.description.pulses)}").pack(anchor='w')
-        
+
         # Variables info
         if self.description.variables:
             var_frame = ttk.LabelFrame(parent, text="Scan Variables", padding=10)
             var_frame.pack(fill='x', padx=10, pady=5)
-            
-            for var in self.description.variables:
+
+            for name, var in self.description.variables.items():
                 var_text = f"{var.name}: {var.start_value} to {var.stop_value} ({var.steps} steps)"
                 ttk.Label(var_frame, text=var_text).pack(anchor='w')
-    
+
     def _create_plots_tab(self, parent):
         """Create plots tab."""
         # Create matplotlib figure
-        fig, ax = plt.subplots(figsize=(8, 6))
+        """fig, ax = plt.subplots(figsize=(8, 6))
         fig.canvas.draw()
-        
+
         # Embed in tkinter
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         canvas = FigureCanvasTkAgg(fig, parent)
         canvas.draw()
         canvas.get_tk_widget().pack(fill='both', expand=True)
-        
+
         # Plot first few sequences
         if self.sequences:
             self.sequence_builder.animate_scan_sequences(
                 self.sequences[:min(5, len(self.sequences))],
-                ax=ax,
                 title="Sequence Preview (First 5 Points)"
-            )
-    
+            )"""
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        canvas = FigureCanvasTkAgg(fig, parent)
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        # IMPORTANT: store animation on self
+        self.anim = self.sequence_builder.animate_scan_sequences(
+            self.sequences[:min(5, len(self.sequences))],
+            fig=fig,
+            ax=ax,
+            title="Sequence Preview (First 5 Points)"
+        )
+
+        canvas.draw()
+
     def _create_parameters_tab(self, parent):
         """Create parameters tab."""
         # Parameters info
         params_frame = ttk.LabelFrame(parent, text="Experiment Parameters", padding=10)
         params_frame.pack(fill='x', padx=10, pady=5)
-        
+
         # This would show the current experiment parameters
         ttk.Label(params_frame, text="Microwave frequency: 2.87 GHz").pack(anchor='w')
         ttk.Label(params_frame, text="Microwave power: -10 dBm").pack(anchor='w')
@@ -776,13 +1057,13 @@ if __name__ == "__main__":
     # Create experiment with mock devices for testing
     from unittest.mock import MagicMock
     
-    mock_devices = {
+    """mock_devices = {
         'awg520': MagicMock(),
         'adwin': MagicMock(),
         'sg384': MagicMock()
-    }
+    }"""
     
-    experiment = ODMRPulsedExperiment(devices=mock_devices, name="test_odmr")
+    experiment = ODMRPulsedExperiment(name="test_odmr")
     
     # Set parameters
     experiment.set_microwave_parameters(2.87e9, -10.0, 25.0)
@@ -796,31 +1077,32 @@ if __name__ == "__main__":
     print("\n" + "="*50 + "\n")
     
     if experiment.load_sequence_from_text(sequence_text):
-        print("✅ Sequence loaded successfully")
+        print("Sequence loaded successfully")
         
         # Build sequences
         if experiment.build_scan_sequences():
-            print("✅ Scan sequences built successfully")
+            print("Scan sequences built successfully")
             
             # Generate AWG files
             if experiment.generate_awg_files():
-                print("✅ AWG files generated successfully")
-                
-                # Run experiment (with mock devices)
+                print("AWG files generated successfully")
+
+                """# Run experiment (with mock devices)
                 print("Running experiment with mock devices...")
                 results = experiment.run_experiment(frequency_range=[2.87e9, 2.88e9, 2.89e9])
                 
                 if results['success']:
-                    print("✅ Experiment completed successfully!")
+                    print("Experiment completed successfully!")
                     print(f"Frequencies scanned: {[f/1e9 for f in results['frequencies']]} GHz")
                     print(f"Signal counts shape: {len(results['signal_counts'])} frequencies x {len(results['signal_counts'][0])} points")
                 else:
-                    print(f"❌ Experiment failed: {results['error']}")
+                    print(f"Experiment failed: {results['error']}")"""
+
             else:
-                print("❌ Failed to generate AWG files")
+                print("Failed to generate AWG files")
         else:
-            print("❌ Failed to build scan sequences")
+            print("Failed to build scan sequences")
     else:
-        print("❌ Failed to load sequence")
-    
+        print("Failed to load sequence")
+    experiment.show_sequence_preview(10)
     print("\nODMR Pulsed Experiment ready!")

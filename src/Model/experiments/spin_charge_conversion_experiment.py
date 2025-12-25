@@ -42,7 +42,7 @@ class SpinChargeConversionExperiment(Experiment):
         ]),
         Parameter('orange_laser', [
             Parameter('power', 1.0, float, 'Laser power in mW', units='mW'),
-            Parameter('wavelength', 532.0, float, 'Laser wavelength in nm', units='nm')
+            Parameter('wavelength', 594.0, float, 'Laser wavelength in nm', units='nm')
         ]),
         Parameter('delays', [
             Parameter('mw_delay', 25.0, float, 'Microwave delay in ns', units='ns'),
@@ -622,23 +622,10 @@ sequence: name=SCC, type=SCC, duration=2μs, sample_rate=1GHz, repeat=50000
 variable pulse_duration, start=50ns, stop=500ns, steps=20
 
 # Define the SCC pulse sequence
-# pi/2 pulse for initialization (duration will be varied by the scanner)
-# Channel 1: IQ modulator I input (microwave pulses)
-pi/2 pulse on channel 1 at 0ns, gaussian, 100ns, 1.0
-
-# pi pulse for refocusing (duration will be varied by the scanner)
-pi pulse on channel 1 at 200ns, gaussian, 100ns, 1.0
-
-# Channel 2: IQ modulator Q input (for complex microwave pulses)
-# For simple SCC, we can use channel 2 for additional microwave control
-# or leave it empty if not needed
-
-# Laser control via AWG520 markers:
-# ch1_marker1: orange laser_switch (triggers laser on/off)
-# ch1_marker2: green laser_switch (triggers laser on/off)
-# ch2_marker2: counter_trigger (triggers ADwin counting)
-# Note: Marker control is handled automatically by the AWG520SequenceOptimizer
-# based on the connection template and pulse types
+shelving pulse on channel 3 at 0ns, square, pulse_duration, 0.6
+ionization pulse on channel 3 at pulse_duration, square, pulse_duration, 1.0
+readout pulse on channel 3 at 2*pulse_duration, square, 10*pulse_duration, 0.3
+wait pulse on channel 1 at 12*pulse_duration, square, 5*pulse_duration, 0.0
 """
         return sequence_text.strip()
 

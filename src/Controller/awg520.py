@@ -12,6 +12,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+# in case of a power outage please check if the ip is correct (this device somehow resets its ip on its own)
 
 import socket
 import time
@@ -23,8 +24,7 @@ from src.core import Parameter, Device
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
 
 _DAC_BITS = 10
-_IP_ADDRESS = '192.168.2.51'
-#_IP_ADDRESS = '172.17.39.2' # comment out for testing
+_IP_ADDRESS = '192.168.2.51'# comment out for testing
 #_IP_ADDRESS = '127.0.0.1'# use loopback for testing
 _PORT = 4000 # comment out for testing
 #_PORT = 65432 #switch ports for loopback
@@ -756,7 +756,6 @@ class AWG520Device(Device):
             if idn and ('SONY/TEK' in idn or 'AWG520' in idn):
                 self._is_connected = True
                 self.logger.info(f"Connected to AWG520: {idn}")
-                print("connected to AWG520")
             else:
                 self._is_connected = False
                 self.logger.warning("AWG520 responded but ID not recognized")
@@ -945,5 +944,3 @@ class AWG520Device(Device):
             self.logger.error(f"Reconnection failed: {e}")
             self._is_connected = False
             return False
-if __name__ == "__main__":
-    dev = AWG520Device()

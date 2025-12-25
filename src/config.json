@@ -104,8 +104,7 @@
             "class": "MUXControlDevice",
             "filepath": "src/Controller/mux_control.py",
             "settings": {
-                "port": "COM3",
-                "baudrate": 9600,
+                "port": 502,
                 "timeout": 5000,
                 "auto_connect": true
             }
