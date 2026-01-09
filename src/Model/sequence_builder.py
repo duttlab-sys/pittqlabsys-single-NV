@@ -56,22 +56,16 @@ class SequenceBuilder:
             if not description.validate():
                 print("Sequence description validation failed")
                 raise BuildError("Sequence description validation failed")
-            print("here")
             # Calculate total sequence length in samples
             total_samples = int(description.total_duration * self.sample_rate)
-            print(f"Total samples: {total_samples}")
             # Create the main sequence
             main_sequence = Sequence(total_samples)
-            print(f"Main sequence before adding pulses: {main_sequence}")
             # Add all pulses
             for pulse_desc in description.pulses:
                 pulse_obj = self._create_pulse_object(pulse_desc)
-                print(f"pulse_obj: {pulse_obj}")
                 start_sample = int(pulse_desc.timing * self.sample_rate)
                 main_sequence.add_pulse(start_sample, pulse_obj)
-            print(f"Main sequence after adding pulses: {main_sequence}")
             for marker in description.markers:
-                print(f"mkr: {marker}")
                 start_sample = int(marker.start_time * self.sample_rate)
                 end_sample = start_sample + int(marker.duration * self.sample_rate)
                 mk_event = MarkerEvent(
@@ -82,13 +76,10 @@ class SequenceBuilder:
                 )
                 main_sequence.add_marker(mk_event)
 
-            print(f"Main sequence after adding mkrs: {main_sequence}")#########
 
             # Handle loops
             """for loop_desc in description.loops:
-                print(f"loop_desc: {loop_desc}")
                 loop_sequence = self._build_loop_sequence(loop_desc)
-                print(f"loop_sequence: {loop_sequence}")
                 # For now, we'll add loop sequences as separate sequences
                 # In a more sophisticated implementation, we'd handle repetition
             print(f"Main sequence after adding loops: {main_sequence}")"""
@@ -183,10 +174,8 @@ class SequenceBuilder:
 
         pulses = description.pulses  # pulses outside loops
         variable_loops = description.loops  # loops that contain variable pulses
-        print(f"pulses: {pulses}")
-        print(f"variable_loops: {variable_loops}")
+
         markers = description.markers
-        print(f"mkrs: {markers}")
         try:
             if not description.variables:
                 # No variables to scan, return single sequence
@@ -206,18 +195,11 @@ class SequenceBuilder:
                 )
 
             # Generate all variable value combinations
-            print("before Generate all variable value combinations")
-            # Generate all variable value combinations
             variable_combinations = self._generate_variable_combinations(description.variables)
-            print(f"variable_combinations: {variable_combinations}")
-            print("after Generate all variable value combinations")
             scan_sequences = []
             for combo in variable_combinations:
                 # Create sequence with these variable values
                 optimized_sequence = self._create_sequence_with_variables(description, combo)
-                ###########
-                print("finished creating sequence")
-                print(f"optimized_sequence: {optimized_sequence}")
                 # Get the main sequence from the optimized sequence
                 main_sequence = optimized_sequence.sequences[0]
 
@@ -229,7 +211,6 @@ class SequenceBuilder:
                 main_sequence.total_duration = actual_duration
 
                 scan_sequences.append(main_sequence)
-            print(f"scan sequences: {scan_sequences}")
             return scan_sequences
 
         except Exception as e:
@@ -261,7 +242,6 @@ class SequenceBuilder:
             sample_rate=description.sample_rate,
             repeat_count=description.repeat_count
         )
-        print(f"modified_description: {modified_description}")
         # Add pulses with variable values substituted
         sequence_duration = 0.0
         for pulse in description.pulses:
@@ -278,28 +258,21 @@ class SequenceBuilder:
                 markers=pulse.markers.copy(),
                 fixed_timing=pulse.fixed_timing
             )
-            print(f"modified_pulse: {modified_pulse}")
             # Substitute variable values in parameters
             for param_name, param_value in modified_pulse.parameters.items():
                 if isinstance(param_value, str) and param_value in variable_values:
                     modified_pulse.parameters[param_name] = variable_values[param_value]
 
-            # Substitute variable values in duration if it's a variable
-            print(f"pulse.duration: {pulse.duration}")
-            print(f"variable_values: {variable_values}")
 
             # apply variable substitutions
             modified_pulse.duration = self._evaluate_expression(pulse.duration, variable_values)
             modified_pulse.timing = self._evaluate_expression(pulse.timing, variable_values)
             modified_pulse.amplitude = self._evaluate_expression(pulse.amplitude, variable_values)
-            print(f"modified_pulse: {modified_pulse}")
             end_time = modified_pulse.timing + modified_pulse.duration
             sequence_duration = max(sequence_duration, end_time)
             modified_description.add_pulse(modified_pulse)
 
-        print(f"modified description before time adjustment {modified_description}")
         modified_description.total_duration = sequence_duration
-        print(f"modified description after time adjustment {modified_description}")
         for marker in description.markers:
             modified_marker = MarkerDescription(
                 name=marker.name,
@@ -308,26 +281,19 @@ class SequenceBuilder:
                 duration=marker.duration,
                 state=marker.state
             )
-            print(f"modified_marker: {modified_marker}")
 
             # Substitute variable values in duration if it's a variable
-            print(f"marker.duration: {marker.duration}")
-            print(f"variable_values: {variable_values}")
             modified_marker.duration = self._evaluate_expression(marker.duration, variable_values)
             modified_marker.start_time = self._evaluate_expression(marker.start_time, variable_values)
-            print(f"modified_marker: {modified_marker}")
             end_time = modified_marker.start_time + modified_marker.duration
 
             sequence_duration = max(sequence_duration, end_time)
             modified_description.add_marker(modified_marker)
-        print(f"modified description before time adjustment {modified_description}")
         modified_description.total_duration = sequence_duration
 
-        print(f"modified description after time adjustment {modified_description}")
         # Add other components
         for loop in description.loops:
             modified_description.add_loop(loop)
-        print(f"modified description after add loop {modified_description}")
         """for conditional in description.conditionals:
             modified_description.add_conditional(conditional)"""
         
@@ -461,15 +427,12 @@ class SequenceBuilder:
         """Calculate the actual duration of a sequence based on pulse timing."""
         if not sequence.pulses:
             return 0.0
-        print("inside _calculate_actual_duration_from_sequence")
         max_end_time = 0.0
         for start_sample, pulse in sequence.pulses:
-            print(f"start_sample: {start_sample}")
-            print(f"pulse: {pulse}")
+
             pulse_end_time = start_sample / self.sample_rate + pulse.length / self.sample_rate
             max_end_time = max(max_end_time, pulse_end_time)
-            print(f"max_end_time: {max_end_time}")
-        
+
         return max_end_time
     
     def _calculate_total_combinations(self, variables: Dict[str, VariableDescription]) -> int:
@@ -490,15 +453,10 @@ class SequenceBuilder:
             Pulse object of appropriate type
         """
         # Calculate pulse length in samples
-        print("inside create_pulse_object 1")
-        print(f"pulse_desc.duration {pulse_desc.duration}")
-        print(f"self.sample_rate {self.sample_rate}")
         pulse_length = int(pulse_desc.duration * self.sample_rate)
-        print(f"pulse_length: {pulse_length}")
-        print("before Create pulse based on shape")
+
         # Create pulse based on shape
         if pulse_desc.shape.value == "gaussian":
-            print("inside create_pulse_object 2")
             # For Gaussian, sigma controls the width
             # Use duration/6 as sigma to get reasonable shape
             sigma = pulse_length / 6.0
@@ -511,7 +469,6 @@ class SequenceBuilder:
             )
         
         elif pulse_desc.shape.value == "sech":
-            print("inside create_pulse_object 3")
             # For Sech, width controls the shape
             width = pulse_length / 4.0
             return SechPulse(
@@ -523,7 +480,6 @@ class SequenceBuilder:
             )
         
         elif pulse_desc.shape.value == "lorentzian":
-            print("inside create_pulse_object 4")
             # For Lorentzian, gamma controls the width
             gamma = pulse_length / 4.0
             return LorentzianPulse(
@@ -535,7 +491,6 @@ class SequenceBuilder:
             )
         
         elif pulse_desc.shape.value == "square":
-            print("inside create_pulse_object 5")
             return SquarePulse(
                 name=pulse_desc.name,
                 length=pulse_length,
@@ -544,7 +499,6 @@ class SequenceBuilder:
             )
         
         elif pulse_desc.shape.value == "sine":
-            print("inside create_pulse_object 6")
             # For sine, we need frequency - use a reasonable default
             # This could be enhanced with actual frequency parameters
             return SquarePulse(  # Fallback to square for now
@@ -555,7 +509,6 @@ class SequenceBuilder:
             )
         
         elif pulse_desc.shape.value == "loadfile":
-            print("inside create_pulse_object 7")
             # For loadfile, we'd need to implement file loading
             # For now, fallback to square pulse
             return SquarePulse(
@@ -565,7 +518,6 @@ class SequenceBuilder:
             )
         
         elif pulse_desc.shape.value == "data":
-            print("inside create_pulse_object 8")
             # For data pulses, we need a filename parameter
             filename = pulse_desc.get_parameter("filename")
             if not filename:
@@ -578,7 +530,6 @@ class SequenceBuilder:
             )
         
         else:
-            print("inside create_pulse_object 9")
             # Default to square pulse
             return SquarePulse(
                 name=pulse_desc.name,
@@ -597,18 +548,13 @@ class SequenceBuilder:
             Sequence object for the loop
         """
         # Calculate loop duration in samples
-        print("Building loop sequence")
         loop_duration = loop_desc.end_time - loop_desc.start_time
         loop_samples = int(loop_duration * self.sample_rate)
-        print("before building sequence for loops")
         # Create sequence for the loop
         loop_sequence = Sequence(loop_samples)
-        print("after building sequence for loops")
         # Add pulses within the loop
-        print(f"loop_desc.pulses:{loop_desc.pulses}")
         for pulse_desc in loop_desc.pulses:
             pulse_obj = self._create_pulse_object(pulse_desc)
-            print(f"pulse_obj: {pulse_obj}")
             # Adjust timing relative to loop start
             relative_start = int((pulse_desc.timing - loop_desc.start_time) * self.sample_rate)
             if relative_start >= 0 and relative_start < loop_samples:
@@ -917,6 +863,7 @@ class SequenceBuilder:
 
         # Get unique channels from all sequences
         all_channels = set()
+        all_markers = set()
         for seq in sequences:
             for start_sample, pulse in seq.pulses:
                 if hasattr(pulse, 'channel'):
@@ -926,14 +873,16 @@ class SequenceBuilder:
 
             for marker in seq.markers:
                 mk_ch = int(marker.name.split("_")[-1])
-                all_channels.add(mk_ch)
+                all_markers.add(mk_ch)
 
         channels = sorted(list(all_channels))
+        markers = sorted(list(all_markers))
 
         # Channel colors and names
-        colors = {1: 'blue', 2: 'red', 3: 'green', 4: 'orange', 5: 'purple'}
+        colors = {1: 'blue', 2: 'darkturquoise', 3: 'orange', 4: 'purple', 5: 'cyan'}
         channel_names = {1: 'ch 1', 2: 'ch 2', 3: 'ch 3', 4: 'ch 4', 5: 'Trigger'}
-
+        mk_colors = {1: 'green', 2: 'red', 3: 'olive', 4: 'gray'}
+        marker_names = {1: 'mkr 1', 2: 'mkr 2', 3: 'mkr 3', 4: 'mkr 4'}
         # Calculate global x-axis limits
         max_time = 1000
         for seq in sequences:
@@ -960,20 +909,32 @@ class SequenceBuilder:
                 ax.set_title(f'{title} - Frame {frame + 1}/{len(sequences)}')
             else:
                 ax.set_title(f'Sequence {frame + 1}/{len(sequences)}')
-
+            marker_offset = -len(markers) - 1
             # Set plot limits
             ax.set_xlim(0, max_time)
-            ax.set_ylim(min(channels) - 0.5, max(channels) + 1.0)
 
             # Set y-axis
-            ax.set_yticks(channels)
-            ax.set_yticklabels([channel_names.get(c, f'Channel {c}') for c in channels])
+            #ax.set_yticks(channels)
+            #ax.set_yticklabels([channel_names.get(c, f'Channel {c}') for c in channels])
+            yticks = (
+                    [marker_offset + m for m in markers] +
+                    channels
+            )
+            yticklabels = (
+                    [marker_names.get(m, f'Marker {m}') for m in markers] +
+                    [channel_names.get(c, f'Channel {c}') for c in channels]
+            )
+
+            ax.set_yticks(yticks)
+            ax.set_yticklabels(yticklabels)
 
             # Create signal arrays
             channel_signals = {}
             for channel in channels:
                 channel_signals[channel] = np.zeros_like(time_ns, dtype=float)
-
+            marker_signals = {}
+            for marker in markers:
+                marker_signals[marker] = np.zeros_like(time_ns, dtype=float)
             #markers:
             for mark in seq.markers:
                 start_time_ns = int(mark.on_index / self.sample_rate * 1e9)
@@ -981,13 +942,13 @@ class SequenceBuilder:
 
                 # Determine channel
                 if hasattr(mark, 'channel'):
-                    channel = mark.channel
+                    marker_channel = mark.channel
                 else:
-                    channel = int(mark.name.split("_")[-1])
+                    marker_channel = int(mark.name.split("_")[-1])
 
                 if start_time_ns >= 0 and start_time_ns < len(time_ns):
                     end_idx = min(len(time_ns), end_time_ns)
-                    channel_signals[channel][start_time_ns:end_idx] = 0.4
+                    marker_signals[marker_channel][start_time_ns:end_idx] = 0.4
 
             # Fill signals
             for start_sample, pulse in seq.pulses:
@@ -1045,7 +1006,8 @@ class SequenceBuilder:
                             envelope_values = pulse_envelope[envelope_indices]
 
                             # Scale to visualization amplitude (0.4 above baseline)
-                            scaled_values = 0.4 * envelope_values / np.max(envelope_values) if np.max(
+                            #scaled_values = 0.4 * envelope_values / np.max(envelope_values) if np.max(envelope_values) > 0 else 0
+                            scaled_values = 0.4 * envelope_values if np.max(
                                 envelope_values) > 0 else 0
 
                             valid_indices = (pulse_time >= 0) & (pulse_time < len(time_ns))
@@ -1067,6 +1029,14 @@ class SequenceBuilder:
                 signal_y = channel + channel_signals[channel]
                 ax.plot(time_ns, signal_y, color=colors.get(channel, 'black'),
                         linewidth=2, alpha=0.8, label=channel_names.get(channel, f'Channel {channel}'))
+
+
+            for mkr in markers:
+                #signal_y = mkr + marker_signals[mkr]
+                marker_y = marker_offset + mkr
+                signal_y = marker_y + marker_signals[mkr]
+                ax.plot(time_ns, signal_y, color=mk_colors.get(mkr, 'black'),
+                        linewidth=2, alpha=0.8, label=marker_names.get(mkr, f'marker {mkr}'))
 
             # Add grid and legend
             ax.grid(True, alpha=0.3)

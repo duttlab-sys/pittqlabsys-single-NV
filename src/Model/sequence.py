@@ -80,10 +80,8 @@ class Sequence:
         for start, pulse in self.pulses:
             ch = int(pulse.name.split("_")[-1])
             channels.add(ch)
-        print(f"channels: {channels}")
         for mk in self.markers:
             channels.add(int(mk.name.split("_")[-1]))
-        print(f"channels: {channels}")
 
         # 2) Prepare per-channel outputs
         output: Dict[int, Dict[str, np.ndarray]] = {}
@@ -107,20 +105,14 @@ class Sequence:
                     continue
 
                 mk_markers = mk.generate_markers()
-                print(f"\n=== DEBUG to_waveform markers ===")
-                print(f"Marker name: {mk.name}")
-                print(f"Generated markers shape: {mk_markers.shape}")
-                print(f"Unique values: {np.unique(mk_markers)}")
 
                 # Check first pulse
                 on_indices = np.where(mk_markers != 0)[0]
                 if len(on_indices) > 0:
-                    print(f"First ON at sample: {on_indices[0]}")
                     # Check duration
                     first_pulse_end = on_indices[0]
                     while first_pulse_end < len(mk_markers) and mk_markers[first_pulse_end] != 0:
                         first_pulse_end += 1
-                    print(f"First pulse length: {first_pulse_end - on_indices[0]} samples")
 
                 markers |= mk_markers
 

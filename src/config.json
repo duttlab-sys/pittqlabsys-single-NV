@@ -30,6 +30,14 @@
                 "socket_timeout": 5.0
             }
         },
+        "proteus": {
+            "class": "ProteusDevice",
+            "filepath": "src/Controller/Proteus_device.py",
+            "settings": {
+                "ip_address": "192.168.2.4",
+                "slot_id": 6
+            }
+        },
         "spectrum_analyzer": {
             "class": "Agilent8596E",
             "filepath": "src/Controller/Agilent8596E.py",
@@ -43,6 +51,15 @@
             "resolution band width": 0.1,
             "video band width": 1,
             "video average": 100
+            }
+        },
+        "universal_counter": {
+            "class": "Agilent53132",
+            "filepath": "src/Controller/Agilent53132.py",
+            "settings": {
+                "connection_type": "GPIB",
+                "port": 3,
+                "GPIB_num": 0
             }
         },
         "adwin": {
@@ -104,6 +121,7 @@
             "class": "MUXControlDevice",
             "filepath": "src/Controller/mux_control.py",
             "settings": {
+                "ip_address": "192.168.2.85",
                 "port": 502,
                 "timeout": 5000,
                 "auto_connect": true

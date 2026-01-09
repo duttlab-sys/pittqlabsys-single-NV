@@ -51,7 +51,6 @@ class GaussianPulse(Pulse):
         self.amplitude = amplitude
         # Center the Gaussian at the midpoint
         self.center = (length - 1) / 2.0
-        print(f"amplitude: {self.amplitude}")
 
     def generate_samples(self) -> np.ndarray:
         t = np.arange(self.length)

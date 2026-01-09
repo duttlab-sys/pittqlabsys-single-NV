@@ -66,7 +66,6 @@ class AdwinGoldDevice(Device):
             Parameter('delay',3000,int,'Time interval between executions of the event section (time = delay x 3.3ns)'),
             Parameter('running',False,bool,'Start and stop process')
         ]),
-        Parameter('server_port', 5003, int, 'server_port'),
     ])
 
     def __init__(self, name=None, settings=None, boot=True, num_devices=1):

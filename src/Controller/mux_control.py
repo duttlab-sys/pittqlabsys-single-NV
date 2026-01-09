@@ -16,6 +16,7 @@ from src.core.parameter import Parameter
 #_DEFAULT_PORT = 'COM3'
 _DEFAULT_PORT = 502
 _DEFAULT_TIMEOUT = 5000
+_IP_ADDRESS = '192.168.2.85'
 
 # Valid trigger selectors
 TRIGGER_SELECTORS = Literal['confocal', 'odmr', 'pulsed']
@@ -35,6 +36,7 @@ class MUXControlDevice(Device):
     """
     
     _DEFAULT_SETTINGS = Parameter([
+        Parameter('ip_address', _IP_ADDRESS, str, 'IP address of device'),
         Parameter('port', _DEFAULT_PORT, int, 'Port'),
         Parameter('timeout', _DEFAULT_TIMEOUT, int, 'Serial timeout in milliseconds'),
         Parameter('auto_connect', True, bool, 'Automatically connect on initialization'),
@@ -67,7 +69,8 @@ class MUXControlDevice(Device):
         Returns:
             bool: True if connection successful, False otherwise
         """
-        self.mux = ModbusTcpClient('192.168.2.243', port = self.settings['port'], timeout=self.settings.get('timeout', _DEFAULT_TIMEOUT) / 1000)
+        cfg = self.settings
+        self.mux = ModbusTcpClient(cfg['ip_address'], port = self.settings['port'], timeout=self.settings.get('timeout', _DEFAULT_TIMEOUT) / 1000)
         try:
             if self.mux.connect():
                 self.logger.info(f"Connected to MUX controller")
@@ -93,54 +96,60 @@ class MUXControlDevice(Device):
                 self.logger.info("MUX controller disconnected successfully")
             except Exception as e:
                 self.logger.error(f"Error disconnecting from MUX controller: {e}")
-    
+
     def select_trigger(self, selector: TRIGGER_SELECTORS) -> bool:
-        """
-        Select the trigger source.
-        
-        Args:
-            selector: Trigger source to select ('confocal', 'odmr', or 'pulsed')
-            
-        Returns:
-            bool: True if selection successful, False otherwise
-        """
         if not self.is_connected:
             self.logger.error("Cannot select trigger: not connected to MUX controller")
             return False
-        
-        if selector not in ['confocal', 'odmr', 'pulsed']:
-            self.logger.error(f"Invalid trigger selector: {selector}. Must be 'confocal', 'odmr', or 'pulsed'")
+        command_map = {
+            'confocal': 0,
+            'odmr': 1,
+            'pulsed': 2
+        }
+        if selector not in command_map:
+            self.logger.error(f"Invalid trigger selector: {selector}")
             return False
-        
+
         try:
-            # Map selector to command
-            command_map = {
-                'confocal': 1,
-                'odmr': 2,
-                'pulsed': 3
-            }
-            
-            command = command_map[selector]
-            for i in range (1,3):
-                if i == command:
-                    self.mux.write_coil(i, i == command)
-
-            response = self.mux.read_coils(command, 1)
-
-            if not response.isError():
-                state = response.bits[0]
-                print(f"{selector}: {'ON' if state else 'OFF'}")
+            # Turn OFF all coils
+            for coil in command_map.values():
+                print(f"coil {coil}")
+                self.mux.write_coil(coil, False, device_id = 1)
+            # Turn ON selected coil
+            selected_coil = command_map[selector]
+            self.mux.write_coil(selected_coil, True, device_id = 1)
+            responses = {}
+            returned = False
+            # Read back all coils
+            for coil in command_map.values():
+                responses[coil] = self.mux.read_coils(coil, count = 1, device_id = 1)
+                print(f"coil {coil} response: {responses[coil].bits[0]}")
+                if coil == selected_coil:
+                    returned = returned or not(responses[coil].bits[0])
+                else:
+                    returned = returned or responses[coil].bits[0]
+            response = responses[selected_coil]
+            if response.isError():
+                self.logger.error(f"Failed to read coil states: {response}")
+                return False
+            states = response.bits[0]
+            print(states)
+            # Verify hardware state
+            if not returned:
                 self._current_selection = selector
-                self.logger.info(f"Successfully selected {selector} trigger source (Y{command_map[selector]})")
+                self.logger.info(
+                    f"Selected {selector} trigger (coil {selected_coil}, states={states})"
+                )
                 return True
             else:
-                self.logger.error(f"mux rejected trigger selection: {response}")
-                print(f"Error reading {selector}")
+                self.logger.error(
+                    f"Trigger selection mismatch for {selector}: states={states}"
+                )
                 return False
         except Exception as e:
             self.logger.error(f"Unexpected error selecting {selector} trigger: {e}")
             return False
-    
+
     def get_current_selection(self) -> Optional[str]:
         """
         Get the currently selected trigger source.
@@ -257,4 +266,10 @@ class MUXControl(MUXControlDevice):
     
     def close(self):
         """Legacy method for backward compatibility."""
-        self.disconnect() 
+        self.disconnect()
+
+if __name__ == "__main__":
+    mux = MUXControlDevice()
+    mux.connect()
+    if mux.is_connected:
+        mux.select_trigger('confocal')
