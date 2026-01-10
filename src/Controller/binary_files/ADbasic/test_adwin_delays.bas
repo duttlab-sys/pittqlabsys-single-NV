@@ -11,7 +11,6 @@
 ' Stacksize                      = 1000
 ' Info_Last_Save                 = SINGLENV-PC-1  SINGLENV-PC-1\Duttlab
 '<Header End>
-' adwin_triggering_proteus.bas
 ' This process generates trigger pulses to control proteus external triggering
 ' for testing the ADwin -> proteus control architecture.
 '
@@ -26,28 +25,17 @@
 ' - Computer can control timing and number of triggers via parameters
 ' This is the new approach: adwin triggers awg to move to next task/line
 
-' Variables exchanged with python
-' Par_1: signal counts
-' Par_2: reference counts
-' Par_3: count_time (with calibration offset)
-' Par_4: reset_time (with calibration offset): time between signal counts and reference counts
-' Par_5: repeat_count
-' Par_6: number of iterations
-' Par_7: acquisition done flag
-' Par_8: repetition_counter
-' Par_9: sequence_duration (with calibration offset): Time of the awg sequence
-
 #Include ADwinGoldII.inc
 DIM signal_count, ref_count, number_of_signal_events AS LONG
-DIM iteration_number as LONG
+DIM iteration_number, i as LONG
 DIM count_time, reset_time, sequence_duration, sleep_duration AS FLOAT
 DIM trigger_duration, delay AS FLOAT
+DIM Data_1[20] AS LONG ' 100000 is the maximum number of iterations
+DIM Data_2[20] AS LONG ' 100000 is the maximum number of iterations
 
 init:
   Cnt_Enable(0)
   Cnt_Mode(1,8)   ' Counter 1 set to increasing
-  Par_1 = 0 'signal counts
-  Par_2 = 0 'reference counts
   Par_7 = 0       ' acquisition done flag
   Par_8 = 0       ' repetition_counter
   number_of_signal_events = Par_5 * Par_6
@@ -71,16 +59,25 @@ init:
   DIGOUT(21, 0)
   delay = (sequence_duration + count_time + reset_time + count_time + 10) * 3 ' * 10 since the variables are in 10 ns and /(10/3) as the value has to be in number or clock ticks which is 10/3 for T11 processor
   Processdelay = delay
+  i = 1
+  DO
+    Data_1[i] = 0
+    Data_2[i] = 0
+    i = i +1
+  UNTIL (i = 21)
 event:
   Cnt_Enable(0)
   Cnt_Clear(1)
   Par_8 = Par_8 + 1          ' current event number (increase for signal count)
   iteration_number = iteration_number + 1 ' Since Data_1 and Data_2 start at index 1
+  DIGOUT(16, 1)         ' the difference is the time it takes to turn on digout
   DIGOUT(21, 1)              ' Set trigger high
   CPU_Sleep(trigger_duration)
   DIGOUT(21, 0)              ' Set trigger low
   CPU_Sleep(sleep_duration)
+  DIGOUT(28, 1)
   Cnt_Enable(1)            ' enable counter 1
+  DIGOUT(26, 1)
   CPU_Sleep(count_time)      ' count time 300 ns
   Cnt_Enable(0)            ' disable counter 1
   signal_count=Cnt_Read(1)    ' accumulate signal counts

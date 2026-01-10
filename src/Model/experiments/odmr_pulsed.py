@@ -23,7 +23,7 @@ from src.core.experiment import Experiment
 from src.core import Parameter
 from src.Model.sequence_parser import SequenceTextParser
 from src.Model.sequence_builder import SequenceBuilder
-from src.Model.hardware_calibrator import HardwareCalibrator
+from src.Model.proteus_hardware_calibrator import ProteusHardwareCalibrator
 from src.Model.awg_file import AWGFile
 from src.Model.sequence import Sequence
 from src.Model.pulses import Pulse
@@ -121,11 +121,7 @@ class ODMRPulsedExperiment(Experiment):
         
         # Initialize hardware calibrator with experiment-specific connection file
         connection_file = Path(__file__).parent / "odmr_pulsed_connection.json"
-        self.hardware_calibrator = HardwareCalibrator(
-            connection_file=str(connection_file),
-            config_file=str(self.config_path)
-        )
-
+        self.hardware_calibrator = ProteusHardwareCalibrator(connection_file=str(connection_file))
 
         # Experiment parameters (will be set from _DEFAULT_SETTINGS)
         self.microwave_frequency = 2.87e9  # 2.87 GHz (NV center)
@@ -255,6 +251,15 @@ class ODMRPulsedExperiment(Experiment):
                     self.number_of_iterations += 1
             else:
                 self.number_of_iterations = 1
+
+            # Apply hardware calibration
+            for i, sequence in enumerate(self.scan_sequences):
+                calibrated_sequence = self.hardware_calibrator.calibrate_sequence(
+                    sequence,
+                    self.sequence_description.sample_rate
+                )
+                self.scan_sequences[i] = calibrated_sequence
+            self.sequence_duration = calibrated_sequence.length
             self.logger.info(f"Built {len(self.scan_sequences)} scan sequences")
             return True
             
@@ -946,7 +951,7 @@ class ODMRPulsedExperiment(Experiment):
             self.adwin.set_int_var(4, reset_time_calibrated)
             self.adwin.set_int_var(5, self.repeat_count)
             self.adwin.set_int_var(6, self.number_of_iterations)
-            self.adwin.set_int_var(9, self.sequence_duration) # for now we have 2500 ns duration
+            self.adwin.set_int_var(9, self.sequence_duration)
             
             # Start the counting process
             self.adwin.start_process(process_number)
@@ -1204,18 +1209,19 @@ if __name__ == "__main__":
         print("Sequence loaded successfully")
     else:
         print("Failed to load sequence")
-    """
-    # Build sequences
+
+    """# Build sequences
     if experiment.build_scan_sequences():
        print("Scan sequences built successfully")
     else:
         print("Failed to build scan sequences")
     # Generate AWG sequences
-    #if experiment.generate_awg_sequences_awg_triggering_adwin_case():
-    if experiment.generate_awg_task_sequences_adwin_triggering_awg_case():
+    if experiment.generate_awg_sequences_awg_triggering_adwin_case():
+    #if experiment.generate_awg_task_sequences_adwin_triggering_awg_case():
        print("AWG sequences generated successfully")
     else:
        print("Failed to generate AWG sequences")"""
+
 
     # Run experiment
     print("Running experiment...")
@@ -1229,5 +1235,5 @@ if __name__ == "__main__":
         print(f"Experiment failed: {results['error']}")
 
 
-    """experiment.show_sequence_preview(10)
-    print("\nODMR Pulsed Experiment ready!")"""
+    experiment.show_sequence_preview(10)
+    print("\nODMR Pulsed Experiment ready!")

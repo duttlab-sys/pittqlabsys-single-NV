@@ -34,8 +34,8 @@
 #Include ADwinGoldII.inc
 DIM signal_count, ref_count, number_of_signal_events AS LONG
 DIM count_time, reset_time, iteration_number, event_id, i as LONG
-DIM Data_1[100000] AS LONG
-DIM Data_2[100000] AS LONG
+DIM Data_1[20] AS LONG
+DIM Data_2[20] AS LONG
 init:
   event_id = 0   ' 1 for signal count and 2 for reference count
   Cnt_Enable(0)

@@ -1,5 +1,5 @@
 {
-  "awg520_connections": {
+  "proteus_connections": {
     "description": "Connection map for ODMR pulsed experiments with IQ modulator, laser, and counter",
     "channels": {
       "1": {
@@ -48,7 +48,7 @@
         "connection": "unassigned",
         "type": "digital",
         "calibration_delays": [],
-        "description": "Available for future use",
+        "description": "Available for future use. Please note that this used to be adwin external event trigger for the old system",
         "voltage": "3.3V",
         "impedance": "50Ω"
       },

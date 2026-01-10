@@ -11,7 +11,6 @@
 ' Stacksize                      = 1000
 ' Info_Last_Save                 = SINGLENV-PC-1  SINGLENV-PC-1\Duttlab
 '<Header End>
-' adwin_triggering_proteus.bas
 ' This process generates trigger pulses to control proteus external triggering
 ' for testing the ADwin -> proteus control architecture.
 '

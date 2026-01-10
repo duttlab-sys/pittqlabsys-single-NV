@@ -2993,12 +2993,12 @@ class ProteusDevice(Device):
         self.driver = ProteusDriver(ip_address = cfg['ip_address'], sid = cfg['slot_id'])
         # Test connection and set connection status
         self._test_connection()
-        # stop TaborInstrumentation service
+        """# stop TaborInstrumentation service
         import subprocess
         service_name = "TaborInstrumentation"
         result = subprocess.run(["sc", "stop", service_name], capture_output=True, text=True, shell=True)
         print(result.stdout)
-        print(result.stderr)
+        print(result.stderr)"""
 
     def _test_connection(self):
         """Test if the device is reachable and set connection status."""
