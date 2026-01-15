@@ -11,95 +11,79 @@
 ' Stacksize                      = 1000
 ' Info_Last_Save                 = SINGLENV-PC-1  SINGLENV-PC-1\Duttlab
 '<Header End>
-' This process generates trigger pulses to control proteus external triggering
+' This process generates digout signals to test the time it takes for each process used in adwin_triggering_proteus.bas to optimize adwin's time delays for pulsed ODMR experiments
 ' for testing the ADwin -> proteus control architecture.
 '
 ' Hardware Setup:
-' - ADwin Digital Output -> Proteus TRIG 1 IN (front panel)
-' - Proteus configured for external trigger with Wait Trigger enabled
-' - Computer controls JUMP_MODE software for sequence advancement
-'
-' Operation:
-' - Process generates trigger pulses at specified intervals
-' - Each trigger causes Proteus to advance to next sequence line
-' - Computer can control timing and number of triggers via parameters
-' This is the new approach: adwin triggers awg to move to next task/line
+' - Test 1: ADwin Digital Output -> OSCILLOSCOPE: testing the digout
+' - Test 2: ADwin Digital Output -> Proteus TRIG 1 IN (front panel): testing digout and proteus triggering delay
+' digout, Cnt_Enable(1), digout
+' digout, Cnt_Enable(0), digout
+' digout 1, digout 2
+' digout, CPU_Sleep, digout
+' digout, CPU_Sleep, digout
+' digout, Cnt_Read(1), digout
+' digout, Cnt_Clear(1), digout
 
 #Include ADwinGoldII.inc
-DIM signal_count, ref_count, number_of_signal_events AS LONG
-DIM iteration_number, i as LONG
-DIM count_time, reset_time, sequence_duration, sleep_duration AS FLOAT
-DIM trigger_duration, delay AS FLOAT
-DIM Data_1[20] AS LONG ' 100000 is the maximum number of iterations
-DIM Data_2[20] AS LONG ' 100000 is the maximum number of iterations
+DIM count_time AS FLOAT
+'DIM trigger_duration AS FLOAT
+' test 1
+'DIGOUT(21, 1)
+'DIGOUT(16, 1)
+'CPU_Sleep(count_time)
+'DIGOUT(21, 0)
+'DIGOUT(16, 0)
+'CPU_Sleep(count_time)
+  
+' test 2
+'DIGOUT(21, 1)
+'Cnt_enable(1)
+'DIGOUT(16, 1)
+'CPU_Sleep(count_time)
+'DIGOUT(21, 0)
+'DIGOUT(16, 0)
+'CPU_Sleep(count_time)
+  
+' test 3
+'DIGOUT(21, 1)
+'Cnt_enable(0)
+'DIGOUT(16, 1)
+'CPU_Sleep(count_time)
+'DIGOUT(21, 0)
+'DIGOUT(16, 0)
+'CPU_Sleep(count_time)
+'Cnt_enable(1)
+
+' test 4
+'DIGOUT(21, 1)
+'CPU_Sleep(count_time)
+'DIGOUT(16, 1)
+'DIGOUT(21, 0)
+'DIGOUT(16, 0)
+
+' test 5
+'DIGOUT(21, 1)
+'Cnt_read(count_time)
+'DIGOUT(16, 1)
+'DIGOUT(21, 0)
+'DIGOUT(16, 0)
 
 init:
-  Cnt_Enable(0)
+  Cnt_Enable(1)
   Cnt_Mode(1,8)   ' Counter 1 set to increasing
-  Par_7 = 0       ' acquisition done flag
-  Par_8 = 0       ' repetition_counter
-  number_of_signal_events = Par_5 * Par_6
-  trigger_duration = 1  ' 10ns trigger pulse width (in 10 ns)
+  'trigger_duration = 1  ' 10ns trigger pulse width (in 10 ns)
 
   Cnt_Clear(1)          ' Clear counter 1
-  signal_count=0
-  ref_count=0
-  iteration_number = 0
-  ' NOTE: The offsets (10 and 30) are historical calibration values
-  ' that were determined empirically. The actual timing values are:
-  ' count_time = (Par_3-10)/10  where Par_3 is passed from Python
-  ' reset_time = (Par_4-30)/10  where Par_4 is passed from Python
-  ' These offsets ensure proper timing calibration for the hardware setup.
-  count_time = (Par_3-10)/10 'added on 2/6/20 to allow passing parameter from Python
-  reset_time = (Par_4-30)/10  'added on 2/6/20 to allow passing parameter from Python
-  sequence_duration = Par_9/10 ' since Par_9 is given in ns and CPU_Sleep accepts params in 10ns, we divide by 10
-  sleep_duration = sequence_duration - trigger_duration
+  count_time = 30 ' 300/10 as it's 300 ns but units are in 10 ns
   Conf_DIO(1100b) ' configure 0 - 15 as DIGIN, and 16 - 31 as DIGOUT
   ' Set digital output 21 to low (no trigger)
   DIGOUT(21, 0)
-  delay = (sequence_duration + count_time + reset_time + count_time + 10) * 3 ' * 10 since the variables are in 10 ns and /(10/3) as the value has to be in number or clock ticks which is 10/3 for T11 processor
-  Processdelay = delay
-  i = 1
-  DO
-    Data_1[i] = 0
-    Data_2[i] = 0
-    i = i +1
-  UNTIL (i = 21)
+  DIGOUT(16, 0)
+  Processdelay = 2*count_time*3
 event:
-  Cnt_Enable(0)
+  DIGOUT(21, 1)
   Cnt_Clear(1)
-  Par_8 = Par_8 + 1          ' current event number (increase for signal count)
-  iteration_number = iteration_number + 1 ' Since Data_1 and Data_2 start at index 1
-  DIGOUT(16, 1)         ' the difference is the time it takes to turn on digout
-  DIGOUT(21, 1)              ' Set trigger high
-  CPU_Sleep(trigger_duration)
-  DIGOUT(21, 0)              ' Set trigger low
-  CPU_Sleep(sleep_duration)
-  DIGOUT(28, 1)
-  Cnt_Enable(1)            ' enable counter 1
-  DIGOUT(26, 1)
-  CPU_Sleep(count_time)      ' count time 300 ns
-  Cnt_Enable(0)            ' disable counter 1
-  signal_count=Cnt_Read(1)    ' accumulate signal counts
-  Cnt_Clear(1)
-  Data_1[iteration_number] = Data_1[iteration_number] + signal_count
-  CPU_Sleep(reset_time)
-  Cnt_Enable(1)              ' enable counter 1
-  CPU_Sleep(count_time)  ' count time 300 ns
-  Cnt_Enable(0)        ' disable counter 1
-  ref_count=Cnt_Read(1)         ' accumulate reference counts
-  Cnt_Clear(1)             ' Clear counter 1
-  Data_2[iteration_number] = Data_2[iteration_number] + ref_count
-  signal_count = 0
-  ref_count = 0
-  IF (iteration_number = Par_6) THEN 'if we did all of our iterations for a given sequence, then go back to iteration 0
-    iteration_number = 0
-  ENDIF
-  ' Check if we've completed all repetitions and if iteration_number is 0 which means that it got to Par_6
-  ' Par_5 contains the number of repetitions per scan point (e.g., 50000)
-  IF (Par_8 = number_of_signal_events) THEN
-    Par_7=1
-    Cnt_Enable(0)
-    DIGOUT(21, 0)                  ' Ensure trigger is low
-    END
-  ENDIF
+  DIGOUT(16, 1)
+  DIGOUT(21, 0)
+  DIGOUT(16, 0)
