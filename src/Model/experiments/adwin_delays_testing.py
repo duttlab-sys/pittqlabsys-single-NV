@@ -447,7 +447,7 @@ class ODMRPulsedExperiment(Experiment):
                 if ch in channels:
                     self.proteus.driver.set_output("ON")
                 # --self.proteus.driver.set_continuous_run(0)
-            self.proteus.driver.set_trigger_level(0.1)  # :TRIG:LEV
+            self.proteus.driver.set_trigger_level(1.8)  # :TRIG:LEV
             self.proteus.driver.activate_instrument(1)
             for ch in sorted(all_channels):
                 self.proteus.driver.set_channel(ch)
@@ -672,12 +672,17 @@ class ODMRPulsedExperiment(Experiment):
             odmr_pulsed_counter_path = get_adwin_binary_path('test_adwin_digout.TB1')"""
             # option 3 file
             #odmr_pulsed_counter_path = get_adwin_binary_path('adwin_triggering_proteus.TB1')
+
             odmr_pulsed_counter_path = get_adwin_binary_path('test_adwin_delays.TB1')
             self.adwin.update({'process_1': {'load': str(odmr_pulsed_counter_path)}})
 
             # Start the counting process
             self.adwin.start_process(process_number)
-
+            """print("here")
+            time.sleep(100)
+            count = self.adwin.get_int_data(1, 1)
+            for ct in count:
+                print(f"count: {ct}")"""
             self.logger.info(
                 f"ADwin counting setup: count_time={self.count_time}ns, reset_time={self.reset_time}ns, reps={self.repeat_count}")
             return True
@@ -748,7 +753,7 @@ class ODMRPulsedExperiment(Experiment):
             Sequence text in the sequence language format
         """
         sequence_text = """
-sequence: name=odmr_pulsed, type=odmr, duration=1002500ns, sample_rate=1GHz, repeat_count=50000
+sequence: name=odmr_pulsed, type=odmr, duration=1002500ns, sample_rate=1GHz, repeat_count=10
 variable pulse_duration, start=50ns, stop=500ns, steps=20
 marker, laser_int_1 on channel 1 at 0ns, 500ns
 pi/2 pulse on channel 1 at 500ns, gaussian, pulse_duration, 1.0
@@ -797,3 +802,31 @@ if __name__ == "__main__":
 
     # Set parameters
     experiment._setup_adwin_counting()
+    """experiment = ODMRPulsedExperiment(name="test_odmr")
+
+    # Set parameters
+    experiment.set_microwave_parameters(2.87e9, -10.0, 25.0)
+    experiment.set_laser_parameters(1.0, 532)
+    experiment.set_delay_parameters(25.0, 50.0, 15.0)
+    # Create and load example sequence
+    sequence_text = experiment.create_example_odmr_sequence()
+    print("Example ODMR Sequence:")
+    print(sequence_text)
+    print("\n" + "=" * 50 + "\n")
+
+    if experiment.load_sequence_from_text(sequence_text):
+        print("Sequence loaded successfully")
+    else:
+        print("Failed to load sequence")
+
+    # Run experiment
+    print("Running experiment...")
+    # results = experiment.run_experiment(frequency_range=[2.87e9, 2.88e9, 2.89e9])
+    results = experiment.run_experiment(frequency_range=[2.87e9])
+    if results['success']:
+        print("Experiment completed successfully!")
+        print(f"Frequencies scanned: {[f / 1e9 for f in results['frequencies']]} GHz")
+        print(
+            f"Signal counts shape: {len(results['signal_counts'])} frequencies x {len(results['signal_counts'][0])} points")
+    else:
+        print(f"Experiment failed: {results['error']}")"""

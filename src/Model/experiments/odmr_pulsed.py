@@ -988,9 +988,10 @@ class ODMRPulsedExperiment(Experiment):
             # wait for length of the entire experiment, then get the data
             time.sleep(wait_time)"""
             # this method has adwin collecting data and telling python that it has finished (which is the correct way to do it):
-            while self.adwin.get_int_var(7) == 0:
-                time.sleep(1)
-            print(f"self.adwin.get_int_var(8): {self.adwin.get_int_var(8)}")
+            """while self.adwin.get_int_var(7) == 0:
+                time.sleep(60)
+            print(f"self.adwin.get_int_var(8): {self.adwin.get_int_var(8)}")"""
+            time.sleep(3000)
             signal_counts = self.adwin.get_int_data(1, self.number_of_iterations)
             ref_counts = self.adwin.get_int_data(2, self.number_of_iterations)
             for i in range(self.number_of_iterations):
