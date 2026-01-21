@@ -40,52 +40,77 @@ class NV_positioning_experiment(Experiment):
     - Newport_Conex_CC
     - Amscope camera
     - Nanodrive
+    Please note: this experiment does not do any confocal scans. It only positions the NV based on old data. To optimize your counts, you need to run confocal point and might use automated optimization
     '''
 
     _DEFAULT_SETTINGS = [
         Parameter('old_bottom_left',
-                  [Parameter('x',50.0,float,' old_bottom_left x-coordinate in microns'),
-                   Parameter('y',5.0,float,'old_bottom_left y-coordinate in microns')
+                  [Parameter('micro_x',50.0,float,'microdrive old_bottom_left x-coordinate in microns'),
+                   Parameter('micro_y',5.0,float,'microdrive old_bottom_left y-coordinate in microns'),
+                   Parameter('nano_x', 5.0, float, 'nanodrive old_bottom_left y-coordinate in microns'),
+                   Parameter('nano_y', 5.0, float, 'nanodrive old_bottom_left y-coordinate in microns'),
+                   Parameter('nano_z', 5.0, float, 'nanodrive old_bottom_left y-coordinate in microns')
                    ]),
         Parameter('old_bottom_right',
-                  [Parameter('x',50.0,float, 'old_bottom_right x-coordinate in microns'),
-                   Parameter('y', 50.0, float, 'old_bottom_right y-coordinate in microns')
+                  [Parameter('micro_x',50.0,float, 'microdrive old_bottom_right x-coordinate in microns'),
+                   Parameter('micro_y', 5.0, float, 'microdrive old_bottom_right y-coordinate in microns'),
+                   Parameter('nano_x', 5.0, float, 'nanodrive old_bottom_right y-coordinate in microns'),
+                   Parameter('nano_y', 5.0, float, 'nanodrive old_bottom_right y-coordinate in microns'),
+                   Parameter('nano_z', 5.0, float, 'nanodrive old_bottom_right y-coordinate in microns')
                    ]),
         Parameter('old_top_left',
-                  [Parameter('x',50.0,float,'old_top_left x-coordinate in microns'),
-                   Parameter('y', 50.0, float, 'old_top_left y-coordinate in microns')
+                  [Parameter('micro_x',50.0,float,'microdrive old_top_left x-coordinate in microns'),
+                   Parameter('micro_y', 5.0, float, 'microdrive old_top_left y-coordinate in microns'),
+                   Parameter('nano_x', 5.0, float, 'nanodrive old_top_left y-coordinate in microns'),
+                   Parameter('nano_y', 5.0, float, 'nanodrive old_top_left y-coordinate in microns'),
+                   Parameter('nano_z', 5.0, float, 'nanodrive old_top_left y-coordinate in microns')
                    ]),
         Parameter('old_top_right',
-                  [Parameter('x',50.0,float,'old_top_right x-coordinate in microns'),
-                   Parameter('y', 50.0, float, 'old_top_right y-coordinate in microns')
+                  [Parameter('micro_x',50.0,float,'microdrive old_top_right x-coordinate in microns'),
+                   Parameter('micro_y', 5.0, float, 'microdrive old_top_right y-coordinate in microns'),
+                   Parameter('nano_x', 5.0, float, 'nanodrive old_top_right y-coordinate in microns'),
+                   Parameter('nano_y', 5.0, float, 'nanodrive old_top_right y-coordinate in microns'),
+                   Parameter('nano_z', 5.0, float, 'nanodrive old_top_right y-coordinate in microns')
                    ]),
         Parameter('new_bottom_left',
-                  [Parameter('x', 50.0, float, 'new_bottom_left x-coordinate in microns'),
-                   Parameter('y', 5.0, float, 'new_bottom_left y-coordinate in microns')
+                  [Parameter('micro_x', 50.0, float, 'microdrive new_bottom_left x-coordinate in microns'),
+                   Parameter('micro_y', 5.0, float, 'microdrive new_bottom_left y-coordinate in microns'),
+                   Parameter('nano_x', 5.0, float, 'nanodrive new_bottom_left y-coordinate in microns'),
+                   Parameter('nano_y', 5.0, float, 'nanodrive new_bottom_left y-coordinate in microns'),
+                   Parameter('nano_z', 5.0, float, 'nanodrive new_bottom_left y-coordinate in microns')
                    ]),
         Parameter('new_bottom_right',
-                  [Parameter('x', 50.0, float, 'new_bottom_right x-coordinate end in microns'),
-                   Parameter('y', 50.0, float, 'new_bottom_right y-coordinate end in microns')
+                  [Parameter('micro_x', 50.0, float, 'microdrive new_bottom_right x-coordinate end in microns'),
+                   Parameter('micro_y', 5.0, float, 'microdrive new_bottom_right y-coordinate in microns'),
+                   Parameter('nano_x', 5.0, float, 'nanodrive new_bottom_right y-coordinate in microns'),
+                   Parameter('nano_y', 5.0, float, 'nanodrive new_bottom_right y-coordinate in microns'),
+                   Parameter('nano_z', 5.0, float, 'nanodrive new_bottom_right y-coordinate in microns')
                    ]),
         Parameter('new_top_left',
-                  [Parameter('x', 50.0, float, 'new_top_left x-coordinate end in microns'),
-                   Parameter('y', 50.0, float, 'new_top_left y-coordinate end in microns')
+                  [Parameter('micro_x', 50.0, float, 'microdrive new_top_left x-coordinate end in microns'),
+                   Parameter('micro_y', 5.0, float, 'microdrive new_top_left y-coordinate in microns'),
+                   Parameter('nano_x', 5.0, float, 'nanodrive new_top_left y-coordinate in microns'),
+                   Parameter('nano_y', 5.0, float, 'nanodrive new_top_left y-coordinate in microns'),
+                   Parameter('nano_z', 5.0, float, 'nanodrive new_top_left y-coordinate in microns')
                    ]),
         Parameter('new_top_right',
-                  [Parameter('x', 50.0, float, 'new_top_right x-coordinate in microns'),
-                   Parameter('y', 50.0, float, 'new_top_right y-coordinate in microns')
+                  [Parameter('micro_x', 50.0, float, 'microdrive new_top_right x-coordinate in microns'),
+                   Parameter('micro_y', 5.0, float, 'microdrive new_top_right y-coordinate in microns'),
+                   Parameter('nano_x', 5.0, float, 'nanodrive new_top_right y-coordinate in microns'),
+                   Parameter('nano_y', 5.0, float, 'nanodrive new_top_right y-coordinate in microns'),
+                   Parameter('nano_z', 5.0, float, 'nanodrive new_top_right y-coordinate in microns')
                    ]),
         Parameter('old_NV_location',
-                  [Parameter('x', 50.0, float, 'old_NV_location x-coordinate in microns'),
-                   Parameter('y', 50.0, float, 'old_NV_location y-coordinate in microns'),
-                   Parameter('z', 50.0, float, 'old_NV_location z-coordinate in microns')
+                  [Parameter('micro_x', 50.0, float, 'microdrive old_NV_location x-coordinate in microns'),
+                   Parameter('micro_y', 5.0, float, 'microdrive old_NV_location y-coordinate in microns'),
+                   Parameter('nano_x', 5.0, float, 'nanodrive old_NV_location y-coordinate in microns'),
+                   Parameter('nano_y', 5.0, float, 'nanodrive old_NV_location y-coordinate in microns'),
+                   Parameter('nano_z', 5.0, float, 'nanodrive old_NV_location y-coordinate in microns')
                    ]),
         Parameter('positions',
                   [Parameter('folderpath', str(get_configured_nv_positioning_folder()), str,
                              'folder location to save positions of points')]),
-        Parameter('z_pos',50.0,float,'z position of nanodrive; useful for z-axis sweeps to find NVs'),
         Parameter('resolution', 1.0, [2.0,1.0,0.5,0.25,0.1,0.05,0.025,0.001], 'Resolution of each pixel in microns (nanodrive). Limited to give '),
-        Parameter('time_per_pt', 2.0, [2.0,5.0], 'Time in ms at each point to get counts; same as load_rate for nanodrive. Wroking values 2 or 5 ms'),
         Parameter('ending_behavior', 'return_to_inital_pos', ['return_to_inital_pos', 'return_to_origin', 'leave_at_corner'],'Nanodrive position after scan'),
         #clocks currently not implemented
         Parameter('laser_clock', 'Pixel', ['Pixel','Line','Frame','Aux'], 'Nanodrive clocked used for turning laser on and off')

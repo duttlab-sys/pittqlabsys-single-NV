@@ -141,9 +141,9 @@
             "info": "\n    This class implements the Mad City Labs NanoDrive. The class loads the madlib.dll library to communicate with the device.\n    ",
             "settings": {
                 "serial": 2849,
-                "x_pos": 37.28903173733866,
-                "y_pos": 25.633750213101315,
-                "z_pos": 90.41981706240277,
+                "x_pos": 42.00897358452163,
+                "y_pos": 30.01781298696584,
+                "z_pos": 90.44046049951986,
                 "read_rate": 2.0,
                 "load_rate": 2.0,
                 "num_datapoints": 1,

@@ -4,7 +4,14 @@ import time
 from PyQt5.QtWidgets import QMainWindow, QMessageBox, QWidget
 from src.Controller.newport_conex_cc import Newport_CONEX_CC_xy_stage
 from src.Controller.nanodrive import MCLNanoDrive
+from src.Model.experiments.data_saver import ExperimentHDF5WriterSWMR
 from .positioning_stages_design import Ui_Form
+from .display_GUI import Display_View
+from datetime import datetime
+import os
+from PyQt5.QtWidgets import QFileDialog
+import h5py
+import numpy as np
 # Assuming the .ui file is converted to design.py
 #To convert positioning_stages_design.ui to .py, paste this into the terminal:
 # pyuic5 -x positioning_stages_design.ui -o positioning_stages_design.py
@@ -36,7 +43,8 @@ class positioning_stages_view(QWidget, Ui_Form):
     """
     display_choice_changed = pyqtSignal(str)
     snapshot_mode_changed = pyqtSignal(int)
-    def __init__(self, parent=None):
+    save_button_clicked = pyqtSignal(int)
+    def __init__(self, parent = None):
         super().__init__(parent)
         self.setupUi(self)
         self.stage_1 = None
@@ -94,9 +102,11 @@ class positioning_stages_view(QWidget, Ui_Form):
         self.z_dec_1.clicked.connect(self.dec_z_position_1)
         self.z_dec_2.clicked.connect(self.dec_z_position_2)
         self.save_button.clicked.connect(self.save)
+        self.Find_NV_Button.clicked.connect(self.find_NV)
         # Connect combobox signals to emitters
         self.display_option.currentTextChanged.connect(self.on_display_choice_changed)
         self.snapshot_live_comboBox.currentTextChanged.connect(self.on_snapshot_or_live_changed)
+        self.data_saving_path = None
 
     def connect_to_instrument_1(self):
         """This function connects the devices: please make sure that your stage has the function get_position(self, axis)"""
@@ -515,13 +525,200 @@ class positioning_stages_view(QWidget, Ui_Form):
         return self.snapshot_live_comboBox.currentText()
 
     def save(self):
-        #to implement later
         """
         Nanodrive x, y, z pos
         Microdrive z, y pos
         Snapshot of camera with crosshair
         Crosshair x, y pos
-        Buffer and self.h, self.w from camera
-        Have windows explorer pop up
+        windows explorer pops up
         """
+
+        self.save_button_clicked.emit(1)
+
+        # --- UI → internal keys ---
+        sample_ui = self.Sample_Selector_comboBox.currentText()
+        point_ui = self.Point_Selector_comboBox.currentText()
+
+        sample_key = "old" if sample_ui == "New Sample" else "new"
+        point_key = point_ui.lower().replace(" ", "_")
+
+        # --- File handling ---
+        if sample_ui == "New Sample":
+            # create new file ONCE
+            directory, filename = self.open_directory_dialog(self.data_saving_path)
+            if filename is None:
+                return  # user canceled
+
+            self.data_saving_path = directory
+            full_path = os.path.join(directory, filename)
+
+            if os.path.exists(full_path):
+                if not self.confirm_overwrite(filename):
+                    return
+
+            f = h5py.File(full_path, "w", libver="latest")
+            # initialize structure
+            f.create_group("positioning")
+            f["positioning"].attrs["created"] = datetime.utcnow().isoformat()
+
+        else:
+            # existing sample → choose file
+            filename = self.open_file_dialog(self.data_saving_path)
+            f = h5py.File(filename, "r+", libver="latest")
+
+        # --- Create point group ---
+        parent_path = f"positioning/{sample_key}"
+        group_path = f"{parent_path}/{point_key}"
+
+        # ensure parent exists
+        parent = f.require_group(parent_path)
+
+        # confirm overwrite BEFORE creating
+        if point_key in parent:
+            if not self.confirm_overwrite(point_key):
+                f.close()
+                return
+            del parent[point_key]
+
+        grp = parent.create_group(point_key)
+
+
+        # --- Read stages explicitly ---
+        # this assumes that one is a microdrive and the other is a nanodrive
+        stage_1_name = self.comboBox_1.currentText()
+        if "nanodrive" in stage_1_name:
+            nano = self.stage_1
+            micro = self.stage_2
+        else:
+            nano = self.stage_2
+            micro = self.stage_1
+
+        grp.attrs["micro_x"] = micro.get_position("x")
+        grp.attrs["micro_y"]= micro.get_position("y")
+        grp.attrs["nano_x"]= nano.get_position("x")
+        grp.attrs["nano_y"]= nano.get_position("y")
+        grp.attrs["nano_z"]= nano.get_position("z")
+        grp.attrs["camera_x"]= self.x_crosshair
+        grp.attrs["camera_y"]= self.y_crosshair
+        grp.attrs["timestamp"]= datetime.utcnow().isoformat()
+
+
+        f.flush()
+        f.close()
+
+        with h5py.File("sample_1.h5", "r") as f:
+            def walk(name, obj):
+                print(f"\n{name}")
+                for k, v in obj.attrs.items():
+                    print(f"{k}: {v}")
+
+            f.visititems(walk)
+
+    def open_file_dialog(self, start_path):
+        from PyQt5.QtWidgets import QFileDialog
+        # or: from PySide6.QtWidgets import QFileDialog
+
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open sample file",
+            start_path,
+            "HDF5 files (*.h5);;All files (*)"
+        )
+
+        if not filename:
+            raise RuntimeError("No file selected")
+
+        return filename
+
+    def open_directory_dialog(self, start_path):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Select file location",
+            start_path,
+            "HDF5 Files (*.h5);;All Files (*)"
+        )
+
+        # User pressed Cancel
+        if not file_path:
+            return None, None
+
+        directory = os.path.dirname(file_path)
+        filename = os.path.basename(file_path)
+
+        return directory, filename
+
+    def confirm_overwrite(self, point_key):
+        from PyQt5.QtWidgets import QMessageBox
+        # or: from PySide6.QtWidgets import QMessageBox
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Overwrite point?")
+        msg.setText(f"Point '{point_key}' already exists.")
+        msg.setInformativeText("Do you want to overwrite it?")
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+
+        return msg.exec() == QMessageBox.Yes
+
+    def find_NV(self):
+        filename = self.open_file_dialog(self.data_saving_path)
         return
+
+    def fit_micro_nano_transform(self, old_pts, new_pts):
+        """
+        old_pts, new_pts: list of dicts with keys:
+          micro_x, micro_y, nano_x, nano_y
+
+        Returns:
+          params: length-10 array
+        """
+
+        A = []
+        B = []
+
+        for o, n in zip(old_pts, new_pts):
+            mx, my = o["micro_x"], o["micro_y"]
+            nx, ny = o["nano_x"], o["nano_y"]
+
+            A.append([mx, my, nx, ny, 1, 0, 0, 0, 0, 0])
+            A.append([0, 0, 0, 0, 0, mx, my, nx, ny, 1])
+
+            # New *effective* sample-plane position
+            x_new = n["micro_x"] + n["nano_x"]
+            y_new = n["micro_y"] + n["nano_y"]
+
+            B.append(x_new)
+            B.append(y_new)
+
+        A = np.array(A, dtype=float)
+        B = np.array(B, dtype=float)
+
+        params, _, _, _ = np.linalg.lstsq(A, B, rcond=None)
+        return params
+
+    def predict_nv_position(self, params, nv_old):
+        mx, my = nv_old["micro_x"], nv_old["micro_y"]
+        nx, ny = nv_old["nano_x"], nv_old["nano_y"]
+
+        x = (
+                params[0] * mx + params[1] * my +
+                params[2] * nx + params[3] * ny +
+                params[4]
+        )
+
+        y = (
+                params[5] * mx + params[6] * my +
+                params[7] * nx + params[8] * ny +
+                params[9]
+        )
+
+        return x, y
+
+    """old_pts = [TL_old, TR_old, BL_old, BR_old]
+    new_pts = [TL_new, TR_new, BL_new, BR_new]
+
+    params = fit_micro_nano_transform(old_pts, new_pts)
+
+    nv_new_xy = predict_nv_position(params, NV_old)
+    print("Predicted NV X,Y:", nv_new_xy)"""

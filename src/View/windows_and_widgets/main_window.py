@@ -12,7 +12,11 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+
+"""to access current saving directory:
+(self.data_saving_tab.current_path())"""
 from .agilent_8596E_GUI import SpectrumAnalyzerView
+from .data_saving_tab import data_saving_tab_view
 from .display_GUI import Display_View
 from .positioning_stages_GUI import positioning_stages_view
 from PyQt5 import QtGui, QtWidgets
@@ -218,12 +222,16 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.setupUi(self)
         self.spectrum_tab = SpectrumAnalyzerView()
         self.tabWidget.addTab(self.spectrum_tab, "Spectrum Analyzer")
+        self.data_saving_tab = data_saving_tab_view()
+        self.tabWidget.addTab(self.data_saving_tab, "Data Saving")
+        self.data_saving_path = self.data_saving_tab.current_path() # @
         self.positioning_tab = positioning_stages_view()
         self.tabWidget.addTab(self.positioning_tab, "Positioning")
         self.display_choice = self.positioning_tab.display_choice()
         self.snapshot_or_live = self.positioning_tab.snapshot_or_live()
         self.positioning_tab.display_choice_changed.connect(self.update_display_choice)
         self.positioning_tab.snapshot_mode_changed.connect(self.update_snapshot_mode)
+        self.positioning_tab.save_button_clicked.connect(self.update_current_data_saving_path) # @
         gui_logger.debug("setupUi() completed successfully")
         
         # Fix for macOS menu bar issue - ensure menu bar is properly attached to main window
@@ -459,6 +467,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # if self.config_filepath is None:
         #     self.config_filepath = os.path.join(self._DEFAULT_CONFIG["gui_settings"], 'gui.aqs')
 
+    def update_current_data_saving_path(self):
+        self.data_saving_path = self.data_saving_tab.current_path()
+        self.positioning_tab.data_saving_path = self.data_saving_path
+
     def closeEvent(self, event):
         """
         things to be done when gui closes, like save the settings
@@ -587,6 +599,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.snapshot_or_live = mode
         self.reload_display_widget()
 
+    def update_x_crosshair(self):
+        self.positioning_tab.x_crosshair = self.Display_View_widget.x_selected
+
+    def update_y_crosshair(self):
+        self.positioning_tab.y_crosshair = self.Display_View_widget.y_selected
+
     def reload_display_widget(self):
         print("reload_display_widget called, snapshot or live:", self.snapshot_or_live)
         #if hasattr(self, 'Display_View_widget'):
@@ -624,6 +642,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.remove_and_store_layout_contents(self.verticalLayout_2)
         # Create and add display view widget
         self.Display_View_widget = Display_View(self.display_choice, self.snapshot_or_live)
+        self.Display_View_widget.x_crosshair.connect(self.update_x_crosshair)
+        self.Display_View_widget.y_crosshair.connect(self.update_y_crosshair)
         self.Display_View_widget.setMinimumHeight(500)
         self.Display_View_widget.setMinimumWidth(500)
 

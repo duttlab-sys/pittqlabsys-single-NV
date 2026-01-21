@@ -21,7 +21,8 @@ class Display_View(QWidget, Ui_Form):
     """
     This is the widget of the positioning stages. It allows us to control positioning devices using buttons and LineEdits
     """
-
+    x_crosshair = pyqtSignal(int)
+    y_crosshair = pyqtSignal(int)
     def __init__(self, display_choice = "MU300", snapshot_or_live = 1, parent=None):
         super().__init__(parent)
         self.setupUi(self)
@@ -86,6 +87,8 @@ class Display_View(QWidget, Ui_Form):
         self.crosshair_x.valueChanged.connect(self.on_crosshair_changed)
         self.crosshair_y.valueChanged.connect(self.on_crosshair_changed)
         self.crosshair_width.valueChanged.connect(self.on_crosshair_changed)
+        self.x_selected = 0
+        self.y_selected = 0
 
     def update_choices(self, display_choice, snapshot_or_live):
         #this function gets the signals from main (that are emitted by the positioning class) and only updates the display of the choices are different from what we have
@@ -255,6 +258,8 @@ class Display_View(QWidget, Ui_Form):
         self.x_selected = x
         self.y_selected = y
         self.draw_crosshair(x, y)
+        self.x_crosshair.emit(x)
+        self.y_crosshair.emit(y)
 
     def clear_crosshair(self):
         self.widget.label.disable_crosshair()
