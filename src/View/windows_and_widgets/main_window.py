@@ -231,7 +231,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.snapshot_or_live = self.positioning_tab.snapshot_or_live()
         self.positioning_tab.display_choice_changed.connect(self.update_display_choice)
         self.positioning_tab.snapshot_mode_changed.connect(self.update_snapshot_mode)
-        self.positioning_tab.save_button_clicked.connect(self.update_current_data_saving_path) # @
+        self.positioning_tab.save_or_find_nv_button_clicked.connect(self.update_current_data_saving_path) # @
         gui_logger.debug("setupUi() completed successfully")
         
         # Fix for macOS menu bar issue - ensure menu bar is properly attached to main window
@@ -561,6 +561,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         """
         current_tab = str(self.tabWidget.tabText(self.tabWidget.currentIndex()))
         if current_tab == "Positioning":
+            if not (self.data_saving_tab.data_reader is None):
+                self.data_saving_tab.data_reader.close()
             self.load_display_widget()
             self.resize(self.sizeHint())
         else:

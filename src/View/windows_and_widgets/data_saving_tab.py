@@ -9,6 +9,8 @@ import os
 from PyQt5.QtWidgets import QMenu, QInputDialog, QMessageBox
 from pathlib import Path
 from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QPushButton
+from src.Model.data_saver import ExperimentHDF5ReaderSWMR
 
 
 
@@ -58,11 +60,19 @@ class data_saving_tab_view(QWidget, Ui_Form):
         layout = QVBoxLayout(self)
         layout.addLayout(header_layout)
         layout.addWidget(self.tree)
+        # --- Read Data button ---
+        self.read_data_btn = QPushButton("Read Data")
+        self.read_data_btn.setEnabled(False)
+        self.read_data_btn.clicked.connect(self.read_selected_file)
+
+        layout.addWidget(self.read_data_btn)
+
         self.setLayout(layout)
 
         # --- Initial directory ---
-        start_path = os.path.expanduser("~")
+        start_path = r"D:\Data"
         self.set_directory(start_path, record_history=False)
+        self.data_reader = None
 
     # =========================
     # Navigation logic
@@ -106,10 +116,13 @@ class data_saving_tab_view(QWidget, Ui_Form):
 
     def on_item_double_clicked(self, index: QModelIndex):
         path = self.model.filePath(index)
+
         if os.path.isdir(path):
             self.set_directory(path)
+            self.read_data_btn.setEnabled(False)
         else:
             print(f"File selected: {path}")
+            self.read_data_btn.setEnabled(True)
 
     def on_path_entered(self):
         path = self.path_header.text()
@@ -123,12 +136,21 @@ class data_saving_tab_view(QWidget, Ui_Form):
         new_folder_action = menu.addAction("New Folder")
         new_file_action = menu.addAction("New File")
 
+        if index.isValid():
+            menu.addSeparator()
+            rename_action = menu.addAction("Rename")
+            delete_action = menu.addAction("Delete")
+
         action = menu.exec_(self.tree.viewport().mapToGlobal(position))
 
         if action == new_folder_action:
-            self.create_new_folder(index)
+            self.create_new_folder(index, auto_rename=True)
         elif action == new_file_action:
             self.create_new_file(index)
+        elif index.isValid() and action == rename_action:
+            self.rename_item(index)
+        elif index.isValid() and action == delete_action:
+            self.delete_item(index)
 
     def get_target_directory(self, index):
         if index.isValid():
@@ -138,25 +160,38 @@ class data_saving_tab_view(QWidget, Ui_Form):
             return path
         return Path(self.current_path())
 
-    def create_new_folder(self, index):
+    def create_new_folder(self, index, auto_rename=False):
         target_dir = self.get_target_directory(index)
 
-        name, ok = QInputDialog.getText(
-            self, "New Folder", "Folder name:"
-        )
+        if auto_rename:
+            base_name = "New Folder"
+            name = base_name
+            counter = 1
+
+            while (target_dir / name).exists():
+                counter += 1
+                name = f"{base_name} ({counter})"
+
+            new_path = target_dir / name
+            new_path.mkdir()
+
+            # Select & start rename
+            new_index = self.model.index(str(new_path))
+            self.tree.setCurrentIndex(new_index)
+            self.tree.edit(new_index)
+            return
+
+        # Manual naming fallback
+        name, ok = QInputDialog.getText(self, "New Folder", "Folder name:")
         if not ok or not name:
             return
 
         new_path = target_dir / name
-
         if new_path.exists():
             QMessageBox.warning(self, "Error", "Folder already exists.")
             return
 
-        try:
-            new_path.mkdir()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
+        new_path.mkdir()
 
     def create_new_file(self, index):
         target_dir = self.get_target_directory(index)
@@ -177,3 +212,75 @@ class data_saving_tab_view(QWidget, Ui_Form):
             new_path.touch()
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
+
+    def rename_item(self, index):
+        path = Path(self.model.filePath(index))
+        old_suffix = path.suffix if path.is_file() else ""
+
+        new_name, ok = QInputDialog.getText(
+            self, "Rename", "New name:", text=path.name
+        )
+        if not ok or not new_name or new_name == path.name:
+            return
+
+        if path.is_file() and Path(new_name).suffix == "":
+            new_name += old_suffix
+
+        new_path = path.parent / new_name
+
+        if new_path.exists():
+            QMessageBox.warning(self, "Error", "A file or folder with this name already exists.")
+            return
+
+        try:
+            path.rename(new_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def delete_item(self, index):
+        path = Path(self.model.filePath(index))
+
+        reply = QMessageBox.question(
+            self,
+            "Delete",
+            f"Are you sure you want to delete:\n\n{path.name}?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            if path.is_dir():
+                import shutil
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def read_selected_file(self):
+        index = self.tree.currentIndex()
+        if not index.isValid():
+            QMessageBox.warning(self, "No selection", "Please select a file.")
+            return
+
+        path = self.model.filePath(index)
+
+        if os.path.isdir(path):
+            QMessageBox.warning(self, "Invalid selection", "Please select a file.")
+            return
+
+        ext = Path(path).suffix.lower()
+
+        if ext not in [".h5", ".hdf5"]:
+            QMessageBox.warning(
+                self,
+                "Unsupported file",
+                "Only .h5 and .hdf5 files are supported."
+            )
+            return
+
+        print(f"Reading file: {path}")
+        self.data_reader = ExperimentHDF5ReaderSWMR(path)
+        self.data_reader.read_structure()

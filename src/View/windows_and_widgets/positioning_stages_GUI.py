@@ -1,17 +1,16 @@
 # Created by Jannet Trabelsi on 2025-09-02
 # Please note: the controller class raises errors. However, the GUI sets default values to solve for invalid inputs
 import time
-from PyQt5.QtWidgets import QMainWindow, QMessageBox, QWidget
+from PyQt5.QtWidgets import QMessageBox, QWidget
 from src.Controller.newport_conex_cc import Newport_CONEX_CC_xy_stage
 from src.Controller.nanodrive import MCLNanoDrive
-from src.Model.experiments.data_saver import ExperimentHDF5WriterSWMR
+from src.Model.data_saver import ExperimentHDF5WriterSWMR
 from .positioning_stages_design import Ui_Form
-from .display_GUI import Display_View
 from datetime import datetime
 import os
-from PyQt5.QtWidgets import QFileDialog
-import h5py
 import numpy as np
+from src.Model.data_saver import ExperimentHDF5ReaderSWMR
+from PyQt5.QtWidgets import QFileDialog
 # Assuming the .ui file is converted to design.py
 #To convert positioning_stages_design.ui to .py, paste this into the terminal:
 # pyuic5 -x positioning_stages_design.ui -o positioning_stages_design.py
@@ -43,7 +42,7 @@ class positioning_stages_view(QWidget, Ui_Form):
     """
     display_choice_changed = pyqtSignal(str)
     snapshot_mode_changed = pyqtSignal(int)
-    save_button_clicked = pyqtSignal(int)
+    save_or_find_nv_button_clicked = pyqtSignal(int)
     def __init__(self, parent = None):
         super().__init__(parent)
         self.setupUi(self)
@@ -107,6 +106,7 @@ class positioning_stages_view(QWidget, Ui_Form):
         self.display_option.currentTextChanged.connect(self.on_display_choice_changed)
         self.snapshot_live_comboBox.currentTextChanged.connect(self.on_snapshot_or_live_changed)
         self.data_saving_path = None
+        self.data_reader = None
 
     def connect_to_instrument_1(self):
         """This function connects the devices: please make sure that your stage has the function get_position(self, axis)"""
@@ -525,26 +525,20 @@ class positioning_stages_view(QWidget, Ui_Form):
         return self.snapshot_live_comboBox.currentText()
 
     def save(self):
-        """
-        Nanodrive x, y, z pos
-        Microdrive z, y pos
-        Snapshot of camera with crosshair
-        Crosshair x, y pos
-        windows explorer pops up
-        """
-
-        self.save_button_clicked.emit(1)
-
+        self.save_or_find_nv_button_clicked.emit(1)
         # --- UI → internal keys ---
-        sample_ui = self.Sample_Selector_comboBox.currentText()
-        point_ui = self.Point_Selector_comboBox.currentText()
+        sample_selection = self.Sample_Selector_comboBox.currentText()
+        point_selection = self.Point_Selector_comboBox.currentText()
+        point_status = self.point_status_comboBox.currentText()
 
-        sample_key = "old" if sample_ui == "New Sample" else "new"
-        point_key = point_ui.lower().replace(" ", "_")
+        point_key = point_selection.lower().replace(" ", "_")
+        if point_status == "FINAL" and point_selection == "NV":
+            self.error_box("YOU CANNOT SELECT FINAL NV POINT", "To find NV, click find NV button!")
+            return
 
         # --- File handling ---
-        if sample_ui == "New Sample":
-            # create new file ONCE
+        if sample_selection == "New Sample":
+            point_status = "INITIAL"
             directory, filename = self.open_directory_dialog(self.data_saving_path)
             if filename is None:
                 return  # user canceled
@@ -556,68 +550,73 @@ class positioning_stages_view(QWidget, Ui_Form):
                 if not self.confirm_overwrite(filename):
                     return
 
-            f = h5py.File(full_path, "w", libver="latest")
-            # initialize structure
-            f.create_group("positioning")
-            f["positioning"].attrs["created"] = datetime.utcnow().isoformat()
+            mode = "w"
 
         else:
-            # existing sample → choose file
-            filename = self.open_file_dialog(self.data_saving_path)
-            f = h5py.File(filename, "r+", libver="latest")
+            full_path = self.open_file_dialog(self.data_saving_path)
+            if full_path is None:
+                return
+            mode = "r+"
 
-        # --- Create point group ---
-        parent_path = f"positioning/{sample_key}"
-        group_path = f"{parent_path}/{point_key}"
+        # --- Open writer ---
+        writer = ExperimentHDF5WriterSWMR(
+            full_path,
+            mode=mode,
+            swmr=False  # snapshot, not live streaming
+        )
 
-        # ensure parent exists
-        parent = f.require_group(parent_path)
+        # --- positioning group ---
+        positioning = writer.file.require_group("positioning")
+        positioning.attrs.setdefault("created", datetime.utcnow().isoformat())
+
+        parent = positioning.require_group(point_status)
 
         # confirm overwrite BEFORE creating
         if point_key in parent:
             if not self.confirm_overwrite(point_key):
-                f.close()
+                writer.close()
                 return
             del parent[point_key]
 
         grp = parent.create_group(point_key)
 
-
-        # --- Read stages explicitly ---
-        # this assumes that one is a microdrive and the other is a nanodrive
+        # --- Identify stages ---
         stage_1_name = self.comboBox_1.currentText()
-        if "nanodrive" in stage_1_name:
+        if "nanodrive" in stage_1_name.lower():
             nano = self.stage_1
             micro = self.stage_2
         else:
             nano = self.stage_2
             micro = self.stage_1
 
+        # --- Snapshot metadata ---
         grp.attrs["micro_x"] = micro.get_position("x")
-        grp.attrs["micro_y"]= micro.get_position("y")
-        grp.attrs["nano_x"]= nano.get_position("x")
-        grp.attrs["nano_y"]= nano.get_position("y")
-        grp.attrs["nano_z"]= nano.get_position("z")
-        grp.attrs["camera_x"]= self.x_crosshair
-        grp.attrs["camera_y"]= self.y_crosshair
-        grp.attrs["timestamp"]= datetime.utcnow().isoformat()
+        grp.attrs["micro_y"] = micro.get_position("y")
 
+        grp.attrs["nano_x"] = nano.get_position("x")
+        grp.attrs["nano_y"] = nano.get_position("y")
+        grp.attrs["nano_z"] = nano.get_position("z")
 
-        f.flush()
-        f.close()
+        grp.attrs["camera_x"] = self.x_crosshair
+        grp.attrs["camera_y"] = self.y_crosshair
 
-        with h5py.File("sample_1.h5", "r") as f:
-            def walk(name, obj):
-                print(f"\n{name}")
-                for k, v in obj.attrs.items():
-                    print(f"{k}: {v}")
+        grp.attrs["timestamp"] = datetime.utcnow().isoformat()
 
-            f.visititems(walk)
+        writer.flush()
+        writer.close()
+
+    def error_box(self, text, info, title="Error"):
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle(title)
+        msg.setText(text)
+        msg.setInformativeText(info)
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.setDefaultButton(QMessageBox.Ok)
+
+        return msg.exec() == QMessageBox.Ok
 
     def open_file_dialog(self, start_path):
-        from PyQt5.QtWidgets import QFileDialog
-        # or: from PySide6.QtWidgets import QFileDialog
-
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Open sample file",
@@ -648,9 +647,6 @@ class positioning_stages_view(QWidget, Ui_Form):
         return directory, filename
 
     def confirm_overwrite(self, point_key):
-        from PyQt5.QtWidgets import QMessageBox
-        # or: from PySide6.QtWidgets import QMessageBox
-
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Warning)
         msg.setWindowTitle("Overwrite point?")
@@ -662,8 +658,54 @@ class positioning_stages_view(QWidget, Ui_Form):
         return msg.exec() == QMessageBox.Yes
 
     def find_NV(self):
-        filename = self.open_file_dialog(self.data_saving_path)
-        return
+        self.save_or_find_nv_button_clicked.emit(1)
+        # select file
+        path = self.open_file_dialog(self.data_saving_path)
+        if not path:
+            return
+
+        # read file
+        self.data_reader = ExperimentHDF5ReaderSWMR(path)
+        self.data_reader.read_structure()
+
+        structure = self.data_reader.get_structure()
+
+        required_corners = {"top_left", "top_right", "bottom_left", "bottom_right"}
+
+        init = structure.get("INITIAL", {})
+        final = structure.get("FINAL", {})
+
+        # Validation
+        if not required_corners.issubset(init.keys()):
+            self.error_box("INITIAL does not contain all 4 corners", "please add all 4 corners before proceeding")
+            self.data_reader.close()
+            return
+
+        if not required_corners.issubset(final.keys()):
+            self.error_box("FINAL does not contain all 4 corners", "please add all 4 corners before proceeding")
+            self.data_reader.close()
+            return
+
+        if "nv" not in init:
+            self.error_box("NV does not exist in INITIAL", "please NV point before proceeding")
+            self.data_reader.close()
+            return
+
+        # Prepare points
+        old_pts = [init[c] for c in required_corners]
+        new_pts = [final[c] for c in required_corners]
+        print(f"required corners: {required_corners}")
+        print(f"new corners: {new_pts}")
+        print(f"old corners: {old_pts}")
+
+        params = self.fit_micro_nano_transform(old_pts, new_pts)
+
+        nv_old = init["nv"]
+        nv_x, nv_y = self.predict_nv_position(params, nv_old)
+
+        self.data_reader.close()
+
+        return nv_x, nv_y
 
     def fit_micro_nano_transform(self, old_pts, new_pts):
         """
@@ -680,13 +722,17 @@ class positioning_stages_view(QWidget, Ui_Form):
         for o, n in zip(old_pts, new_pts):
             mx, my = o["micro_x"], o["micro_y"]
             nx, ny = o["nano_x"], o["nano_y"]
+            print(f"mx {mx} my {my} nx {nx} ny {ny}")
 
             A.append([mx, my, nx, ny, 1, 0, 0, 0, 0, 0])
             A.append([0, 0, 0, 0, 0, mx, my, nx, ny, 1])
-
+            print(f"n[micro_x]: {n["micro_x"]}")
+            print(f"n[nano_x]: {n["nano_x"]}")
+            print(f"n[nano_y]: {n["nano_y"]}")
+            print(f"n[micro_y]: {n["micro_y"]}")
             # New *effective* sample-plane position
-            x_new = n["micro_x"] + n["nano_x"]
-            y_new = n["micro_y"] + n["nano_y"]
+            x_new = float(n["micro_x"]) + n["nano_x"]
+            y_new = float(n["micro_y"]) + n["nano_y"]
 
             B.append(x_new)
             B.append(y_new)
@@ -698,7 +744,7 @@ class positioning_stages_view(QWidget, Ui_Form):
         return params
 
     def predict_nv_position(self, params, nv_old):
-        mx, my = nv_old["micro_x"], nv_old["micro_y"]
+        mx, my = float(nv_old["micro_x"]), float(nv_old["micro_y"])
         nx, ny = nv_old["nano_x"], nv_old["nano_y"]
 
         x = (
@@ -712,6 +758,8 @@ class positioning_stages_view(QWidget, Ui_Form):
                 params[7] * nx + params[8] * ny +
                 params[9]
         )
+        print(f"x found: {x}")
+        print(f"y found: {y}")
 
         return x, y
 

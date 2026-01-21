@@ -37,15 +37,6 @@
                 "sweep_min_frequency": 1900000000.0
             }
         },
-        "proteus": {
-            "class": "ProteusDevice",
-            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\Proteus_device.py",
-            "info": "Device wrapper for Proteus awg using Device framework.",
-            "settings": {
-                "ip_address": "192.168.2.4",
-                "slot_id": 6
-            }
-        },
         "adwin": {
             "class": "AdwinGoldDevice",
             "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\adwin_gold.py",
@@ -141,9 +132,9 @@
             "info": "\n    This class implements the Mad City Labs NanoDrive. The class loads the madlib.dll library to communicate with the device.\n    ",
             "settings": {
                 "serial": 2849,
-                "x_pos": 42.00897358452163,
-                "y_pos": 30.01781298696584,
-                "z_pos": 90.44046049951986,
+                "x_pos": 42.011560199113646,
+                "y_pos": 30.02030605181434,
+                "z_pos": 90.43765407812717,
                 "read_rate": 2.0,
                 "load_rate": 2.0,
                 "num_datapoints": 1,
@@ -194,6 +185,20 @@
                     "pulse": false
                 },
                 "server_port": 5001
+            }
+        },
+        "awg520": {
+            "class": "AWG520Device",
+            "filepath": "D:\\PyCharmProjects\\pittqlabsys-single-NV\\src\\Controller\\awg520.py",
+            "info": "Device wrapper for Tektronix AWG520 using your Device framework.",
+            "settings": {
+                "ip_address": "192.168.2.51",
+                "scpi_port": 4000,
+                "ftp_port": 21,
+                "ftp_user": "usr",
+                "ftp_pass": "pw",
+                "seq_file": "scan.seq",
+                "enable_iq": false
             }
         },
         "mux_control": {
