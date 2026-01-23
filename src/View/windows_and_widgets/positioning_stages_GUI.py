@@ -770,3 +770,402 @@ class positioning_stages_view(QWidget, Ui_Form):
 
     nv_new_xy = predict_nv_position(params, NV_old)
     print("Predicted NV X,Y:", nv_new_xy)"""
+
+    # rigid solver:
+    import numpy as np
+
+    # ============================================
+    # Approach 1: 2×2 Matrix (Rotation only, no translation)
+    # ============================================
+
+    def find_transformation_2x2(self, BCK_orig, BCK_transformed):
+        """
+        Find 2×2 transformation matrix T such that: BCK_transformed = T @ BCK_orig
+
+        Parameters:
+        BCK_orig: 2×N array of original points
+        BCK_transformed: 2×N array of transformed points
+
+        Returns:
+        T: 2×2 transformation matrix
+        """
+
+        # For a 2×2 matrix, we need at least 2 points (4 equations for 4 unknowns)
+        if BCK_orig.shape[1] < 2:
+            raise ValueError("Need at least 2 points for 2×2 transformation")
+
+        # Solve T using least squares: BCK_transformed = T @ BCK_orig
+        # Rearrange to: T = BCK_transformed @ pinv(BCK_orig)
+        T = BCK_transformed @ np.linalg.pinv(BCK_orig)
+
+        return T
+
+    # ============================================
+    # Approach 2: 3×3 Homogeneous Matrix (Rotation + Translation)
+    # ============================================
+
+    def find_transformation_homogeneous(self, BCK_orig, BCK_transformed):
+        """
+        Find 3×3 homogeneous transformation matrix T such that:
+        BCK_transformed_homogeneous = T @ BCK_orig_homogeneous
+
+        Parameters:
+        BCK_orig: 2×N array of original points
+        BCK_transformed: 2×N array of transformed points
+
+        Returns:
+        T: 3×3 homogeneous transformation matrix
+        """
+
+        # Convert to homogeneous coordinates
+        BCK_orig_homog = np.vstack([BCK_orig, np.ones((1, BCK_orig.shape[1]))])
+        BCK_trans_homog = np.vstack([BCK_transformed, np.ones((1, BCK_transformed.shape[1]))])
+
+        # For homogeneous 3×3 matrix (affine), we need at least 3 points
+        if BCK_orig.shape[1] < 3:
+            # Use least squares solution
+            A = BCK_orig_homog.T
+            B = BCK_trans_homog.T
+
+            # Solve for each row of transformation matrix
+            T_rows = []
+            for i in range(3):
+                coeffs, _, _, _ = np.linalg.lstsq(A, B[:, i], rcond=None)
+                T_rows.append(coeffs)
+
+            T = np.array(T_rows).T
+        else:
+            # Solve exactly if we have enough points
+            T = BCK_trans_homog @ np.linalg.pinv(BCK_orig_homog)
+
+        return T
+
+    # ============================================
+    # Example usage with known points
+    # ============================================
+
+    # Create some example data
+    np.random.seed(42)
+
+    # Define a true transformation (rotation + translation)
+    angle = np.pi / 4  # 45 degrees
+    R_true = np.array([
+        [np.cos(angle), -np.sin(angle)],
+        [np.sin(angle), np.cos(angle)]
+    ])
+    t_true = np.array([[2.0], [1.0]])  # translation
+
+    print("True rotation matrix R:")
+    print(R_true)
+    print(f"\nTrue translation vector t: {t_true.flatten()}")
+
+    # Generate some original points
+    BCK = np.array([
+        [1.0, 2.0, 0.0, -1.0],  # x coordinates
+        [0.0, 1.0, -2.0, 2.0]  # y coordinates
+    ])
+
+    print(f"\nOriginal points BCK (2×{BCK.shape[1]}):")
+    print(BCK)
+
+    # Apply true transformation: BCK_p = R @ BCK + t
+    BCK_p = R_true @ BCK + t_true
+    print(f"\nTransformed points BCK_p (after R@BCK + t):")
+    print(BCK_p)
+
+    # ============================================
+    # Method 1: Find 2×2 transformation (rotation only)
+    # ============================================
+    print("\n" + "=" * 50)
+    print("METHOD 1: Finding 2×2 transformation matrix T")
+    print("=" * 50)
+
+    T_2x2 = find_transformation_2x2(BCK, BCK_p)
+    print("\nFound 2×2 transformation matrix T:")
+    print(T_2x2)
+
+    print("\nTrue rotation matrix R:")
+    print(R_true)
+
+    print(f"\nDifference from true rotation: {np.max(np.abs(T_2x2 - R_true)):.6f}")
+
+    # Apply transformation to a new point
+    BCK_pp = np.array([[3.0], [4.0]])  # New point
+    print(f"\nNew point BCK_pp: {BCK_pp.flatten()}")
+
+    BCK_ppp_2x2 = T_2x2 @ BCK_pp
+    print(f"Transformed point (T @ BCK_pp): {BCK_ppp_2x2.flatten()}")
+
+    # True transformation (what it should be)
+    BCK_pp_true = R_true @ BCK_pp + t_true
+    print(f"True transformation (R@BCK_pp + t): {BCK_pp_true.flatten()}")
+
+    # ============================================
+    # Method 2: Find 3×3 homogeneous transformation
+    # ============================================
+    print("\n" + "=" * 50)
+    print("METHOD 2: Finding 3×3 homogeneous transformation matrix T")
+    print("=" * 50)
+
+    T_homog = find_transformation_homogeneous(BCK, BCK_p)
+    print("\nFound 3×3 homogeneous transformation matrix T:")
+    print(T_homog)
+
+    # Apply transformation to a new point (using homogeneous coordinates)
+    BCK_pp_homog = np.array([[3.0], [4.0], [1.0]])  # New point in homogeneous
+    BCK_ppp_homog_full = T_homog @ BCK_pp_homog
+    BCK_ppp_homog = BCK_ppp_homog_full[:2, :] / BCK_ppp_homog_full[2, :]
+
+    print(f"\nNew point BCK_pp: {BCK_pp.flatten()}")
+    print(f"Transformed point (homogeneous): {BCK_ppp_homog.flatten()}")
+    print(f"True transformation (R@BCK_pp + t): {BCK_pp_true.flatten()}")
+
+    # ============================================
+    # Helper function for applying transformations
+    # ============================================
+
+    def apply_transformation(self, T, points):
+        """
+        Apply transformation to points
+
+        Parameters:
+        T: Transformation matrix (2×2 or 3×3)
+        points: 2×N array of points
+
+        Returns:
+        transformed_points: 2×N array of transformed points
+        """
+        if T.shape == (2, 2):
+            # 2×2 matrix: linear transformation only
+            return T @ points
+        elif T.shape == (3, 3):
+            # 3×3 homogeneous matrix
+            points_homog = np.vstack([points, np.ones((1, points.shape[1]))])
+            transformed_homog = T @ points_homog
+            return transformed_homog[:2, :] / transformed_homog[2:, :]
+        else:
+            raise ValueError("T must be 2×2 or 3×3 matrix")
+
+    # ============================================
+    # Example with multiple new points
+    # ============================================
+    print("\n" + "=" * 50)
+    print("EXAMPLE WITH MULTIPLE NEW POINTS")
+    print("=" * 50)
+
+    # Define several new points
+    BCK_pp_multiple = np.array([
+        [1.0, 2.0, 0.0, -2.0],  # x coordinates
+        [2.0, -1.0, 3.0, 0.0]  # y coordinates
+    ])
+
+    print(f"New points BCK_pp (2×{BCK_pp_multiple.shape[1]}):")
+    print(BCK_pp_multiple)
+
+    # Apply 2×2 transformation
+    BCK_ppp_2x2_multiple = apply_transformation(T_2x2, BCK_pp_multiple)
+    print(f"\nTransformed with 2×2 matrix:")
+    print(BCK_ppp_2x2_multiple)
+
+    # Apply homogeneous transformation
+    BCK_ppp_homog_multiple = apply_transformation(T_homog, BCK_pp_multiple)
+    print(f"\nTransformed with homogeneous matrix:")
+    print(BCK_ppp_homog_multiple)
+
+    # Calculate true transformation for comparison
+    BCK_pp_true_multiple = R_true @ BCK_pp_multiple + t_true
+    print(f"\nTrue transformation (R@BCK_pp + t):")
+    print(BCK_pp_true_multiple)
+
+    # Calculate errors
+    error_2x2 = np.mean(np.linalg.norm(BCK_ppp_2x2_multiple - BCK_pp_true_multiple, axis=0))
+    error_homog = np.mean(np.linalg.norm(BCK_ppp_homog_multiple - BCK_pp_true_multiple, axis=0))
+
+    print(f"\nMean error (2×2 method): {error_2x2:.6f}")
+    print(f"Mean error (homogeneous method): {error_homog:.6f}")
+    print(f"\nNote: The 2×2 matrix doesn't capture translation, so error is larger.")
+
+    # affine solver:
+    import numpy as np
+
+    def find_rotation_translation(self, BCK, BCK_p):
+        """
+        Find R (2×2) and T (2×1) such that: BCK_p = R @ BCK + T
+
+        Parameters:
+        BCK: 2×N array of original points
+        BCK_p: 2×N array of transformed points
+
+        Returns:
+        R: 2×2 rotation matrix
+        T: 2×1 translation vector
+        """
+        # Center the points
+        centroid_BCK = np.mean(BCK, axis=1, keepdims=True)
+        centroid_BCK_p = np.mean(BCK_p, axis=1, keepdims=True)
+
+        # Center the point sets
+        BCK_centered = BCK - centroid_BCK
+        BCK_p_centered = BCK_p - centroid_BCK_p
+
+        # Compute R using Singular Value Decomposition (SVD)
+        # Solve: BCK_p_centered = R @ BCK_centered
+        H = BCK_p_centered @ BCK_centered.T
+        U, _, Vt = np.linalg.svd(H)
+
+        # Compute rotation matrix
+        R = U @ Vt
+
+        # Ensure proper rotation (det(R) = 1)
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = U @ Vt
+
+        # Compute translation
+        T = centroid_BCK_p - R @ centroid_BCK
+
+        return R, T
+
+    # ============================================
+    # Example with Format
+    # ============================================
+    np.random.seed(42)
+
+    # Create a true transformation
+    angle = np.pi / 3  # 60 degrees
+    R_true = np.array([
+        [np.cos(angle), -np.sin(angle)],
+        [np.sin(angle), np.cos(angle)]
+    ])
+    T_true = np.array([[2.5], [-1.0]])  # 2×1 translation
+
+    print("True Rotation Matrix R (2×2):")
+    print(R_true)
+    print(f"\nTrue Translation Vector T (2×1): {T_true.flatten()}")
+
+    # Create example points
+    BCK = np.array([
+        [1.0, 2.0, 0.5],  # x coordinates
+        [0.0, 1.0, -1.0]  # y coordinates
+    ])
+    print(f"\nOriginal points BCK (2×{BCK.shape[1]}):")
+    print(BCK)
+
+    # Apply transformation: BCK_p = R @ BCK + T
+    BCK_p = R_true @ BCK + T_true
+    print(f"\nTransformed points BCK_p = R@BCK + T (2×{BCK_p.shape[1]}):")
+    print(BCK_p)
+
+    # ============================================
+    # Find R and T from point correspondences
+    # ============================================
+    R_estimated, T_estimated = find_rotation_translation(BCK, BCK_p)
+
+    print("\n" + "=" * 60)
+    print("ESTIMATED TRANSFORMATION")
+    print("=" * 60)
+    print("\nEstimated Rotation Matrix R (2×2):")
+    print(R_estimated)
+    print(f"\nEstimated Translation Vector T (2×1): {T_estimated.flatten()}")
+
+    print("\n" + "=" * 60)
+    print("ERROR ANALYSIS")
+    print("=" * 60)
+    print(f"\nRotation error (Frobenius norm): {np.linalg.norm(R_estimated - R_true):.6f}")
+    print(f"Translation error: {np.linalg.norm(T_estimated - T_true):.6f}")
+
+    # ============================================
+    # Apply to New Points
+    # ============================================
+
+    # Example 1: Single new point
+    BCK_pp = np.array([[3.0], [2.0]])  # 2×1 array
+    print(f"\n\nNew point BCK_pp (2×1): {BCK_pp.flatten()}")
+
+    # Transform using estimated R and T
+    BCK_ppp = R_estimated @ BCK_pp + T_estimated
+    print(f"\nTransformed BCK_ppp = R@BCK_pp + T: {BCK_ppp.flatten()}")
+
+    # What it should be with true transformation
+    BCK_pp_true = R_true @ BCK_pp + T_true
+    print(f"True transformation: R_true@BCK_pp + T_true: {BCK_pp_true.flatten()}")
+
+    # Example 2: Multiple new points
+    BCK_pp_multi = np.array([
+        [1.0, 2.5, 0.0, -1.0],  # x coordinates
+        [2.0, -1.0, 3.0, 0.5]  # y coordinates
+    ])
+
+    print(f"\n\nMultiple new points BCK_pp (2×{BCK_pp_multi.shape[1]}):")
+    print(BCK_pp_multi)
+
+    # Transform all points
+    BCK_ppp_multi = R_estimated @ BCK_pp_multi + T_estimated
+    print(f"\nTransformed points (R@BCK_pp + T):")
+    print(BCK_ppp_multi)
+
+    # Verify with true transformation
+    BCK_ppp_multi_true = R_true @ BCK_pp_multi + T_true
+    print(f"\nTrue transformation:")
+    print(BCK_ppp_multi_true)
+
+    # Calculate error
+    error = np.mean(np.linalg.norm(BCK_ppp_multi - BCK_ppp_multi_true, axis=0))
+    print(f"\nMean transformation error: {error:.6f}")
+
+    # ============================================
+    # Alternative: Direct Least Squares Solution
+    # ============================================
+    def find_R_T_direct(self, BCK, BCK_p):
+        """
+        Direct least squares solution for R and T
+        Solve: BCK_p = R @ BCK + T
+
+        This stacks the equations and solves for all parameters at once
+        """
+        n_points = BCK.shape[1]
+
+        # Setup linear system: vec(BCK_p) = A * vec([R, T])
+        # For each point i: [x'_i, y'_i]ᵀ = R * [x_i, y_i]ᵀ + T
+
+        A = []
+        b = []
+
+        for i in range(n_points):
+            x, y = BCK[:, i]
+
+            # Equations for x' coordinate
+            A.append([x, y, 0, 0, 1, 0])  # x' = r11*x + r12*y + t1
+            b.append(BCK_p[0, i])
+
+            # Equations for y' coordinate
+            A.append([0, 0, x, y, 0, 1])  # y' = r21*x + r22*y + t2
+            b.append(BCK_p[1, i])
+
+        A = np.array(A)
+        b = np.array(b)
+
+        # Solve least squares
+        params, residuals, rank, s = np.linalg.lstsq(A, b, rcond=None)
+
+        # Extract R and T
+        R = params[:4].reshape(2, 2)
+        T = params[4:].reshape(2, 1)
+
+        return R, T
+
+    print("\n" + "=" * 60)
+    print("DIRECT LEAST SQUARES SOLUTION")
+    print("=" * 60)
+    R_direct, T_direct = find_R_T_direct(BCK, BCK_p)
+    print(f"\nDirect solution R:\n{R_direct}")
+    print(f"\nDirect solution T: {T_direct.flatten()}")
+
+    # Test on a new point
+    BCK_test = np.array([[1.5], [-0.5]])
+    result_direct = R_direct @ BCK_test + T_direct
+    result_true = R_true @ BCK_test + T_true
+    print(f"\nTest point: {BCK_test.flatten()}")
+    print(f"Direct solution result: {result_direct.flatten()}")
+    print(f"True result: {result_true.flatten()}")
+    print(f"Error: {np.linalg.norm(result_direct - result_true):.6f}")
