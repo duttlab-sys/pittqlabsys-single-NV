@@ -226,6 +226,7 @@ class positioning_stages_view(QWidget, Ui_Form):
                 if x_pos < _MAX_X_2 and x_pos > _MIN_X_2:
                     self.stage_2.set_position('x',x_pos)
                     time.sleep(2)
+                    print(f"position x: {self.stage_2.get_position('x')}")
                     self.xlineEdit_2.setText(str(self.stage_2.get_position('x')))
             except ValueError:
                 self.xlineEdit_2.setText(str(self.stage_2.get_position('x')))
@@ -258,6 +259,7 @@ class positioning_stages_view(QWidget, Ui_Form):
                 if y_pos < _MAX_Y_2 and y_pos > _MIN_Y_2:
                     self.stage_2.set_position('y', y_pos)
                     time.sleep(2)
+                    print(f"position y: {self.stage_2.get_position('y')}")
                     self.ylineEdit_2.setText(str(self.stage_2.get_position('y')))
             except ValueError:
                 self.ylineEdit_2.setText(str(self.stage_2.get_position('y')))
@@ -590,12 +592,18 @@ class positioning_stages_view(QWidget, Ui_Form):
             micro = self.stage_1
 
         # --- Snapshot metadata ---
-        grp.attrs["micro_x"] = micro.get_position("x")
+        """grp.attrs["micro_x"] = micro.get_position("x")
         grp.attrs["micro_y"] = micro.get_position("y")
 
         grp.attrs["nano_x"] = nano.get_position("x")
         grp.attrs["nano_y"] = nano.get_position("y")
-        grp.attrs["nano_z"] = nano.get_position("z")
+        grp.attrs["nano_z"] = nano.get_position("z")"""
+        grp.attrs["micro_x"] = self.xlineEdit_2.text()
+        grp.attrs["micro_y"] = self.ylineEdit_2.text()
+
+        grp.attrs["nano_x"] = self.xlineEdit_1.text()
+        grp.attrs["nano_y"] = self.ylineEdit_1.text()
+        grp.attrs["nano_z"] = self.zlineEdit_1.text()
 
         grp.attrs["camera_x"] = self.x_crosshair
         grp.attrs["camera_y"] = self.y_crosshair
@@ -657,9 +665,144 @@ class positioning_stages_view(QWidget, Ui_Form):
 
         return msg.exec() == QMessageBox.Yes
 
+    import numpy as np
+    from typing import Tuple, List
+
+    def get_micro_coords(self, corner_dict):
+        """Extract micro_x and micro_y from dictionary, convert to float"""
+        if isinstance(corner_dict, np.ndarray) and corner_dict.dtype == object:
+            corner_dict = corner_dict.item()  # Extract dict from array
+
+        micro_x = float(corner_dict.get('micro_x', corner_dict.get('micro_X', 0)))
+        micro_y = float(corner_dict.get('micro_y', corner_dict.get('micro_Y', 0)))
+        return micro_x, micro_y
+
+
+    def from_four_corners_to_DMT_or_DMNT(self,
+            corners_microdrive: List[np.ndarray],
+            reference_order: Tuple[str] = ("top_left", "top_right", "bottom_right", "bottom_left")
+    ) -> np.ndarray:
+        """
+        Compute transformation matrix from microdrive coordinates to diamond coordinates
+        using four corner points.
+
+
+        Parameters:
+        -----------
+        corners_microdrive : List[np.ndarray]
+            List of 4 points in microdrive coordinates in order: [top_left, top_right, bottom_right, bottom_left]
+            Each point should be a numpy array of shape (2,) for (x, y)
+
+
+        reference_order : Tuple[str], optional
+            Order of the corners as they appear in the corners_microdrive list
+
+
+        Returns:
+        --------
+        T : np.ndarray
+            3x3 transformation matrix such that:
+            [x_diamond, y_diamond, 1]^T = T @ [x_microdrive, y_microdrive, 1]^T
+            from microdrive coordinate system to diamond coordinate system
+            DMT is diamond microdrive transformation matrix
+            DMNT is diamond microdrive new transformation matrix
+
+
+        Notes:
+        ------
+        Diamond coordinate system definition:
+        - Origin: at bottom_left corner
+        - x-axis: from bottom_left to bottom_right
+        - y-axis: from bottom_left to top_left
+        This assumes the corners form a (possibly rotated) rectangle in microdrive coords.
+        """
+        # Extract points in the specified order
+
+
+        # Extract micro coordinates from dictionaries
+
+
+        print("here1.3")
+        print(f"bottom_left: {bottom_left}, bottom_right: {bottom_right}, top_left: {top_left}, top_right: {top_right}")
+
+        # Diamond coordinate system definition:
+        # In diamond coords:
+        # bottom_left = (0, 0)
+        # bottom_right = (1, 0)
+        # top_left = (0, 1)
+        # top_right = (1, 1)
+        print("here1.4")
+        # Source points in microdrive coordinates (homogeneous)
+        src_points = np.array([
+            [bottom_left[0], bottom_left[1], 1],
+            [bottom_right[0], bottom_right[1], 1],
+            [top_left[0], top_left[1], 1]
+        ]).T  # Shape: (3, 3)
+        print("here1.5")
+        # Destination points in diamond coordinates (homogeneous)
+        dst_points = np.array([
+            [0, 0, 1],
+            [1, 0, 1],
+            [0, 1, 1]
+        ]).T  # Shape: (3, 3)
+
+        # Solve for transformation matrix T such that: dst = T @ src
+        # T is 3x3, we need T @ src = dst
+        # T = dst @ inv(src)
+
+        try:
+            print("here1.6")
+            T = dst_points @ np.linalg.inv(src_points)
+        except np.linalg.LinAlgError:
+            raise ValueError("Corners are colinear or form a degenerate shape")
+        print("here1.7")
+        # Verify with the fourth point
+        print("here1.8")
+        tr_hom = np.array([top_right[0], top_right[1], 1])
+        print("here1.9")
+        tr_diamond_pred = T @ tr_hom
+        print("here1.10")
+        # Should be close to (1, 1, 1) after normalization
+        tr_diamond_pred = tr_diamond_pred / tr_diamond_pred[2]
+        print("here1.11")
+        # Check if the shape is reasonably rectangular
+        expected = np.array([1, 1, 1])
+        print("here1.12")
+        if np.linalg.norm(tr_diamond_pred - expected) > 1e-3:
+            print("here1.13")
+            print(f"Warning: Fourth corner verification failed. "
+                  f"Expected (1, 1, 1), got ({tr_diamond_pred[0]:.3f}, {tr_diamond_pred[1]:.3f}, {tr_diamond_pred[2]:.3f})")
+            print("This suggests corners don't form a proper rectangle or order is wrong.")
+        print("here1.14")
+        return T
+
+    def from_DMT_and_MNV_old_get_DNV_old(self, M_point: np.ndarray, T_matrix: np.ndarray) -> np.ndarray:
+        """
+        Transform a point from microdrive to diamond coordinates.
+        Handles both dict and array(dict) formats.
+        """
+        # Extract micro coordinates
+        if isinstance(M_point, np.ndarray) and M_point.dtype == object:
+            M_point = M_point.item()  # Extract dict from array
+
+        if isinstance(M_point, dict):
+            # Extract micro coordinates
+            micro_x = float(M_point.get('micro_x', M_point.get('micro_X', 0)))
+            micro_y = float(M_point.get('micro_y', M_point.get('micro_Y', 0)))
+        elif isinstance(M_point, (list, tuple, np.ndarray)) and len(M_point) >= 2:
+            micro_x, micro_y = float(M_point[0]), float(M_point[1])
+        else:
+            raise ValueError(f"Unexpected point format: {type(M_point)}")
+
+        M_hom = np.array([micro_x, micro_y, 1.0])
+        D_hom = T_matrix @ M_hom
+        D_hom = D_hom / D_hom[2]  # Normalize
+
+        return D_hom[:2]
+
     def find_NV(self):
+        """Complete function with transformation calculations to find NV center"""
         self.save_or_find_nv_button_clicked.emit(1)
-        # select file
         path = self.open_file_dialog(self.data_saving_path)
         if not path:
             return
@@ -667,505 +810,163 @@ class positioning_stages_view(QWidget, Ui_Form):
         # read file
         self.data_reader = ExperimentHDF5ReaderSWMR(path)
         self.data_reader.read_structure()
-
         structure = self.data_reader.get_structure()
 
-        required_corners = {"top_left", "top_right", "bottom_left", "bottom_right"}
+        required_corners = ("top_left", "top_right", "bottom_left", "bottom_right")
 
         init = structure.get("INITIAL", {})
         final = structure.get("FINAL", {})
 
         # Validation
-        if not required_corners.issubset(init.keys()):
-            self.error_box("INITIAL does not contain all 4 corners", "please add all 4 corners before proceeding")
+        if not all(c in init for c in required_corners):
+            self.error_box("INITIAL does not contain all 4 corners",
+                           "please add all 4 corners before proceeding")
             self.data_reader.close()
             return
 
-        if not required_corners.issubset(final.keys()):
-            self.error_box("FINAL does not contain all 4 corners", "please add all 4 corners before proceeding")
+        if not all(c in final for c in required_corners):
+            self.error_box("FINAL does not contain all 4 corners",
+                           "please add all 4 corners before proceeding")
             self.data_reader.close()
             return
 
         if "nv" not in init:
-            self.error_box("NV does not exist in INITIAL", "please NV point before proceeding")
+            self.error_box("NV does not exist in INITIAL",
+                           "please NV point before proceeding")
             self.data_reader.close()
             return
 
-        # Prepare points
-        old_pts = [init[c] for c in required_corners]
-        new_pts = [final[c] for c in required_corners]
-        print(f"required corners: {required_corners}")
-        print(f"new corners: {new_pts}")
-        print(f"old corners: {old_pts}")
-
-        params = self.fit_micro_nano_transform(old_pts, new_pts)
-
-        nv_old = init["nv"]
-        nv_x, nv_y = self.predict_nv_position(params, nv_old)
-
-        self.data_reader.close()
-
-        return nv_x, nv_y
-
-    def fit_micro_nano_transform(self, old_pts, new_pts):
-        """
-        old_pts, new_pts: list of dicts with keys:
-          micro_x, micro_y, nano_x, nano_y
-
-        Returns:
-          params: length-10 array
-        """
-
-        A = []
-        B = []
-
-        for o, n in zip(old_pts, new_pts):
-            mx, my = o["micro_x"], o["micro_y"]
-            nx, ny = o["nano_x"], o["nano_y"]
-            print(f"mx {mx} my {my} nx {nx} ny {ny}")
-
-            A.append([mx, my, nx, ny, 1, 0, 0, 0, 0, 0])
-            A.append([0, 0, 0, 0, 0, mx, my, nx, ny, 1])
-            print(f"n[micro_x]: {n["micro_x"]}")
-            print(f"n[nano_x]: {n["nano_x"]}")
-            print(f"n[nano_y]: {n["nano_y"]}")
-            print(f"n[micro_y]: {n["micro_y"]}")
-            # New *effective* sample-plane position
-            x_new = float(n["micro_x"]) + n["nano_x"]
-            y_new = float(n["micro_y"]) + n["nano_y"]
-
-            B.append(x_new)
-            B.append(y_new)
-
-        A = np.array(A, dtype=float)
-        B = np.array(B, dtype=float)
-
-        params, _, _, _ = np.linalg.lstsq(A, B, rcond=None)
-        return params
-
-    def predict_nv_position(self, params, nv_old):
-        mx, my = float(nv_old["micro_x"]), float(nv_old["micro_y"])
-        nx, ny = nv_old["nano_x"], nv_old["nano_y"]
-
-        x = (
-                params[0] * mx + params[1] * my +
-                params[2] * nx + params[3] * ny +
-                params[4]
-        )
-
-        y = (
-                params[5] * mx + params[6] * my +
-                params[7] * nx + params[8] * ny +
-                params[9]
-        )
-        print(f"x found: {x}")
-        print(f"y found: {y}")
-
-        return x, y
-
-    """old_pts = [TL_old, TR_old, BL_old, BR_old]
-    new_pts = [TL_new, TR_new, BL_new, BR_new]
-
-    params = fit_micro_nano_transform(old_pts, new_pts)
-
-    nv_new_xy = predict_nv_position(params, NV_old)
-    print("Predicted NV X,Y:", nv_new_xy)"""
-
-    # rigid solver:
-    import numpy as np
-
-    # ============================================
-    # Approach 1: 2×2 Matrix (Rotation only, no translation)
-    # ============================================
-
-    def find_transformation_2x2(self, BCK_orig, BCK_transformed):
-        """
-        Find 2×2 transformation matrix T such that: BCK_transformed = T @ BCK_orig
-
-        Parameters:
-        BCK_orig: 2×N array of original points
-        BCK_transformed: 2×N array of transformed points
-
-        Returns:
-        T: 2×2 transformation matrix
-        """
-
-        # For a 2×2 matrix, we need at least 2 points (4 equations for 4 unknowns)
-        if BCK_orig.shape[1] < 2:
-            raise ValueError("Need at least 2 points for 2×2 transformation")
-
-        # Solve T using least squares: BCK_transformed = T @ BCK_orig
-        # Rearrange to: T = BCK_transformed @ pinv(BCK_orig)
-        T = BCK_transformed @ np.linalg.pinv(BCK_orig)
-
-        return T
-
-    # ============================================
-    # Approach 2: 3×3 Homogeneous Matrix (Rotation + Translation)
-    # ============================================
-
-    def find_transformation_homogeneous(self, BCK_orig, BCK_transformed):
-        """
-        Find 3×3 homogeneous transformation matrix T such that:
-        BCK_transformed_homogeneous = T @ BCK_orig_homogeneous
-
-        Parameters:
-        BCK_orig: 2×N array of original points
-        BCK_transformed: 2×N array of transformed points
-
-        Returns:
-        T: 3×3 homogeneous transformation matrix
-        """
-
-        # Convert to homogeneous coordinates
-        BCK_orig_homog = np.vstack([BCK_orig, np.ones((1, BCK_orig.shape[1]))])
-        BCK_trans_homog = np.vstack([BCK_transformed, np.ones((1, BCK_transformed.shape[1]))])
-
-        # For homogeneous 3×3 matrix (affine), we need at least 3 points
-        if BCK_orig.shape[1] < 3:
-            # Use least squares solution
-            A = BCK_orig_homog.T
-            B = BCK_trans_homog.T
-
-            # Solve for each row of transformation matrix
-            T_rows = []
-            for i in range(3):
-                coeffs, _, _, _ = np.linalg.lstsq(A, B[:, i], rcond=None)
-                T_rows.append(coeffs)
-
-            T = np.array(T_rows).T
-        else:
-            # Solve exactly if we have enough points
-            T = BCK_trans_homog @ np.linalg.pinv(BCK_orig_homog)
-
-        return T
-
-    # ============================================
-    # Example usage with known points
-    # ============================================
-
-    # Create some example data
-    np.random.seed(42)
-
-    # Define a true transformation (rotation + translation)
-    angle = np.pi / 4  # 45 degrees
-    R_true = np.array([
-        [np.cos(angle), -np.sin(angle)],
-        [np.sin(angle), np.cos(angle)]
-    ])
-    t_true = np.array([[2.0], [1.0]])  # translation
-
-    print("True rotation matrix R:")
-    print(R_true)
-    print(f"\nTrue translation vector t: {t_true.flatten()}")
-
-    # Generate some original points
-    BCK = np.array([
-        [1.0, 2.0, 0.0, -1.0],  # x coordinates
-        [0.0, 1.0, -2.0, 2.0]  # y coordinates
-    ])
-
-    print(f"\nOriginal points BCK (2×{BCK.shape[1]}):")
-    print(BCK)
-
-    # Apply true transformation: BCK_p = R @ BCK + t
-    BCK_p = R_true @ BCK + t_true
-    print(f"\nTransformed points BCK_p (after R@BCK + t):")
-    print(BCK_p)
-
-    # ============================================
-    # Method 1: Find 2×2 transformation (rotation only)
-    # ============================================
-    print("\n" + "=" * 50)
-    print("METHOD 1: Finding 2×2 transformation matrix T")
-    print("=" * 50)
-
-    T_2x2 = find_transformation_2x2(BCK, BCK_p)
-    print("\nFound 2×2 transformation matrix T:")
-    print(T_2x2)
-
-    print("\nTrue rotation matrix R:")
-    print(R_true)
-
-    print(f"\nDifference from true rotation: {np.max(np.abs(T_2x2 - R_true)):.6f}")
-
-    # Apply transformation to a new point
-    BCK_pp = np.array([[3.0], [4.0]])  # New point
-    print(f"\nNew point BCK_pp: {BCK_pp.flatten()}")
-
-    BCK_ppp_2x2 = T_2x2 @ BCK_pp
-    print(f"Transformed point (T @ BCK_pp): {BCK_ppp_2x2.flatten()}")
-
-    # True transformation (what it should be)
-    BCK_pp_true = R_true @ BCK_pp + t_true
-    print(f"True transformation (R@BCK_pp + t): {BCK_pp_true.flatten()}")
-
-    # ============================================
-    # Method 2: Find 3×3 homogeneous transformation
-    # ============================================
-    print("\n" + "=" * 50)
-    print("METHOD 2: Finding 3×3 homogeneous transformation matrix T")
-    print("=" * 50)
-
-    T_homog = find_transformation_homogeneous(BCK, BCK_p)
-    print("\nFound 3×3 homogeneous transformation matrix T:")
-    print(T_homog)
-
-    # Apply transformation to a new point (using homogeneous coordinates)
-    BCK_pp_homog = np.array([[3.0], [4.0], [1.0]])  # New point in homogeneous
-    BCK_ppp_homog_full = T_homog @ BCK_pp_homog
-    BCK_ppp_homog = BCK_ppp_homog_full[:2, :] / BCK_ppp_homog_full[2, :]
-
-    print(f"\nNew point BCK_pp: {BCK_pp.flatten()}")
-    print(f"Transformed point (homogeneous): {BCK_ppp_homog.flatten()}")
-    print(f"True transformation (R@BCK_pp + t): {BCK_pp_true.flatten()}")
-
-    # ============================================
-    # Helper function for applying transformations
-    # ============================================
-
-    def apply_transformation(self, T, points):
-        """
-        Apply transformation to points
-
-        Parameters:
-        T: Transformation matrix (2×2 or 3×3)
-        points: 2×N array of points
-
-        Returns:
-        transformed_points: 2×N array of transformed points
-        """
-        if T.shape == (2, 2):
-            # 2×2 matrix: linear transformation only
-            return T @ points
-        elif T.shape == (3, 3):
-            # 3×3 homogeneous matrix
-            points_homog = np.vstack([points, np.ones((1, points.shape[1]))])
-            transformed_homog = T @ points_homog
-            return transformed_homog[:2, :] / transformed_homog[2:, :]
-        else:
-            raise ValueError("T must be 2×2 or 3×3 matrix")
-
-    # ============================================
-    # Example with multiple new points
-    # ============================================
-    print("\n" + "=" * 50)
-    print("EXAMPLE WITH MULTIPLE NEW POINTS")
-    print("=" * 50)
-
-    # Define several new points
-    BCK_pp_multiple = np.array([
-        [1.0, 2.0, 0.0, -2.0],  # x coordinates
-        [2.0, -1.0, 3.0, 0.0]  # y coordinates
-    ])
-
-    print(f"New points BCK_pp (2×{BCK_pp_multiple.shape[1]}):")
-    print(BCK_pp_multiple)
-
-    # Apply 2×2 transformation
-    BCK_ppp_2x2_multiple = apply_transformation(T_2x2, BCK_pp_multiple)
-    print(f"\nTransformed with 2×2 matrix:")
-    print(BCK_ppp_2x2_multiple)
-
-    # Apply homogeneous transformation
-    BCK_ppp_homog_multiple = apply_transformation(T_homog, BCK_pp_multiple)
-    print(f"\nTransformed with homogeneous matrix:")
-    print(BCK_ppp_homog_multiple)
-
-    # Calculate true transformation for comparison
-    BCK_pp_true_multiple = R_true @ BCK_pp_multiple + t_true
-    print(f"\nTrue transformation (R@BCK_pp + t):")
-    print(BCK_pp_true_multiple)
-
-    # Calculate errors
-    error_2x2 = np.mean(np.linalg.norm(BCK_ppp_2x2_multiple - BCK_pp_true_multiple, axis=0))
-    error_homog = np.mean(np.linalg.norm(BCK_ppp_homog_multiple - BCK_pp_true_multiple, axis=0))
-
-    print(f"\nMean error (2×2 method): {error_2x2:.6f}")
-    print(f"Mean error (homogeneous method): {error_homog:.6f}")
-    print(f"\nNote: The 2×2 matrix doesn't capture translation, so error is larger.")
-
-    # affine solver:
-    import numpy as np
-
-    def find_rotation_translation(self, BCK, BCK_p):
-        """
-        Find R (2×2) and T (2×1) such that: BCK_p = R @ BCK + T
-
-        Parameters:
-        BCK: 2×N array of original points
-        BCK_p: 2×N array of transformed points
-
-        Returns:
-        R: 2×2 rotation matrix
-        T: 2×1 translation vector
-        """
-        # Center the points
-        centroid_BCK = np.mean(BCK, axis=1, keepdims=True)
-        centroid_BCK_p = np.mean(BCK_p, axis=1, keepdims=True)
-
-        # Center the point sets
-        BCK_centered = BCK - centroid_BCK
-        BCK_p_centered = BCK_p - centroid_BCK_p
-
-        # Compute R using Singular Value Decomposition (SVD)
-        # Solve: BCK_p_centered = R @ BCK_centered
-        H = BCK_p_centered @ BCK_centered.T
-        U, _, Vt = np.linalg.svd(H)
-
-        # Compute rotation matrix
-        R = U @ Vt
-
-        # Ensure proper rotation (det(R) = 1)
-        if np.linalg.det(R) < 0:
-            Vt[-1, :] *= -1
-            R = U @ Vt
-
-        # Compute translation
-        T = centroid_BCK_p - R @ centroid_BCK
-
-        return R, T
-
-    # ============================================
-    # Example with Format
-    # ============================================
-    np.random.seed(42)
-
-    # Create a true transformation
-    angle = np.pi / 3  # 60 degrees
-    R_true = np.array([
-        [np.cos(angle), -np.sin(angle)],
-        [np.sin(angle), np.cos(angle)]
-    ])
-    T_true = np.array([[2.5], [-1.0]])  # 2×1 translation
-
-    print("True Rotation Matrix R (2×2):")
-    print(R_true)
-    print(f"\nTrue Translation Vector T (2×1): {T_true.flatten()}")
-
-    # Create example points
-    BCK = np.array([
-        [1.0, 2.0, 0.5],  # x coordinates
-        [0.0, 1.0, -1.0]  # y coordinates
-    ])
-    print(f"\nOriginal points BCK (2×{BCK.shape[1]}):")
-    print(BCK)
-
-    # Apply transformation: BCK_p = R @ BCK + T
-    BCK_p = R_true @ BCK + T_true
-    print(f"\nTransformed points BCK_p = R@BCK + T (2×{BCK_p.shape[1]}):")
-    print(BCK_p)
-
-    # ============================================
-    # Find R and T from point correspondences
-    # ============================================
-    R_estimated, T_estimated = find_rotation_translation(BCK, BCK_p)
-
-    print("\n" + "=" * 60)
-    print("ESTIMATED TRANSFORMATION")
-    print("=" * 60)
-    print("\nEstimated Rotation Matrix R (2×2):")
-    print(R_estimated)
-    print(f"\nEstimated Translation Vector T (2×1): {T_estimated.flatten()}")
-
-    print("\n" + "=" * 60)
-    print("ERROR ANALYSIS")
-    print("=" * 60)
-    print(f"\nRotation error (Frobenius norm): {np.linalg.norm(R_estimated - R_true):.6f}")
-    print(f"Translation error: {np.linalg.norm(T_estimated - T_true):.6f}")
-
-    # ============================================
-    # Apply to New Points
-    # ============================================
-
-    # Example 1: Single new point
-    BCK_pp = np.array([[3.0], [2.0]])  # 2×1 array
-    print(f"\n\nNew point BCK_pp (2×1): {BCK_pp.flatten()}")
-
-    # Transform using estimated R and T
-    BCK_ppp = R_estimated @ BCK_pp + T_estimated
-    print(f"\nTransformed BCK_ppp = R@BCK_pp + T: {BCK_ppp.flatten()}")
-
-    # What it should be with true transformation
-    BCK_pp_true = R_true @ BCK_pp + T_true
-    print(f"True transformation: R_true@BCK_pp + T_true: {BCK_pp_true.flatten()}")
-
-    # Example 2: Multiple new points
-    BCK_pp_multi = np.array([
-        [1.0, 2.5, 0.0, -1.0],  # x coordinates
-        [2.0, -1.0, 3.0, 0.5]  # y coordinates
-    ])
-
-    print(f"\n\nMultiple new points BCK_pp (2×{BCK_pp_multi.shape[1]}):")
-    print(BCK_pp_multi)
-
-    # Transform all points
-    BCK_ppp_multi = R_estimated @ BCK_pp_multi + T_estimated
-    print(f"\nTransformed points (R@BCK_pp + T):")
-    print(BCK_ppp_multi)
-
-    # Verify with true transformation
-    BCK_ppp_multi_true = R_true @ BCK_pp_multi + T_true
-    print(f"\nTrue transformation:")
-    print(BCK_ppp_multi_true)
-
-    # Calculate error
-    error = np.mean(np.linalg.norm(BCK_ppp_multi - BCK_ppp_multi_true, axis=0))
-    print(f"\nMean transformation error: {error:.6f}")
-
-    # ============================================
-    # Alternative: Direct Least Squares Solution
-    # ============================================
-    def find_R_T_direct(self, BCK, BCK_p):
-        """
-        Direct least squares solution for R and T
-        Solve: BCK_p = R @ BCK + T
-
-        This stacks the equations and solves for all parameters at once
-        """
-        n_points = BCK.shape[1]
-
-        # Setup linear system: vec(BCK_p) = A * vec([R, T])
-        # For each point i: [x'_i, y'_i]ᵀ = R * [x_i, y_i]ᵀ + T
-
-        A = []
-        b = []
-
-        for i in range(n_points):
-            x, y = BCK[:, i]
-
-            # Equations for x' coordinate
-            A.append([x, y, 0, 0, 1, 0])  # x' = r11*x + r12*y + t1
-            b.append(BCK_p[0, i])
-
-            # Equations for y' coordinate
-            A.append([0, 0, x, y, 0, 1])  # y' = r21*x + r22*y + t2
-            b.append(BCK_p[1, i])
-
-        A = np.array(A)
-        b = np.array(b)
-
-        # Solve least squares
-        params, residuals, rank, s = np.linalg.lstsq(A, b, rcond=None)
-
-        # Extract R and T
-        R = params[:4].reshape(2, 2)
-        T = params[4:].reshape(2, 1)
-
-        return R, T
-
-    print("\n" + "=" * 60)
-    print("DIRECT LEAST SQUARES SOLUTION")
-    print("=" * 60)
-    R_direct, T_direct = find_R_T_direct(BCK, BCK_p)
-    print(f"\nDirect solution R:\n{R_direct}")
-    print(f"\nDirect solution T: {T_direct.flatten()}")
-
-    # Test on a new point
-    BCK_test = np.array([[1.5], [-0.5]])
-    result_direct = R_direct @ BCK_test + T_direct
-    result_true = R_true @ BCK_test + T_true
-    print(f"\nTest point: {BCK_test.flatten()}")
-    print(f"Direct solution result: {result_direct.flatten()}")
-    print(f"True result: {result_true.flatten()}")
-    print(f"Error: {np.linalg.norm(result_direct - result_true):.6f}")
+        # Prepare points in consistent order
+        old_corners_microdrive = [
+            np.array(init["top_left"]),
+            np.array(init["top_right"]),
+            np.array(init["bottom_left"]),
+            np.array(init["bottom_right"])
+        ]
+
+        new_corners_microdrive = [
+            np.array(final["top_left"]),
+            np.array(final["top_right"]),
+            np.array(final["bottom_left"]),
+            np.array(final["bottom_right"])
+        ]
+
+        old_nv_microdrive = np.array(init["nv"])
+
+        print(f"Old corners: {old_corners_microdrive}")
+        print(f"New corners: {new_corners_microdrive}")
+        print(f"Old NV in microdrive: {old_nv_microdrive}")
+
+        ###
+        print("here1.1")
+        if len(old_corners_microdrive) != 4:
+            raise ValueError(f"Expected 4 corners, got {len(old_corners_microdrive)}")
+
+        corners_dicts = []
+        for corner_array in old_corners_microdrive:
+            if isinstance(corner_array, np.ndarray) and corner_array.dtype == object:
+                # Extract the dictionary from the numpy array
+                corner_dict = corner_array.item()
+                corners_dicts.append(corner_dict)
+            else:
+                corners_dicts.append(corner_array)
+
+        # Replace the input with extracted dictionaries
+        old_corners_microdrive = corners_dicts
+
+        print(f"Debug: Extracted corners_dicts = {corners_dicts}")
+
+
+        print("here1.1")
+        if len(new_corners_microdrive) != 4:
+            raise ValueError(f"Expected 4 corners, got {len(new_corners_microdrive)}")
+
+        corners_dicts = []
+        for corner_array in new_corners_microdrive:
+            if isinstance(corner_array, np.ndarray) and corner_array.dtype == object:
+                # Extract the dictionary from the numpy array
+                corner_dict = corner_array.item()
+                corners_dicts.append(corner_dict)
+            else:
+                corners_dicts.append(corner_array)
+
+        # Replace the input with extracted dictionaries
+        new_corners_microdrive = corners_dicts
+        ###
+        print(f"Debug: Extracted corners_dicts = {corners_dicts}")
+        reference_order = ("top_left", "top_right", "bottom_right", "bottom_left")
+        bl_idx = reference_order.index("bottom_left")
+        br_idx = reference_order.index("bottom_right")
+        tl_idx = reference_order.index("top_left")
+        tr_idx = reference_order.index("top_right")
+        print("here1.2")
+
+        bl_x, bl_y = self.get_micro_coords(old_corners_microdrive[bl_idx])
+        br_x, br_y = self.get_micro_coords(old_corners_microdrive[br_idx])
+        tl_x, tl_y = self.get_micro_coords(old_corners_microdrive[tl_idx])
+        tr_x, tr_y = self.get_micro_coords(old_corners_microdrive[tr_idx])
+        bottom_left = np.array([bl_x, bl_y], dtype=float)
+        bottom_right = np.array([br_x, br_y], dtype=float)
+        top_left = np.array([tl_x, tl_y], dtype=float)
+        top_right = np.array([tr_x, tr_y], dtype=float)
+
+        bl_x, bl_y = self.get_micro_coords(new_corners_microdrive[bl_idx])
+        br_x, br_y = self.get_micro_coords(new_corners_microdrive[br_idx])
+        tl_x, tl_y = self.get_micro_coords(new_corners_microdrive[tl_idx])
+        tr_x, tr_y = self.get_micro_coords(new_corners_microdrive[tr_idx])
+        bottom_left = np.array([bl_x, bl_y], dtype=float)
+        bottom_right = np.array([br_x, br_y], dtype=float)
+        top_left = np.array([tl_x, tl_y], dtype=float)
+        top_right = np.array([tr_x, tr_y], dtype=float)
+
+        # Compute transformation matrices
+        try:
+            print("here 0")
+            # DMT: transform from microdrive to diamond coordinates (old position)
+            DMT = self.from_four_corners_to_DMT_or_DMNT(
+                old_corners_microdrive
+            )
+            print("here 1")
+            # DMNT: transform from microdrive to diamond coordinates (new position)
+            DMNT = self.from_four_corners_to_DMT_or_DMNT(
+                new_corners_microdrive
+            )
+            print("here 2")
+            # Transform old NV position to diamond coordinates
+            nv_diamond = self.from_DMT_and_MNV_old_get_DNV_old(old_nv_microdrive, DMT)
+            print(f"NV in diamond coordinates: {nv_diamond}")
+            print(f"old_corners_microdrive {old_corners_microdrive}")
+
+            # Transform back to microdrive coordinates using new diamond position
+            # To go from diamond to new microdrive: M_new = DMNT^{-1} * D
+            # But we have D from DMT * M_old, so:
+            # M_new = DMNT^{-1} * DMT * M_old
+
+            DMNT_inv = np.linalg.inv(DMNT)
+            print("here 3")
+            new_nv_microdrive_hom = DMNT_inv @ DMT @ np.array([old_corners_microdrive[0], old_corners_microdrive[1], 1.0])
+            print("here 4")
+            new_nv_microdrive = new_nv_microdrive_hom[:2] / new_nv_microdrive_hom[2]
+
+            print(f"Predicted new NV position in microdrive: {new_nv_microdrive}")
+
+            nv_diamond_hom = DMT @ np.array([old_corners_microdrive[0], old_corners_microdrive[1], 1.0])
+            print("here 5")
+            nv_diamond_hom = nv_diamond_hom / nv_diamond_hom[2]
+            print("here 6")
+
+            new_nv_microdrive_hom2 = DMNT_inv @ nv_diamond_hom
+            print("here 7")
+            new_nv_microdrive2 = new_nv_microdrive_hom2[:2] / new_nv_microdrive_hom2[2]
+
+            print(f"Alternative calculation: {new_nv_microdrive2}")
+
+            # Return the result
+            return new_nv_microdrive
+
+        except Exception as e:
+            self.error_box("Transformation error", f"Failed to compute transformations: {str(e)}")
+            self.data_reader.close()
+            return None
+        finally:
+            self.data_reader.close()
