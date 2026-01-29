@@ -1039,6 +1039,7 @@ wait pulse on channel 2 at pulse_duration+0.000000500, square, 2*pulse_duration,
 pi/2 pulse on channel 1 at 3*pulse_duration+0.000000500, gaussian, pulse_duration, 1.0
 pi/2 pulse on channel 2 at 3*pulse_duration+0.000000500, gaussian, pulse_duration, 1.0
 marker, laser_readout_1 on channel 1 at 2500ns, 1ms
+marker, laser_readout_1 on channel 2 at 2500ns, 300ns
 """
         return sequence_text.strip()
     

@@ -1312,13 +1312,16 @@ class Newport_CONEX_CC_xy_stage(Device):
             raise KeyError
 
 if __name__ == '__main__':
-    newport_stage = Newport_CONEX_CC_xy_stage()
-    #print(newport_stage.get_positive_software_limit('x'))
-    #print(newport_stage.get_positive_software_limit('y'))
-    """newport_stage.set_position('x', 24)
-    newport_stage.set_position('x', 24)
+    """newport_stage = Newport_CONEX_CC_xy_stage()
+    print(newport_stage.get_positive_software_limit('x'))
+    print(newport_stage.get_positive_software_limit('y'))
     print(newport_stage.get_position('x'))
-    print(newport_stage.get_position('y'))
+    print(newport_stage.get_position('y'))"""
+    #newport_stage.set_position('x', 10)
+    #newport_stage.set_position('y', 10)
+    #print(newport_stage.get_position('x'))
+    #print(newport_stage.get_position('y'))
+    """
     print(newport_stage.get_setpoint_position('x'))
     print(newport_stage.get_setpoint_position('y'))
     print(newport_stage.get_acceleration('x'))

@@ -10,8 +10,9 @@ from PyQt5.QtWidgets import QMenu, QInputDialog, QMessageBox
 from pathlib import Path
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QPushButton
-from src.Model.data_saver import ExperimentHDF5ReaderSWMR
-
+from pathlib import Path
+from PyQt5.QtWidgets import QMessageBox
+from src.core.struct_hdf5 import load_data
 
 
 class data_saving_tab_view(QWidget, Ui_Form):
@@ -272,7 +273,6 @@ class data_saving_tab_view(QWidget, Ui_Form):
             return
 
         ext = Path(path).suffix.lower()
-
         if ext not in [".h5", ".hdf5"]:
             QMessageBox.warning(
                 self,
@@ -281,6 +281,16 @@ class data_saving_tab_view(QWidget, Ui_Form):
             )
             return
 
-        print(f"Reading file: {path}")
-        self.data_reader = ExperimentHDF5ReaderSWMR(path)
-        self.data_reader.read_structure()
+        try:
+            # --- Load the whole file into a StructArray ---
+            self.data_reader = load_data(path)
+            print(f"File loaded successfully: {path}")
+            print(f"self.data_reader {self.data_reader}")
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error loading file",
+                f"Failed to load file:\n{e}"
+            )
+            self.data_reader = None

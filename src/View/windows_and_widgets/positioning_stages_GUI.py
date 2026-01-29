@@ -4,13 +4,15 @@ import time
 from PyQt5.QtWidgets import QMessageBox, QWidget
 from src.Controller.newport_conex_cc import Newport_CONEX_CC_xy_stage
 from src.Controller.nanodrive import MCLNanoDrive
-from src.Model.data_saver import ExperimentHDF5WriterSWMR
 from .positioning_stages_design import Ui_Form
 from datetime import datetime
 import os
-import numpy as np
-from src.Model.data_saver import ExperimentHDF5ReaderSWMR
 from PyQt5.QtWidgets import QFileDialog
+from src.core.struct_hdf5 import StructArray, MyStruct, save_data, load_data
+import numpy as np
+import cv2
+from typing import List, Tuple
+from PyQt5.QtWidgets import QMessageBox, QPushButton
 # Assuming the .ui file is converted to design.py
 #To convert positioning_stages_design.ui to .py, paste this into the terminal:
 # pyuic5 -x positioning_stages_design.ui -o positioning_stages_design.py
@@ -43,15 +45,16 @@ class positioning_stages_view(QWidget, Ui_Form):
     display_choice_changed = pyqtSignal(str)
     snapshot_mode_changed = pyqtSignal(int)
     save_or_find_nv_button_clicked = pyqtSignal(int)
+    take_img_signal = pyqtSignal(int)
     def __init__(self, parent = None):
         super().__init__(parent)
         self.setupUi(self)
         self.stage_1 = None
         self.stage_2 = None
 
-        self.xlineEdit_1.setEnabled(False)
-        self.ylineEdit_1.setEnabled(False)
-        self.zlineEdit_1.setEnabled(False)
+        self.xlineEdit_1.setEnabled(True)
+        self.ylineEdit_1.setEnabled(True)
+        self.zlineEdit_1.setEnabled(True)
         self.x_y_inc_lineEdit_1.setEnabled(False)
         self.z_inc_lineEdit_1.setEnabled(False)
         self.x_y_inc_lineEdit_2.setEnabled(False)
@@ -63,9 +66,9 @@ class positioning_stages_view(QWidget, Ui_Form):
         self.y_dec_1.setEnabled(False)
         self.z_dec_1.setEnabled(False)
 
-        self.xlineEdit_2.setEnabled(False)
-        self.ylineEdit_2.setEnabled(False)
-        self.zlineEdit_2.setEnabled(False)
+        self.xlineEdit_2.setEnabled(True)
+        self.ylineEdit_2.setEnabled(True)
+        self.zlineEdit_2.setEnabled(True)
         self.x_inc_2.setEnabled(False)
         self.y_inc_2.setEnabled(False)
         self.z_inc_2.setEnabled(False)
@@ -107,6 +110,7 @@ class positioning_stages_view(QWidget, Ui_Form):
         self.snapshot_live_comboBox.currentTextChanged.connect(self.on_snapshot_or_live_changed)
         self.data_saving_path = None
         self.data_reader = None
+        self.frame = None
 
     def connect_to_instrument_1(self):
         """This function connects the devices: please make sure that your stage has the function get_position(self, axis)"""
@@ -528,22 +532,29 @@ class positioning_stages_view(QWidget, Ui_Form):
 
     def save(self):
         self.save_or_find_nv_button_clicked.emit(1)
-        # --- UI → internal keys ---
+
+        # --- UI → keys ---
         sample_selection = self.Sample_Selector_comboBox.currentText()
         point_selection = self.Point_Selector_comboBox.currentText()
         point_status = self.point_status_comboBox.currentText()
 
         point_key = point_selection.lower().replace(" ", "_")
+
         if point_status == "FINAL" and point_selection == "NV":
-            self.error_box("YOU CANNOT SELECT FINAL NV POINT", "To find NV, click find NV button!")
+            self.error_box(
+                "YOU CANNOT SELECT FINAL NV POINT",
+                "To find NV, click find NV button!"
+            )
             return
 
-        # --- File handling ---
+        # --------------------------------------------------
+        # File handling
+        # --------------------------------------------------
         if sample_selection == "New Sample":
             point_status = "INITIAL"
             directory, filename = self.open_directory_dialog(self.data_saving_path)
             if filename is None:
-                return  # user canceled
+                return
 
             self.data_saving_path = directory
             full_path = os.path.join(directory, filename)
@@ -559,30 +570,41 @@ class positioning_stages_view(QWidget, Ui_Form):
             if full_path is None:
                 return
             mode = "r+"
+        #old:
+        """root = StructArray()
 
-        # --- Open writer ---
-        writer = ExperimentHDF5WriterSWMR(
-            full_path,
-            mode=mode,
-            swmr=False  # snapshot, not live streaming
-        )
-
-        # --- positioning group ---
-        positioning = writer.file.require_group("positioning")
-        positioning.attrs.setdefault("created", datetime.utcnow().isoformat())
-
-        parent = positioning.require_group(point_status)
-
-        # confirm overwrite BEFORE creating
-        if point_key in parent:
-            if not self.confirm_overwrite(point_key):
-                writer.close()
+        # positioning.INITIAL / positioning.FINAL
+        if not hasattr(root[0], point_status):
+            if point_status in ("INITIAL", "FINAL"):
+                setattr(root[0], point_status, MyStruct())
+            else:
+                self.error_box(
+                    "Not implemented error",
+                    f"please implement {point_status} before proceeding"
+                )
                 return
-            del parent[point_key]
 
-        grp = parent.create_group(point_key)
+        point_status_object = getattr(root[0], point_status)"""
+        #new:
+        # new root
+        root = MyStruct()
 
-        # --- Identify stages ---
+        # INITIAL / FINAL
+        if not hasattr(root, point_status):
+            setattr(root, point_status, MyStruct())
+
+        point_status_object = getattr(root, point_status)
+
+        # bottom_left / nv / etc
+        if not hasattr(point_status_object, point_key):
+            setattr(point_status_object, point_key, MyStruct())
+
+        point = getattr(point_status_object, point_key)
+
+
+        # --------------------------------------------------
+        # Identify stages
+        # --------------------------------------------------
         stage_1_name = self.comboBox_1.currentText()
         if "nanodrive" in stage_1_name.lower():
             nano = self.stage_1
@@ -591,27 +613,48 @@ class positioning_stages_view(QWidget, Ui_Form):
             nano = self.stage_2
             micro = self.stage_1
 
-        # --- Snapshot metadata ---
+        # --------------------------------------------------
+        # Snapshot metadata
+        # --------------------------------------------------
         """grp.attrs["micro_x"] = micro.get_position("x")
-        grp.attrs["micro_y"] = micro.get_position("y")
+                grp.attrs["micro_y"] = micro.get_position("y")
 
-        grp.attrs["nano_x"] = nano.get_position("x")
-        grp.attrs["nano_y"] = nano.get_position("y")
-        grp.attrs["nano_z"] = nano.get_position("z")"""
-        grp.attrs["micro_x"] = self.xlineEdit_2.text()
-        grp.attrs["micro_y"] = self.ylineEdit_2.text()
+                grp.attrs["nano_x"] = nano.get_position("x")
+                grp.attrs["nano_y"] = nano.get_position("y")
+                grp.attrs["nano_z"] = nano.get_position("z")"""
+        point.micro_x = self.xlineEdit_2.text()
+        point.micro_y = self.ylineEdit_2.text()
 
-        grp.attrs["nano_x"] = self.xlineEdit_1.text()
-        grp.attrs["nano_y"] = self.ylineEdit_1.text()
-        grp.attrs["nano_z"] = self.zlineEdit_1.text()
+        point.nano_x = self.xlineEdit_1.text()
+        point.nano_y = self.ylineEdit_1.text()
+        point.nano_z = self.zlineEdit_1.text()
 
-        grp.attrs["camera_x"] = self.x_crosshair
-        grp.attrs["camera_y"] = self.y_crosshair
+        point.camera_x = self.x_crosshair
+        point.camera_y = self.y_crosshair
 
-        grp.attrs["timestamp"] = datetime.utcnow().isoformat()
+        point.timestamp = datetime.utcnow().isoformat()
 
-        writer.flush()
-        writer.close()
+        # --------------------------------------------------
+        # Capture camera image
+        # --------------------------------------------------
+
+        if self.snapshot_or_live() == "Snapshot":
+            self.take_img_signal.emit(1)
+            print("snapshot called")
+            print(self.frame)
+            point.camera_image = self.frame
+        else:
+            self.error_box("please take snapshot to same image data", "image data will not be saved for this entry")
+            point.camera_image = None
+        # --------------------------------------------------
+        # SAVE (single call)
+        # --------------------------------------------------
+        save_data(
+            filename=full_path,
+            obj=root,
+            mode=mode,
+            swmr=False  # snapshot, not live
+        )
 
     def error_box(self, text, info, title="Error"):
         msg = QMessageBox(self)
@@ -665,65 +708,81 @@ class positioning_stages_view(QWidget, Ui_Form):
 
         return msg.exec() == QMessageBox.Yes
 
-    import numpy as np
-    from typing import Tuple, List
+    def compute_homography_from_corners(self,
+            old_corners: List[np.ndarray],
+            new_corners: List[np.ndarray], method) -> np.ndarray:
 
-    def get_micro_coords(self, corner_dict):
-        """Extract micro_x and micro_y from dictionary, convert to float"""
-        if isinstance(corner_dict, np.ndarray) and corner_dict.dtype == object:
-            corner_dict = corner_dict.item()  # Extract dict from array
+        if len(old_corners) != 4 or len(new_corners) != 4:
+            raise ValueError("Expected 4 corners for old and new quads")
 
-        micro_x = float(corner_dict.get('micro_x', corner_dict.get('micro_X', 0)))
-        micro_y = float(corner_dict.get('micro_y', corner_dict.get('micro_Y', 0)))
-        return micro_x, micro_y
+        src_pts = np.array(old_corners, dtype=np.float64)
+        dst_pts = np.array(new_corners, dtype=np.float64)
 
+        # ensure points are numpy arrays and float32
+        src_pts = np.array(src_pts, dtype=np.float32)
+        dst_pts = np.array(dst_pts, dtype=np.float32)
+
+        # check number of points
+        if src_pts.shape[0] < 4 or dst_pts.shape[0] < 4:
+            raise ValueError("Need at least 4 points to compute homography")
+
+        if method == "LMEDS":
+            H, status = cv2.findHomography(src_pts, dst_pts, method=cv2.LMEDS)
+        elif method == "RANSAC":
+            H, status = cv2.findHomography(src_pts, dst_pts, method=cv2.RANSAC, ransacReprojThreshold=1.0)
+        elif method == "RHOMBUS":
+            H, status = cv2.findHomography(src_pts, dst_pts, method=cv2.RHO)
+        else:
+            H, status = cv2.findHomography(src_pts, dst_pts, cv2.USAC_MAGSAC)
+
+        if status is not None and not np.all(status):
+            print("Warning: some corners treated as outliers")
+
+        if H is None:
+            raise ValueError("Homography computation failed")
+
+        # Optional: verify fourth corner
+        tr_hom = np.array([src_pts[1, 0], src_pts[1, 1], 1.0])
+        tr_pred = H @ tr_hom
+        tr_pred /= tr_pred[2]
+        expected = np.array([dst_pts[1, 0], dst_pts[1, 1], 1.0])
+        if np.linalg.norm(tr_pred - expected) > 1e-6:
+            print(f"Warning: Fourth corner verification failed. "
+                  f"Expected ({expected[0]:.3f},{expected[1]:.3f}), got ({tr_pred[0]:.3f},{tr_pred[1]:.3f})")
+
+        return H
+
+    def map_point_with_homography(self, point: np.ndarray, H: np.ndarray) -> np.ndarray:
+
+        if len(point) == 2:
+            pt_hom = np.array([point[0], point[1], 1.0])
+        else:
+            pt_hom = np.array(point)
+
+        mapped = H @ pt_hom
+        mapped /= mapped[2]
+        return mapped[:2]
+
+    # affine
 
     def from_four_corners_to_DMT_or_DMNT(self,
             corners_microdrive: List[np.ndarray],
             reference_order: Tuple[str] = ("top_left", "top_right", "bottom_right", "bottom_left")
     ) -> np.ndarray:
-        """
-        Compute transformation matrix from microdrive coordinates to diamond coordinates
-        using four corner points.
+        
 
+        if len(corners_microdrive) != 4:
+            raise ValueError(f"Expected 4 corners, got {len(corners_microdrive)}")
 
-        Parameters:
-        -----------
-        corners_microdrive : List[np.ndarray]
-            List of 4 points in microdrive coordinates in order: [top_left, top_right, bottom_right, bottom_left]
-            Each point should be a numpy array of shape (2,) for (x, y)
-
-
-        reference_order : Tuple[str], optional
-            Order of the corners as they appear in the corners_microdrive list
-
-
-        Returns:
-        --------
-        T : np.ndarray
-            3x3 transformation matrix such that:
-            [x_diamond, y_diamond, 1]^T = T @ [x_microdrive, y_microdrive, 1]^T
-            from microdrive coordinate system to diamond coordinate system
-            DMT is diamond microdrive transformation matrix
-            DMNT is diamond microdrive new transformation matrix
-
-
-        Notes:
-        ------
-        Diamond coordinate system definition:
-        - Origin: at bottom_left corner
-        - x-axis: from bottom_left to bottom_right
-        - y-axis: from bottom_left to top_left
-        This assumes the corners form a (possibly rotated) rectangle in microdrive coords.
-        """
         # Extract points in the specified order
+        # Assuming input order matches reference_order
+        bl_idx = reference_order.index("bottom_left")
+        br_idx = reference_order.index("bottom_right")
+        tl_idx = reference_order.index("top_left")
 
-
-        # Extract micro coordinates from dictionaries
-
-
-        print("here1.3")
-        print(f"bottom_left: {bottom_left}, bottom_right: {bottom_right}, top_left: {top_left}, top_right: {top_right}")
+        bottom_left = np.array(corners_microdrive[bl_idx], dtype=float)
+        bottom_right = np.array(corners_microdrive[br_idx], dtype=float)
+        top_left = np.array(corners_microdrive[tl_idx], dtype=float)
 
         # Diamond coordinate system definition:
         # In diamond coords:
@@ -731,14 +790,14 @@ class positioning_stages_view(QWidget, Ui_Form):
         # bottom_right = (1, 0)
         # top_left = (0, 1)
         # top_right = (1, 1)
-        print("here1.4")
+
         # Source points in microdrive coordinates (homogeneous)
         src_points = np.array([
             [bottom_left[0], bottom_left[1], 1],
             [bottom_right[0], bottom_right[1], 1],
             [top_left[0], top_left[1], 1]
         ]).T  # Shape: (3, 3)
-        print("here1.5")
+
         # Destination points in diamond coordinates (homogeneous)
         dst_points = np.array([
             [0, 0, 1],
@@ -751,222 +810,162 @@ class positioning_stages_view(QWidget, Ui_Form):
         # T = dst @ inv(src)
 
         try:
-            print("here1.6")
             T = dst_points @ np.linalg.inv(src_points)
         except np.linalg.LinAlgError:
             raise ValueError("Corners are colinear or form a degenerate shape")
-        print("here1.7")
-        # Verify with the fourth point
-        print("here1.8")
-        tr_hom = np.array([top_right[0], top_right[1], 1])
-        print("here1.9")
-        tr_diamond_pred = T @ tr_hom
-        print("here1.10")
-        # Should be close to (1, 1, 1) after normalization
-        tr_diamond_pred = tr_diamond_pred / tr_diamond_pred[2]
-        print("here1.11")
-        # Check if the shape is reasonably rectangular
-        expected = np.array([1, 1, 1])
-        print("here1.12")
-        if np.linalg.norm(tr_diamond_pred - expected) > 1e-3:
-            print("here1.13")
-            print(f"Warning: Fourth corner verification failed. "
-                  f"Expected (1, 1, 1), got ({tr_diamond_pred[0]:.3f}, {tr_diamond_pred[1]:.3f}, {tr_diamond_pred[2]:.3f})")
-            print("This suggests corners don't form a proper rectangle or order is wrong.")
-        print("here1.14")
         return T
 
     def from_DMT_and_MNV_old_get_DNV_old(self, M_point: np.ndarray, T_matrix: np.ndarray) -> np.ndarray:
-        """
-        Transform a point from microdrive to diamond coordinates.
-        Handles both dict and array(dict) formats.
-        """
-        # Extract micro coordinates
-        if isinstance(M_point, np.ndarray) and M_point.dtype == object:
-            M_point = M_point.item()  # Extract dict from array
 
-        if isinstance(M_point, dict):
-            # Extract micro coordinates
-            micro_x = float(M_point.get('micro_x', M_point.get('micro_X', 0)))
-            micro_y = float(M_point.get('micro_y', M_point.get('micro_Y', 0)))
-        elif isinstance(M_point, (list, tuple, np.ndarray)) and len(M_point) >= 2:
-            micro_x, micro_y = float(M_point[0]), float(M_point[1])
+        if len(M_point) == 2:
+            M_hom = np.array([M_point[0], M_point[1], 1.0])
         else:
-            raise ValueError(f"Unexpected point format: {type(M_point)}")
+            M_hom = np.array(M_point)
 
-        M_hom = np.array([micro_x, micro_y, 1.0])
         D_hom = T_matrix @ M_hom
         D_hom = D_hom / D_hom[2]  # Normalize
 
         return D_hom[:2]
 
-    def find_NV(self):
-        """Complete function with transformation calculations to find NV center"""
+    def choose_method(self) -> str:
+        """
+        Ask the user which NV mapping method to use: Affine or Homography.
+        Returns:
+            "affine" or "homography"
+        """
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Select NV Mapping Method")
+        msg.setText("Which method would you like to use for NV relocation?")
+        msg.setInformativeText("Choose Affine or Homography.")
+
+        msg.setStandardButtons(QMessageBox.NoButton)
+
+        # Add custom buttons
+        btn_affine = QPushButton("Affine")
+        btn_homography = QPushButton("Homography")
+        msg.addButton(btn_affine, QMessageBox.AcceptRole)
+        msg.addButton(btn_homography, QMessageBox.AcceptRole)
+
+        # Show dialog and wait for response
+        ret = msg.exec()
+
+        clicked_button = msg.clickedButton()
+        if clicked_button == btn_affine:
+            return "affine"
+        else:
+            return "homography"
+
+    def choose_homography_method(self) -> str:
+        """
+        Ask the user which NV mapping method to use: LMEDS, RANSAC, RHOMBUS in Homography.
+        Returns:
+            "LMEDS", "RANSAC", "RHOMBUS", or "USAC_MAGSAC
+        """
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Select NV Mapping Method")
+        msg.setText("Which method would you like to use for NV relocation?")
+        msg.setInformativeText("Choose Homography.")
+
+        msg.setStandardButtons(QMessageBox.NoButton)
+
+        # Add custom buttons
+        btn_LMEDS = QPushButton("LMEDS")
+        btn_RANSAC = QPushButton("RANSAC")
+        btn_RHOMBUS = QPushButton("RHOMBUS")
+        btn_USAC_MAGSAC = QPushButton("USAC_MAGSAC")
+        msg.addButton(btn_LMEDS, QMessageBox.AcceptRole)
+        msg.addButton(btn_RANSAC, QMessageBox.AcceptRole)
+        msg.addButton(btn_RHOMBUS, QMessageBox.AcceptRole)
+        msg.addButton(btn_USAC_MAGSAC, QMessageBox.AcceptRole)
+        # Show dialog and wait for response
+        ret = msg.exec()
+
+        clicked_button = msg.clickedButton()
+        if clicked_button == btn_LMEDS:
+            return "LMEDS"
+        elif clicked_button == btn_RANSAC:
+            return "RANSAC"
+        elif clicked_button == btn_RHOMBUS:
+            return "RHOMBUS"
+        else:
+            return "USAC_MAGSAC"
+
+    def find_NV(self) -> np.ndarray:
+
         self.save_or_find_nv_button_clicked.emit(1)
         path = self.open_file_dialog(self.data_saving_path)
         if not path:
             return
+        method = self.choose_method()
+        structure = load_data(path)
+        if method == "affine":
+            """for i, structure in enumerate(Objects._items):"""
+            print(f"struct: {structure}")
 
-        # read file
-        self.data_reader = ExperimentHDF5ReaderSWMR(path)
-        self.data_reader.read_structure()
-        structure = self.data_reader.get_structure()
+            old_corners, new_corners, MNV_old = self.extract_corners(structure)
+            # Compute transformations
+            DMT = self.from_four_corners_to_DMT_or_DMNT(old_corners)
+            DMNT = self.from_four_corners_to_DMT_or_DMNT(new_corners)
 
-        required_corners = ("top_left", "top_right", "bottom_left", "bottom_right")
+            MNV_new_direct = self.from_DMT_and_MNV_old_get_DNV_old(MNV_old, np.linalg.inv(DMNT) @ DMT)
+            print(f"affine solution: {MNV_new_direct}")
+            return MNV_new_direct
+        elif method == "homography":
+            method = self.choose_homography_method()
+            """for i, structure in enumerate(Objects._items):"""
+            print(f"struct: {structure}")
 
-        init = structure.get("INITIAL", {})
-        final = structure.get("FINAL", {})
+            old_corners, new_corners, MNV_old = self.extract_corners(structure)
+            H_direct = self.compute_homography_from_corners(old_corners, new_corners, method)
+            nv_new = self.map_point_with_homography(MNV_old, H_direct)
+            print(f"homography solution with {method} method: {nv_new}")
+            return nv_new
+        else:
+            raise ValueError(f"Method {method} not implemented")
 
-        # Validation
-        if not all(c in init for c in required_corners):
-            self.error_box("INITIAL does not contain all 4 corners",
-                           "please add all 4 corners before proceeding")
-            self.data_reader.close()
-            return
+    """def extract_corners(self, structure):
+        order = ["top_left", "top_right", "bottom_right", "bottom_left"]
 
-        if not all(c in final for c in required_corners):
-            self.error_box("FINAL does not contain all 4 corners",
-                           "please add all 4 corners before proceeding")
-            self.data_reader.close()
-            return
+        def get_xy(block, name):
+            arr = getattr(block, name)  # StructArray
+            if not arr._items:
+                raise ValueError(f"No data for {name}")
 
-        if "nv" not in init:
-            self.error_box("NV does not exist in INITIAL",
-                           "please NV point before proceeding")
-            self.data_reader.close()
-            return
+            pt = arr._items[-1]  # latest snapshot
+            print(f"{name} micro_x: {pt.micro_x}, micro_y: {pt.micro_y}")
 
-        # Prepare points in consistent order
-        old_corners_microdrive = [
-            np.array(init["top_left"]),
-            np.array(init["top_right"]),
-            np.array(init["bottom_left"]),
-            np.array(init["bottom_right"])
-        ]
+            return np.array([
+                float(pt.micro_x),
+                float(pt.micro_y)
+            ])
 
-        new_corners_microdrive = [
-            np.array(final["top_left"]),
-            np.array(final["top_right"]),
-            np.array(final["bottom_left"]),
-            np.array(final["bottom_right"])
-        ]
+        old_corners = [get_xy(structure.INITIAL, n) for n in order]
+        new_corners = [get_xy(structure.FINAL, n) for n in order]
+        nv_position = get_xy(structure.INITIAL, "nv")
 
-        old_nv_microdrive = np.array(init["nv"])
+        return old_corners, new_corners, nv_position"""
 
-        print(f"Old corners: {old_corners_microdrive}")
-        print(f"New corners: {new_corners_microdrive}")
-        print(f"Old NV in microdrive: {old_nv_microdrive}")
+    def extract_corners(self, structure):
+        order = ["top_left", "top_right", "bottom_right", "bottom_left"]
 
-        ###
-        print("here1.1")
-        if len(old_corners_microdrive) != 4:
-            raise ValueError(f"Expected 4 corners, got {len(old_corners_microdrive)}")
+        def get_xy(block, name):
+            pt = getattr(block, name)  # MyStruct directly
 
-        corners_dicts = []
-        for corner_array in old_corners_microdrive:
-            if isinstance(corner_array, np.ndarray) and corner_array.dtype == object:
-                # Extract the dictionary from the numpy array
-                corner_dict = corner_array.item()
-                corners_dicts.append(corner_dict)
-            else:
-                corners_dicts.append(corner_array)
+            if pt is None:
+                raise ValueError(f"No data for {name}")
 
-        # Replace the input with extracted dictionaries
-        old_corners_microdrive = corners_dicts
+            print(f"{name} micro_x: {pt.micro_x}, micro_y: {pt.micro_y}")
 
-        print(f"Debug: Extracted corners_dicts = {corners_dicts}")
+            return np.array([
+                float(pt.micro_x),
+                float(pt.micro_y)
+            ])
+        print(f"structure.initial {structure.INITIAL}")
+        print(f"structure.final {structure.FINAL}")
+        old_corners = [get_xy(structure.INITIAL, n) for n in order]
+        new_corners = [get_xy(structure.FINAL, n) for n in order]
+        nv_position = get_xy(structure.INITIAL, "nv")
 
-
-        print("here1.1")
-        if len(new_corners_microdrive) != 4:
-            raise ValueError(f"Expected 4 corners, got {len(new_corners_microdrive)}")
-
-        corners_dicts = []
-        for corner_array in new_corners_microdrive:
-            if isinstance(corner_array, np.ndarray) and corner_array.dtype == object:
-                # Extract the dictionary from the numpy array
-                corner_dict = corner_array.item()
-                corners_dicts.append(corner_dict)
-            else:
-                corners_dicts.append(corner_array)
-
-        # Replace the input with extracted dictionaries
-        new_corners_microdrive = corners_dicts
-        ###
-        print(f"Debug: Extracted corners_dicts = {corners_dicts}")
-        reference_order = ("top_left", "top_right", "bottom_right", "bottom_left")
-        bl_idx = reference_order.index("bottom_left")
-        br_idx = reference_order.index("bottom_right")
-        tl_idx = reference_order.index("top_left")
-        tr_idx = reference_order.index("top_right")
-        print("here1.2")
-
-        bl_x, bl_y = self.get_micro_coords(old_corners_microdrive[bl_idx])
-        br_x, br_y = self.get_micro_coords(old_corners_microdrive[br_idx])
-        tl_x, tl_y = self.get_micro_coords(old_corners_microdrive[tl_idx])
-        tr_x, tr_y = self.get_micro_coords(old_corners_microdrive[tr_idx])
-        bottom_left = np.array([bl_x, bl_y], dtype=float)
-        bottom_right = np.array([br_x, br_y], dtype=float)
-        top_left = np.array([tl_x, tl_y], dtype=float)
-        top_right = np.array([tr_x, tr_y], dtype=float)
-
-        bl_x, bl_y = self.get_micro_coords(new_corners_microdrive[bl_idx])
-        br_x, br_y = self.get_micro_coords(new_corners_microdrive[br_idx])
-        tl_x, tl_y = self.get_micro_coords(new_corners_microdrive[tl_idx])
-        tr_x, tr_y = self.get_micro_coords(new_corners_microdrive[tr_idx])
-        bottom_left = np.array([bl_x, bl_y], dtype=float)
-        bottom_right = np.array([br_x, br_y], dtype=float)
-        top_left = np.array([tl_x, tl_y], dtype=float)
-        top_right = np.array([tr_x, tr_y], dtype=float)
-
-        # Compute transformation matrices
-        try:
-            print("here 0")
-            # DMT: transform from microdrive to diamond coordinates (old position)
-            DMT = self.from_four_corners_to_DMT_or_DMNT(
-                old_corners_microdrive
-            )
-            print("here 1")
-            # DMNT: transform from microdrive to diamond coordinates (new position)
-            DMNT = self.from_four_corners_to_DMT_or_DMNT(
-                new_corners_microdrive
-            )
-            print("here 2")
-            # Transform old NV position to diamond coordinates
-            nv_diamond = self.from_DMT_and_MNV_old_get_DNV_old(old_nv_microdrive, DMT)
-            print(f"NV in diamond coordinates: {nv_diamond}")
-            print(f"old_corners_microdrive {old_corners_microdrive}")
-
-            # Transform back to microdrive coordinates using new diamond position
-            # To go from diamond to new microdrive: M_new = DMNT^{-1} * D
-            # But we have D from DMT * M_old, so:
-            # M_new = DMNT^{-1} * DMT * M_old
-
-            DMNT_inv = np.linalg.inv(DMNT)
-            print("here 3")
-            new_nv_microdrive_hom = DMNT_inv @ DMT @ np.array([old_corners_microdrive[0], old_corners_microdrive[1], 1.0])
-            print("here 4")
-            new_nv_microdrive = new_nv_microdrive_hom[:2] / new_nv_microdrive_hom[2]
-
-            print(f"Predicted new NV position in microdrive: {new_nv_microdrive}")
-
-            nv_diamond_hom = DMT @ np.array([old_corners_microdrive[0], old_corners_microdrive[1], 1.0])
-            print("here 5")
-            nv_diamond_hom = nv_diamond_hom / nv_diamond_hom[2]
-            print("here 6")
-
-            new_nv_microdrive_hom2 = DMNT_inv @ nv_diamond_hom
-            print("here 7")
-            new_nv_microdrive2 = new_nv_microdrive_hom2[:2] / new_nv_microdrive_hom2[2]
-
-            print(f"Alternative calculation: {new_nv_microdrive2}")
-
-            # Return the result
-            return new_nv_microdrive
-
-        except Exception as e:
-            self.error_box("Transformation error", f"Failed to compute transformations: {str(e)}")
-            self.data_reader.close()
-            return None
-        finally:
-            self.data_reader.close()
+        return old_corners, new_corners, nv_position

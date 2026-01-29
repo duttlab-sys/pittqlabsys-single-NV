@@ -256,6 +256,7 @@ class Amscope_Camera_View(QWidget):
         if not self.buf:
             return None
         try:
+            print("get_latest_frame")
             arr = np.frombuffer(self.buf, dtype=np.uint8).reshape((self.h, self.w, 3))
             return arr
         except Exception as e:

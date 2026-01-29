@@ -127,7 +127,7 @@ class Display_View(QWidget, Ui_Form):
         if self.snapshot_or_live == 0:
             self.last_selection = 0
             self.update_timer.stop()
-            self.widget.stop_live_view()
+            #self.widget.stop_live_view()
             return
         else:
             self.last_selection = 1
@@ -184,8 +184,9 @@ class Display_View(QWidget, Ui_Form):
         self.zy_plot.setData(self.z_y, self.y)
 
     def close(self):
-        self.widget.stop_live_view()
-        self.widget.stop()
+        if self.snapshot_or_live == 1:
+            self.widget.stop_live_view()
+            self.widget.stop()
 
     def plot_clicked(self, mouse_event):
         if mouse_event.button() == Qt.LeftButton:

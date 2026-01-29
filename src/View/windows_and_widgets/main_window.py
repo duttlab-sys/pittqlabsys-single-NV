@@ -232,6 +232,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.positioning_tab.display_choice_changed.connect(self.update_display_choice)
         self.positioning_tab.snapshot_mode_changed.connect(self.update_snapshot_mode)
         self.positioning_tab.save_or_find_nv_button_clicked.connect(self.update_current_data_saving_path) # @
+        self.positioning_tab.take_img_signal.connect(self.take_frame)
         gui_logger.debug("setupUi() completed successfully")
         
         # Fix for macOS menu bar issue - ensure menu bar is properly attached to main window
@@ -350,8 +351,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.tree_experiments.itemClicked.connect(self.btn_clicked)
             # self.tree_experiments.installEventFilter(self)
             # QtWidgets.QTreeWidget.installEventFilter(self)
-
-
             self.tabWidget.currentChanged.connect(lambda : self.switch_tab())
             self.tree_dataset.clicked.connect(lambda: self.btn_clicked())
 
@@ -471,6 +470,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.data_saving_path = self.data_saving_tab.current_path()
         self.positioning_tab.data_saving_path = self.data_saving_path
 
+    def take_frame(self):
+        if self.positioning_tab.snapshot_or_live()=="Snapshot":
+            frame = self.Display_View_widget.widget.get_latest_frame()
+            print(f"frame is {frame}")
+            self.positioning_tab.frame = frame
+
     def closeEvent(self, event):
         """
         things to be done when gui closes, like save the settings
@@ -561,8 +566,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         """
         current_tab = str(self.tabWidget.tabText(self.tabWidget.currentIndex()))
         if current_tab == "Positioning":
-            if not (self.data_saving_tab.data_reader is None):
-                self.data_saving_tab.data_reader.close()
             self.load_display_widget()
             self.resize(self.sizeHint())
         else:
