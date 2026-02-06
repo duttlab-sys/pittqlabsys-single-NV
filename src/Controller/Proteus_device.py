@@ -666,9 +666,9 @@ class ProteusDriver:
         selected channel. The Proteus displays a calibrated value when on load impedance of 50 Ω offset
         and amplitude settings are independent providing that the “offset + amplitude/2” value does not
         exceed the specified voltage window. This command does not apply to the AC output module."""
-        if not isinstance(voltage, (float, int)):
+        if not(isinstance(voltage, (float, int)) or (voltage == 'MAX')):
             raise ValueError(f"Invalid voltage: {voltage}")
-        if not (0.001 <= voltage <= 1.2):
+        if isinstance(voltage, (float, int)) and not (0.001 <= voltage <= 1.2):
             raise ValueError(f"Invalid voltage: {voltage}")
         self.send_command(f':VOLT {voltage}')
 

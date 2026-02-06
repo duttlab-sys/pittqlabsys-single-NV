@@ -6,14 +6,16 @@ from PyQt5.QtCore import QModelIndex, QDir
 from PyQt5.QtGui import QIcon
 from .data_saving_tab_design import Ui_Form
 import os
-from PyQt5.QtWidgets import QMenu, QInputDialog, QMessageBox
-from pathlib import Path
+from PyQt5.QtWidgets import QMenu, QInputDialog
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QPushButton
 from pathlib import Path
-from PyQt5.QtWidgets import QMessageBox
-from src.core.struct_hdf5 import load_data
-
+from PyQt5.QtWidgets import QMessageBox, QFileDialog
+from src.core.struct_hdf5 import load_data, iter_struct, is_image_array, is_scalar_or_small, normalize_value
+from PyQt5.QtWidgets import QDialog, QLabel, QVBoxLayout
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QStandardItemModel, QStandardItem
+import numpy as np
 
 class data_saving_tab_view(QWidget, Ui_Form):
     def __init__(self, parent=None):
@@ -284,8 +286,13 @@ class data_saving_tab_view(QWidget, Ui_Form):
         try:
             # --- Load the whole file into a StructArray ---
             self.data_reader = load_data(path)
+            self.show_hdf5_browser()
             print(f"File loaded successfully: {path}")
             print(f"self.data_reader {self.data_reader}")
+
+            for path, value in iter_struct(self.data_reader):
+                if is_image_array(value):
+                    print("IMAGE:", path, value.shape)
 
         except Exception as e:
             QMessageBox.critical(
@@ -294,3 +301,140 @@ class data_saving_tab_view(QWidget, Ui_Form):
                 f"Failed to load file:\n{e}"
             )
             self.data_reader = None
+
+    def build_hdf5_tree(self):
+        model = QStandardItemModel()
+        model.setHorizontalHeaderLabels(["HDF5 Content"])
+
+        root = model.invisibleRootItem()
+
+        for path, value in iter_struct(self.data_reader):
+            parts = path.split("/")
+            parent = root
+
+            for p in parts:
+                found = None
+                for i in range(parent.rowCount()):
+                    if parent.child(i).text() == p:
+                        found = parent.child(i)
+                        break
+                if not found:
+                    found = QStandardItem(p)
+                    parent.appendRow(found)
+                parent = found
+
+            # Store the actual value
+            parent.setData(value, Qt.UserRole)
+
+            # --- ICONS ---
+            if is_image_array(value):
+                parent.setIcon(QIcon("icons/image.png"))
+            elif isinstance(value, str):
+                parent.setIcon(QIcon("icons/text.png"))
+            elif np.isscalar(value):
+                parent.setIcon(QIcon("icons/number.png"))
+
+            # --- TOOLTIP PREVIEW ---
+            if is_scalar_or_small(value):
+                parent.setToolTip(str(normalize_value(value)))
+
+        return model
+
+    def open_hdf5_context_menu(self, pos):
+        index = self.hdf5_tree.indexAt(pos)
+        if not index.isValid():
+            return
+
+        item = self.hdf5_model.itemFromIndex(index)
+        value = item.data(Qt.UserRole)
+
+        menu = QMenu(self)
+
+        # --- IMAGE ---
+        if is_image_array(value):
+            view_action = menu.addAction("View Image")
+            save_action = menu.addAction("Export as PNG")
+
+        # --- SCALAR / SMALL DATA ---
+        elif is_scalar_or_small(value):
+            view_value_action = menu.addAction("View Value")
+
+        action = menu.exec_(self.hdf5_tree.viewport().mapToGlobal(pos))
+
+        if is_image_array(value):
+            if action == view_action:
+                ImageViewer(value, title=item.text(), parent=self).exec_()
+            elif action == save_action:
+                self.export_png(value)
+
+        elif is_scalar_or_small(value):
+            if action == view_value_action:
+                ValueViewer(item.text(), normalize_value(value), parent=self).exec_()
+
+    def export_png(self, img):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Image", "", "PNG (*.png)"
+        )
+        if not path:
+            return
+
+        from PIL import Image
+        Image.fromarray(img).save(path)
+
+    def show_hdf5_browser(self):
+        # Create tree
+        if not hasattr(self, "hdf5_tree"):
+            self.hdf5_tree = QTreeView()
+            self.hdf5_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.hdf5_tree.customContextMenuRequested.connect(
+                self.open_hdf5_context_menu
+            )
+            self.hdf5_tree.setHeaderHidden(False)
+
+            self.layout().addWidget(self.hdf5_tree)
+
+        self.hdf5_model = self.build_hdf5_tree()
+        self.hdf5_tree.setModel(self.hdf5_model)
+        self.hdf5_tree.expandAll()
+
+
+class ImageViewer(QDialog):
+    def __init__(self, img: np.ndarray, title="Image", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+
+        h, w = img.shape[:2]
+
+        if img.ndim == 2:
+            qimg = QImage(
+                img.data, w, h, w,
+                QImage.Format_Grayscale8
+            )
+        else:
+            qimg = QImage(
+                img.data, w, h, 3 * w,
+                QImage.Format_RGB888
+            )
+
+        label = QLabel()
+        label.setPixmap(QPixmap.fromImage(qimg))
+        label.setScaledContents(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(label)
+        self.resize(min(w, 1000), min(h, 800))
+
+class ValueViewer(QDialog):
+    def __init__(self, name, value, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(name)
+
+        label = QLabel(str(value))
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        label.setWordWrap(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(label)
+
+        self.resize(500, 300)
+

@@ -4,6 +4,9 @@ MATLAB-style struct / struct-array save & load using HDF5 (+ SWMR-ready).
 
 import numpy as np
 import h5py
+from typing import Any
+from src import ur  # pint unit registry
+from src.core import Parameter
 
 # ============================================================
 # Core data containers
@@ -98,6 +101,11 @@ def _write_value(h5group, name, value):
     elif np.isscalar(value) or isinstance(value, str):
         h5group.attrs[name] = value
 
+    elif isinstance(value, dict):
+        grp = h5group.require_group(name)
+        for k, v in value.items():
+            _write_value(grp, k, v)
+
     # Everything else → dataset
     else:
         arr = np.asarray(value)
@@ -144,6 +152,128 @@ def _read_mystruct(h5group, mystruct):
                 _read_mystruct(obj, sub)
                 mystruct.__dict__[name] = sub
 
+def is_image_array(arr: np.ndarray) -> bool:
+    if not isinstance(arr, np.ndarray):
+        return False
+    if arr.dtype != np.uint8:
+        return False
+    if arr.ndim == 2:
+        return True              # grayscale
+    if arr.ndim == 3 and arr.shape[2] in (3, 4):
+        return True              # RGB / RGBA
+    return False
+def iter_struct(obj, prefix=""):
+    """
+    Yields (path, value)
+    Example path: FINAL/top_left/camera_image
+    """
+    if isinstance(obj, MyStruct):
+        for k, v in obj.__dict__.items():
+            new_prefix = f"{prefix}/{k}" if prefix else k
+            yield from iter_struct(v, new_prefix)
+
+    elif isinstance(obj, StructArray):
+        for i, item in enumerate(obj._items):
+            new_prefix = f"{prefix}/{i}"
+            yield from iter_struct(item, new_prefix)
+
+    else:
+        yield prefix, obj
+
+def is_scalar_or_small(value, max_elements=100):
+
+    # NumPy scalar (np.int64, np.float32, etc.)
+    if isinstance(value, np.generic):
+        return True
+
+    # Python scalar
+    if isinstance(value, (int, float, bool, str)):
+        return True
+
+    # Small numpy arrays
+    if isinstance(value, np.ndarray):
+        return value.size <= max_elements
+
+    return False
+
+def normalize_value(value):
+    import numpy as np
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+def parameter_to_mystruct(obj):
+    """
+    Convert Parameter / dict / scalar into MyStruct recursively.
+    """
+    # Case 1: full Parameter object
+    if isinstance(obj, Parameter):
+        ms = MyStruct()
+
+        for key in obj.keys():
+            value = obj[key]
+
+            # Nested Parameter
+            if isinstance(value, Parameter):
+                setattr(ms, key, parameter_to_mystruct(value))
+                continue
+
+            # Pint quantity
+            if obj.is_pint_quantity(key):
+                q = value
+                setattr(
+                    ms,
+                    key,
+                    MyStruct(value=q.magnitude, units=str(q.units))
+                )
+                continue
+
+            # Plain value
+            setattr(ms, key, normalize_value(value))
+
+        # Attach metadata once per Parameter
+        ms._parameter_metadata = MyStruct(
+            info=dict_to_mystruct(obj.info),
+            units=dict_to_mystruct(obj.units),
+            visible=dict_to_mystruct(obj.visible),
+            valid_values=str(obj.valid_values),
+        )
+
+        return ms
+
+    # Case 2: dict-like (already unwrapped Parameter)
+    elif isinstance(obj, dict):
+        ms = MyStruct()
+        for k, v in obj.items():
+            setattr(ms, k, parameter_to_mystruct(v))
+        return ms
+
+    # Case 3: scalar / array
+    else:
+        return normalize_value(obj)
+
+
+def dict_to_mystruct(d):
+    ms = MyStruct()
+    for k, v in d.items():
+        if isinstance(v, dict):
+            setattr(ms, k, dict_to_mystruct(v))
+        else:
+            setattr(ms, k, normalize_value(v))
+    return ms
+
+def save_parameters_hdf5(
+    filename,
+    parameters,
+    root_name="parameters",
+    mode="w",
+    swmr=True
+):
+    root = MyStruct()
+    setattr(root, root_name, parameter_to_mystruct(parameters))
+    save_data(filename, root, mode=mode, swmr=swmr)
+
+
 
 # ============================================================
 # Example usage
@@ -166,6 +296,27 @@ if __name__ == "__main__":
 
     print(loaded)
     print(loaded[1].matrix)
+    # PARAM HELPERS EXAMPLE USAGE
+    """Save spectrum analyzer defaults
+    save_parameters_hdf5(
+        "agilent8596e_params.h5",
+        _DEFAULT_SETTINGS,
+        root_name="agilent8596e"
+    )
+    Save pulsed ODMR experiment parameters
+    save_parameters_hdf5(
+        "odmr_pulsed_params.h5",
+        _DEFAULT_SETTINGS,
+        root_name="odmr_pulsed"
+    )
+    Save multiple parameter sets at once
+    save_parameters_hdf5(
+        "experiment_params.h5",
+        {
+            "spectrum_analyzer": sa_params,
+            "odmr": odmr_params,
+        }
+    )"""
 
 
 

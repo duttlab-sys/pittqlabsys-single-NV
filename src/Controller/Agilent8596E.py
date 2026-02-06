@@ -30,6 +30,7 @@ import pyvisa.errors
 import numpy as np
 from src.core import Device, Parameter
 import pandas as pd
+from src.core.struct_hdf5 import save_parameters_hdf5
 
 # LIMITS
 _max_freq = 12800
@@ -65,6 +66,13 @@ class Agilent8596E(Device):
     def __init__(self, name=None, settings=None):
         super(Agilent8596E, self).__init__(name, settings)
         try:
+            """
+            # testing hdf5 save parameter
+            save_parameters_hdf5(
+                "agilent8596e_params.h5",
+                self.settings,
+                root_name="agilent8596e"
+            )"""
             self._connect()
             self.agilent_analyzer.timeout = 10000  # added timeout because TS; takes longer than regular timeout
         except pyvisa.errors.VisaIOError:
@@ -882,6 +890,7 @@ MDS W transfers 802 bytes of trace data with no loss of resolution."""
 
 if __name__ == '__main__':
     ag = Agilent8596E()
+
     # TESTS RAN SUCCESSFULLY:
     # first test: PAGE 52: Successful
     """

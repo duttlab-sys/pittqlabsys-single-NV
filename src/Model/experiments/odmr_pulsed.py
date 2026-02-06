@@ -538,6 +538,8 @@ class ODMRPulsedExperiment(Experiment):
             return marker_bytes
 
         try:
+            self.proteus.driver.set_channel(3)
+            self.proteus.driver.set_voltage('MAX')
             if not self.scan_sequences:
                 self.logger.error("No scan sequences available")
                 return False
@@ -690,6 +692,7 @@ class ODMRPulsedExperiment(Experiment):
                         # I have already coded the marker index here: mkr_index = int(marker.name.split('_')[-2]) so if the user
                         # gives marker, laser_int_1 on channel 4 at 0ns, 500ns then you know whatever is after laser_init_ is the index
                         marker_index = 1
+
                         self.proteus.driver.set_marker(marker_index)
                         # Verify Proteus marker settings
                         resp = self.proteus.driver.get_marker()
@@ -1021,14 +1024,8 @@ class ODMRPulsedExperiment(Experiment):
             self.logger.error(f"Failed to run sequence and collect data: {e}")
             return {'success': False, 'error': str(e)}
     
-    def create_example_odmr_sequence(self) -> str:
-        """
-        Create an example ODMR sequence using the sequence language.
-        
-        Returns:
-            Sequence text in the sequence language format
-        """
-        sequence_text = """
+    """def create_example_odmr_sequence(self) -> str:
+
 sequence: name=odmr_pulsed, type=odmr, duration=1002500ns, sample_rate=1GHz, repeat_count=50000
 variable pulse_duration, start=50ns, stop=500ns, steps=20
 marker, laser_int_1 on channel 1 at 0ns, 500ns
@@ -1039,9 +1036,30 @@ wait pulse on channel 2 at pulse_duration+0.000000500, square, 2*pulse_duration,
 pi/2 pulse on channel 1 at 3*pulse_duration+0.000000500, gaussian, pulse_duration, 1.0
 pi/2 pulse on channel 2 at 3*pulse_duration+0.000000500, gaussian, pulse_duration, 1.0
 marker, laser_readout_1 on channel 1 at 2500ns, 1ms
-marker, laser_readout_1 on channel 2 at 2500ns, 300ns
-"""
+marker, readout_counts_1 on channel 2 at 2500ns, 300ns
+marker, reference_counts_1 on channel 2 at 1002200ns, 300ns
+sequence: name=SCC, type=SCC, duration=1400ns, sample_rate=1GHz, repeat=50000
+shelving pulse on channel 3 at 0ns, square, 300ns, 0.6
+ionization pulse on channel 3 at 300ns, square, 500ns, 1.0
+readout pulse on channel 3 at 800ns, square, 600ns, 0.3
+        return sequence_text.strip()"""
+
+    def create_example_odmr_sequence(self) -> str:
+        """
+        Create an example ODMR sequence using the sequence language.
+
+        Returns:
+            Sequence text in the sequence language format
+        """
+        sequence_text = """    
+    sequence: name=SCC, type=SCC, duration=600ns, sample_rate=1GHz, repeat=50000
+    shelving pulse on channel 3 at 0ns, square, 300ns, 1.0
+    wait pulse on channel 3 at 300ns, square, 300ns, 0.0
+    #ionization pulse on channel 3 at 300ns, square, 500ns, 1.0
+    #readout pulse on channel 3 at 800ns, square, 600ns, 0.3
+    """
         return sequence_text.strip()
+
     
     def create_example_rabi_sequence(self) -> str:
         """
@@ -1215,7 +1233,7 @@ if __name__ == "__main__":
     else:
         print("Failed to load sequence")
 
-    """# Build sequences
+    # Build sequences
     if experiment.build_scan_sequences():
        print("Scan sequences built successfully")
     else:
@@ -1225,11 +1243,11 @@ if __name__ == "__main__":
     #if experiment.generate_awg_task_sequences_adwin_triggering_awg_case():
        print("AWG sequences generated successfully")
     else:
-       print("Failed to generate AWG sequences")"""
+       print("Failed to generate AWG sequences")
 
 
     # Run experiment
-    print("Running experiment...")
+    """print("Running experiment...")
     #results = experiment.run_experiment(frequency_range=[2.87e9, 2.88e9, 2.89e9])
     results = experiment.run_experiment(frequency_range=[2.87e9])
     if results['success']:
@@ -1237,7 +1255,7 @@ if __name__ == "__main__":
         print(f"Frequencies scanned: {[f/1e9 for f in results['frequencies']]} GHz")
         print(f"Signal counts shape: {len(results['signal_counts'])} frequencies x {len(results['signal_counts'][0])} points")
     else:
-        print(f"Experiment failed: {results['error']}")
+        print(f"Experiment failed: {results['error']}")"""
 
 
     experiment.show_sequence_preview(10)

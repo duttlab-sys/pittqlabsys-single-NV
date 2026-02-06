@@ -17,10 +17,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from src.Model.sequence_parser import SequenceTextParser
 from src.Model.sequence_builder import SequenceBuilder
-from src.Model.hardware_calibrator import HardwareCalibrator
-from src.Model.awg520_optimizer import AWG520SequenceOptimizer
+from src.Model.proteus_hardware_calibrator import ProteusHardwareCalibrator
 from src.Controller.Proteus_device import ProteusDevice
-from src.Model.awg_file import AWGFile
 from src.Model.sequence import Sequence
 from src.core import Parameter, Experiment
 
@@ -102,14 +100,9 @@ class SpinChargeConversionExperiment(Experiment):
 
         # Initialize hardware calibrator with experiment-specific connection file
         connection_file = Path(__file__).parent / "spin_charge_conversion_connection.json"
-        self.hardware_calibrator = HardwareCalibrator(
-            connection_file=str(connection_file),
-            config_file=str(self.config_path)
-        )
-
-        self.awg_optimizer = AWG520SequenceOptimizer()
-
+        self.hardware_calibrator = ProteusHardwareCalibrator(connection_file=str(connection_file))
         # Experiment parameters (will be set from _DEFAULT_SETTINGS)
+        self.number_of_iterations = 0
         self.microwave_frequency = 2.87e9  # 2.87 GHz (NV center)
         self.microwave_power = -10.0  # dBm
         self.mw_delay = 25.0  # ns
@@ -143,7 +136,7 @@ class SpinChargeConversionExperiment(Experiment):
         self.microwave = self.devices['sg384']['instance']
         self.dye_laser = self.devices['coherent_899_dye_laser']['instance']
         self.spectrometer = self.devices['spex_spectrometer']['instance']"""
-        self.proteus = None
+        self.proteus = ProteusDevice()
 
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from JSON file."""
@@ -234,20 +227,25 @@ class SpinChargeConversionExperiment(Experiment):
             if not self.sequence_description:
                 self.logger.error("No sequence description loaded")
                 return False
-
             # Build scan sequences
             self.scan_sequences = self.sequence_builder.build_scan_sequences(
                 self.sequence_description
             )
+            if self.sequence_description.variables:
+                for seq in self.scan_sequences:
+                    self.number_of_iterations += 1
+            else:
+                self.number_of_iterations = 1
 
             # Apply hardware calibration
-            """for i, sequence in enumerate(self.scan_sequences):
+            for i, sequence in enumerate(self.scan_sequences):
                 calibrated_sequence = self.hardware_calibrator.calibrate_sequence(
                     sequence,
                     self.sequence_description.sample_rate
                 )
-                self.scan_sequences[i] = calibrated_sequence"""
-
+                self.scan_sequences[i] = calibrated_sequence
+            self.sequence_duration = calibrated_sequence.length
+            print(f"jano {self.sequence_duration}")
             self.logger.info(f"Built {len(self.scan_sequences)} scan sequences")
             return True
 
@@ -255,12 +253,246 @@ class SpinChargeConversionExperiment(Experiment):
             self.logger.error(f"Error building scan sequences: {e}")
             return False
 
-    def generate_awg_files(self) -> bool:
+    def generate_awg_task_sequences_adwin_triggering_awg_case(self) -> bool:
+        """
+        Generate Proteus AWG waveforms with maximum timing resolution.
+        One continuous waveform per channel.
+        one segment and one task entry per iteration per channel.
+        64-sample alignment is applied at the end of each waveform.
+        The advantage of this option is that adwin does the counts then it tells proteus
+        to move to the next sequence. This ensures that counts are measured as expected.
+        """
+
+        def prepare_markers_for_tabor(markers_array: np.ndarray) -> np.ndarray:
+            """
+            Correct Proteus marker packing for 16-bit DAC mode.
+            markers_array: 1 marker value per waveform sample (0 or 255)
+            """
+
+            # Convert to binary 0/1
+            m = (markers_array > 0).astype(np.uint8)
+
+            # Ensure multiple of 4 samples
+            if len(m) % 4 != 0:
+                m = np.pad(m, (4 - len(m) % 4, 0))
+
+            # One marker byte per 4 waveform samples
+            marker_bytes = np.zeros(len(m) // 4, dtype=np.uint8)
+
+            for i in range(len(marker_bytes)):
+                block = m[i * 4:(i + 1) * 4]
+
+                if np.any(block):
+                    # Marker 1 ON for all 4 samples → 0b00010001
+                    marker_bytes[i] = 0x11
+                else:
+                    marker_bytes[i] = 0x00
+
+            return marker_bytes
+
+        try:
+            if not self.scan_sequences:
+                self.logger.error("No scan sequences available")
+                return False
+            # ------------------------------------------------------------
+            # DAC configuration
+            # ------------------------------------------------------------
+            max_dac = 65535
+            half_dac = max_dac // 2
+            ALIGNMENT = 64  # Proteus requirement (segment length)
+
+            # ------------------------------------------------------------
+            # Determine all channels, initialize buffers
+            # ------------------------------------------------------------
+            all_channels = set()
+            channels = set()
+            marker_indices = set()
+            marker_channels = set()
+            for sequence in self.scan_sequences:
+                for _, pulse_ in enumerate(sequence.pulses):
+                    pulse = pulse_[1]
+                    ch = int(pulse.name.split("_")[-1])
+                    channels.add(ch)
+                    all_channels.add(ch)
+
+                for marker in sequence.markers:
+                    mkr_index = int(marker.name.split('_')[-2])
+                    marker_indices.add(mkr_index)
+                    mk_ch = int(marker.name.split("_")[-1])
+                    marker_channels.add(mk_ch)
+                    all_channels.add(mk_ch)
+
+            segment_for_channel = {ch: set() for ch in all_channels}
+            padded_zeros = {
+                ch: 0 for ch in all_channels
+            }
+            max_delay = {
+                it: 0 for it in range(self.number_of_iterations)
+            }
+
+            # ------------------------------------------------------------
+            # Build continuous waveform per channel (sample-accurate)
+            # ------------------------------------------------------------
+            SEGNUM = 1
+            for sequence in self.scan_sequences:
+                seq_waveforms = sequence.to_waveform()
+                for ch, data in seq_waveforms.items():
+                    self.proteus.driver.set_channel(ch)
+                    #self.proteus.driver.delete_all_segment()
+                    analog_voltage = 1
+                    self.proteus.driver.set_voltage(analog_voltage)
+                    sampleRateDAC = 1E9
+                    self.proteus.driver.apply_sampling_configuration(sampleRateDAC)
+                    # so far envelope is a sum of pulses in a single iteration
+                    # but we need to add another for loop inside items to get pulses and their timing
+                    envelope = data["envelope"]
+                    markers = data["markers"]
+                    """import matplotlib.pyplot as plt
+                    import numpy as np
+
+                    samples = np.arange(len(envelope))
+
+                    fig, ax = plt.subplots(2, 1, sharex=True, figsize=(10, 4))
+
+                    # Envelope plot
+                    ax[0].plot(samples, envelope, color="blue")
+                    ax[0].set_ylabel("Envelope")
+                    ax[0].set_title("Envelope vs Samples")
+                    ax[0].grid(True)
+
+                    # Markers plot
+                    ax[1].step(samples, markers, where="post", color="red")
+                    ax[1].set_ylabel("Markers")
+                    ax[1].set_xlabel("Sample index")
+                    ax[1].set_title("Markers vs Samples")
+                    ax[1].grid(True)
+
+                    plt.tight_layout()
+                    plt.show()"""
+
+                    segment_num = SEGNUM
+                    segment_for_channel[ch].add(segment_num)
+                    rem = len(envelope) % ALIGNMENT
+                    padded_zeros[ch] = rem
+                    if rem:
+                        envelope = np.pad(envelope, (ALIGNMENT - rem, 0))
+                        markers = np.pad(markers, (ALIGNMENT - rem, 0))
+                        padded_zeros[ch] = ALIGNMENT - rem
+                    # Scale to DAC
+                    dac_wave = np.clip(envelope, -1.0, 1.0)
+                    dac_wave = ((dac_wave + 1.0) * half_dac).astype(np.uint16)
+                    self.proteus.driver.define_trace(segment_num, len(dac_wave))
+                    self.proteus.driver.select_segment(segment_num)
+
+                    # Upload waveform
+                    self.proteus.driver.write_trace_data(dac_wave)
+                    resp = self.proteus.driver.query_error()
+                    print(f"loading trace data {resp}")
+
+                    # Convert to uint8
+                    markers = markers.astype(np.uint8)
+
+                    # Now prepare for Tabor
+                    tabor_markers = prepare_markers_for_tabor(markers)
+
+                    self.proteus.driver.write_marker_data(tabor_markers)
+                    resp = self.proteus.driver.query_error()
+                    print(f'Marker upload result: {resp}')
+                    # proteus P1284M only has 1 marker per channel, for other awgs, please implement code that handles that
+                    # I have already coded the marker index here: mkr_index = int(marker.name.split('_')[-2]) so, for example, if the user
+                    # gives the following command: "marker, laser_int_1 on channel 4 at 0ns, 500ns" then you know whatever is after "laser_init_" is the marker index
+                    marker_index = 1
+                    self.proteus.driver.set_marker(marker_index)
+                    self.proteus.driver.set_marker_ptop_voltage(0.5)
+                    self.proteus.driver.set_marker_voltage_offset(0.347)
+                    # Check for errors
+                    resp = self.proteus.driver.query_error()
+                    print(f'Marker setup result: {resp}')
+                    SEGNUM += 1
+            i = 0
+            for sequence in self.scan_sequences:
+                seq_waveforms = sequence.to_waveform()
+                for ch1, data1 in seq_waveforms.items():
+                    for ch2, data2 in seq_waveforms.items():
+                        if padded_zeros[ch1] > padded_zeros[ch2] and padded_zeros[ch1]>max_delay[i]:
+                            max_delay[i]=padded_zeros[ch1]
+                        elif padded_zeros[ch2] > padded_zeros[ch1] and padded_zeros[ch2]>max_delay[i]:
+                            max_delay[i]=padded_zeros[ch2]
+
+                i += 1
+
+            for ch in sorted(all_channels):
+                self.proteus.driver.set_channel(ch)
+                if ch in marker_channels:
+                    self.proteus.driver.set_marker(1)
+                    self.proteus.driver.set_marker_state('ON')
+                if ch in channels:
+                    self.proteus.driver.set_output("ON")
+                #--self.proteus.driver.set_continuous_run(0)
+            self.proteus.driver.set_trigger_level(2)
+            self.proteus.driver.activate_instrument(1)
+            for ch in sorted(all_channels):
+                self.proteus.driver.set_channel(ch)
+                self.proteus.driver.set_trigger_source('TRG1')
+                self.proteus.driver.set_trigger("TRG1") # :TRIG:SEL
+                self.proteus.driver.set_trigger_state("ON") # :TRIG:STAT
+
+            for ch in sorted(all_channels):
+                task_num = 1
+                self.proteus.driver.set_channel(ch)
+                self.proteus.driver.set_task_table_length(self.number_of_iterations)
+                print(f"channel {ch}: {ch}")
+                print(f"number of iterations: {self.number_of_iterations}")
+                for segment_number in segment_for_channel[ch]:
+                    print(f"channel: {ch} Segment: {segment_number}")
+                    self.proteus.driver.set_task_number(task_num)
+                    if task_num == 1:
+                        self.proteus.driver.set_task_type("STAR") #--
+                    elif task_num == self.number_of_iterations:
+                        self.proteus.driver.set_task_type("END") #--
+                    else:
+                        self.proteus.driver.set_task_type("SEQ") #--
+                    self.proteus.driver.set_task_segment_number(segment_number)
+                    self.proteus.driver.set_trigger_IDLE_state("DC")
+                    self.proteus.driver.set_trigger_IDLE_level(0)
+                    if task_num == 1:
+                        self.proteus.driver.set_enabling_task_signal("TRG1")
+                    else:
+                        self.proteus.driver.set_enabling_task_signal("TRG1")
+
+                    if task_num == self.number_of_iterations:
+                        self.proteus.driver.set_next1_task(1)
+                    else:
+                        self.proteus.driver.set_next1_task(task_num+1)
+
+                    task_num+=1
+                    #self.proteus.driver.set_task_delay(max_delay[task_num-2] - padded_zeros[ch])
+                    print(f"max_delay[task_num-2] - padded_zeros[ch] {max_delay[task_num-2]-padded_zeros[ch]}")
+
+                    self.proteus.driver.write_composer_array_to_task_table()
+                    self.proteus.driver.set_waveform_type('TASK')
+                ###self.proteus.driver.set_task_loop(self.repeat_count)
+            self.proteus.driver.set_task_sync()
+            resp = self.proteus.driver.set_trigger_coupling('ON')
+            print(resp)
+            # for trigger source INT send:
+            self.proteus.driver.set_channel(1)
+            # trigger command:
+            self.proteus.driver.trigger()
+            #time.sleep(1)
+            #self.proteus.driver._close()
+            return True
+        except Exception as e:
+            self.logger.exception("Error generating AWG sequences")
+            return False
+
+    def generate_awg_sequences_awg_triggering_adwin_case(self) -> bool:
         """
         Generate Proteus AWG waveforms with maximum timing resolution.
         One continuous waveform per channel.
         one segment and one task entry per channel.
         64-sample alignment is applied at the end of each waveform.
+        The disadvantage of this option is that proteus does not know if the adwin is ready to count and whether it finished counting
         """
 
         def prepare_markers_for_tabor(markers_array: np.ndarray) -> np.ndarray:
@@ -291,7 +523,6 @@ class SpinChargeConversionExperiment(Experiment):
             return marker_bytes
 
         try:
-            self.proteus = ProteusDevice()
             if not self.scan_sequences:
                 self.logger.error("No scan sequences available")
                 return False
@@ -325,8 +556,6 @@ class SpinChargeConversionExperiment(Experiment):
                     mk_ch = int(marker.name.split("_")[-1])
                     marker_channels.add(mk_ch)
                     all_channels.add(mk_ch)
-
-            print(f"channels: {channels}")
 
             channel_waveforms = {
                 ch: [] for ch in all_channels
@@ -459,12 +688,12 @@ class SpinChargeConversionExperiment(Experiment):
 
                         resp = self.proteus.driver.get_marker_voltage()
                         print(f"Marker voltage LEV setting: {resp}")
-                        self.proteus.driver.set_marker_ptop_voltage(1.2)
+                        self.proteus.driver.set_marker_ptop_voltage(1)
                         resp = self.proteus.driver.get_marker_ptop_voltage()
                         print(f"Marker voltage PTOP setting: {resp}")
                         resp = self.proteus.driver.get_marker_voltage_offset()
                         print(f"Marker voltage offset setting: {resp}")
-                        self.proteus.driver.set_marker_voltage_offset(0.5)
+                        self.proteus.driver.set_marker_voltage_offset(0.347)
                         resp = self.proteus.driver.get_marker_voltage_offset()
                         print(f"Marker voltage offset setting: {resp}")
 
@@ -497,12 +726,8 @@ class SpinChargeConversionExperiment(Experiment):
                 # Enable TASK mode and output
                 # ------------------------------------------------------------
             self.proteus.driver.set_task_sync()
-            for ch in sorted(all_channels):
-                self.proteus.driver.set_channel(ch)
-                self.proteus.driver.set_marker(1)
-                self.proteus.driver.set_marker_state('ON')
-                self.proteus.driver.set_output("ON")
-                self.proteus.driver.set_waveform_type("TASK")
+            self.proteus.start_sequence()
+            time.sleep(1)
             self.proteus.driver._close()
             return True
         except Exception as e:
@@ -587,7 +812,7 @@ class SpinChargeConversionExperiment(Experiment):
             Dictionary of ADwin parameters
         """
         return {
-            'count_time': self.count_time,
+            '                      ': self.count_time,
             'reset_time': self.reset_time,
             'repetitions_per_point': self.repetitions_per_point,
             'microwave_frequency': self.microwave_frequency,
@@ -793,14 +1018,16 @@ class SpinChargeConversionExperiment(Experiment):
             Sequence text in the sequence language format
         """
         sequence_text = """
-sequence: name=SCC, type=SCC, duration=2μs, sample_rate=1GHz, repeat=50000
-
+sequence: name=SCC, type=SCC, duration=1400ns, sample_rate=1GHz, repeat=50000
+shelving pulse on channel 3 at 0ns, square, 300ns, 0.6
+ionization pulse on channel 3 at 300ns, square, 500ns, 1.0
+readout pulse on channel 3 at 800ns, square, 600ns, 0.3
 # Define scan variables (single variable for simplicity)
-variable pulse_duration, start=50ns, stop=500ns, steps=20
+#variable pulse_duration, start=50ns, stop=500ns, steps=20
 
 # Define the SCC pulse sequence
-marker, laser_int_1 on channel 1 at 0ns, 500ns
-pi/2 pulse on channel 1 at 500ns, gaussian, pulse_duration, 1.0
+#marker, laser_int_1 on channel 1 at 0ns, 500ns
+#pi/2 pulse on channel 1 at 500ns, gaussian, pulse_duration, 1.0
 #pi/2 pulse on channel 2 at 500ns, gaussian, pulse_duration, 1.0
 #wait pulse on channel 1 at pulse_duration+0.000000500, square, 2*pulse_duration, 0.0
 #wait pulse on channel 2 at pulse_duration+0.000000500, square, 2*pulse_duration, 0.0
@@ -985,20 +1212,12 @@ class SequencePreviewWindow:
 # Example usage and testing
 if __name__ == "__main__":
     # Create experiment with mock devices for testing
-    from unittest.mock import MagicMock
-
-    """mock_devices = {
-        'awg520': MagicMock(),
-        'adwin': MagicMock(),
-        'sg384': MagicMock()
-    }"""
-
     experiment = SpinChargeConversionExperiment(name="test_scc")
 
     # Set parameters
-    experiment.set_microwave_parameters(2.87e9, -10.0, 25.0)
+    """experiment.set_microwave_parameters(2.87e9, -10.0, 25.0)
     experiment.set_green_laser_parameters(1.0, 532)
-    experiment.set_delay_parameters(25.0, 50.0, 15.0)
+    experiment.set_delay_parameters(25.0, 50.0, 15.0)"""
 
     # Create and load example sequence
     sequence_text = experiment.create_example_scc_sequence()
@@ -1014,7 +1233,7 @@ if __name__ == "__main__":
             print("Scan sequences built successfully")
 
             # Generate AWG files
-            if experiment.generate_awg_files():
+            if experiment.generate_awg_sequences_awg_triggering_adwin_case():
                 print("AWG files generated successfully")
 
             """# Run experiment (with mock devices)
