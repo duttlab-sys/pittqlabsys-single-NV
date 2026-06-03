@@ -343,9 +343,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             # Helper function to make only column 1 editable
             def onExperimentParamClick(item, column):
                 tree = item.treeWidget()
-                if column == 1 and not isinstance(item.value, (Experiment, Device)) and (hasattr(item, 'is_point') and not item.is_point()):
-                    # self.tree_experiments.editItem(item, column)
-                    tree.editItem(item, column)
+                if column == 1 and not isinstance(item.value, (Experiment, Device)) and (
+                        hasattr(item, 'is_point') and not item.is_point()):
+                    # Check if it's a directory parameter and handle specially
+                    param_name = item.text(0).lower() if item.text(0) else ""
+                    if any(keyword in param_name for keyword in ['directory', 'folder', 'path']):
+                        self._handle_directory_parameter(item, column)
+                    else:
+                        tree.editItem(item, column)
 
             # tree structures
             self.tree_experiments.itemClicked.connect(
@@ -473,6 +478,33 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # if self.config_filepath is None:
         #     self.config_filepath = os.path.join(self._DEFAULT_CONFIG["gui_settings"], 'gui.aqs')
 
+    def _handle_directory_parameter(self, item, column):
+        """
+        Special handling for directory parameters - open file dialog.
+        """
+        if column == 1:  # Value column
+            # Check if this parameter is a directory path
+            param_name = item.text(0).lower() if item.text(0) else ""
+
+            if any(keyword in param_name for keyword in ['directory', 'folder', 'path']):
+                # Get current value
+                current_value = item.text(1) if item.text(1) else os.path.expanduser("~")
+
+                # Open directory dialog
+                directory = QFileDialog.getExistingDirectory(
+                    self,
+                    "Select Directory",
+                    current_value,
+                    QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+                )
+
+                if directory:
+                    item.setText(1, directory)
+                    # Update the parameter value
+                    if hasattr(item, 'value'):
+                        item.value = directory
+                    # Trigger the update
+                    self.update_parameters(self.tree_experiments, item, column)
 
     def update_current_data_saving_path(self):
         print("updating current path")
@@ -629,7 +661,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             traceback.print_exc()
 
     def update_display_choice(self, new_display_choice):
-        print("update_display_choice called")
+        print(f"update_display_choice called: {new_display_choice}")
         self.display_choice = new_display_choice
         self.reload_display_widget()
 
