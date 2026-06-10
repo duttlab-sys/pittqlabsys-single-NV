@@ -560,12 +560,17 @@
       <string>MU300</string>
      </property>
     </item>
+    <item>
+     <property name="text">
+      <string>CASCADE CCD</string>
+     </property>
+    </item>
    </widget>
    <widget class="QPushButton" name="save_button">
     <property name="geometry">
      <rect>
-      <x>90</x>
-      <y>490</y>
+      <x>100</x>
+      <y>530</y>
       <width>121</width>
       <height>23</height>
      </rect>
@@ -617,8 +622,8 @@
    <widget class="QComboBox" name="Point_Selector_comboBox">
     <property name="geometry">
      <rect>
-      <x>90</x>
-      <y>460</y>
+      <x>100</x>
+      <y>500</y>
       <width>121</width>
       <height>22</height>
      </rect>
@@ -665,8 +670,8 @@
    <widget class="QLabel" name="label_9">
     <property name="geometry">
      <rect>
-      <x>0</x>
-      <y>460</y>
+      <x>10</x>
+      <y>500</y>
       <width>81</width>
       <height>20</height>
      </rect>
@@ -678,8 +683,8 @@
    <widget class="QPushButton" name="Find_NV_Button">
     <property name="geometry">
      <rect>
-      <x>310</x>
-      <y>490</y>
+      <x>320</x>
+      <y>530</y>
       <width>101</width>
       <height>23</height>
      </rect>
@@ -691,8 +696,8 @@
    <widget class="QComboBox" name="point_status_comboBox">
     <property name="geometry">
      <rect>
-      <x>310</x>
-      <y>460</y>
+      <x>320</x>
+      <y>500</y>
       <width>101</width>
       <height>22</height>
      </rect>
@@ -711,8 +716,8 @@
    <widget class="QLabel" name="label_10">
     <property name="geometry">
      <rect>
-      <x>220</x>
-      <y>460</y>
+      <x>230</x>
+      <y>500</y>
       <width>81</width>
       <height>20</height>
      </rect>
@@ -873,8 +878,8 @@
    <widget class="QPushButton" name="snapButton">
     <property name="geometry">
      <rect>
-      <x>220</x>
-      <y>490</y>
+      <x>230</x>
+      <y>530</y>
       <width>81</width>
       <height>23</height>
      </rect>
@@ -882,6 +887,54 @@
     <property name="text">
      <string>snapButton</string>
     </property>
+   </widget>
+   <widget class="QPushButton" name="server_off_button">
+    <property name="geometry">
+     <rect>
+      <x>324</x>
+      <y>460</y>
+      <width>91</width>
+      <height>23</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Server Off</string>
+    </property>
+   </widget>
+   <widget class="QComboBox" name="comboBox">
+    <property name="geometry">
+     <rect>
+      <x>100</x>
+      <y>460</y>
+      <width>121</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <item>
+     <property name="text">
+      <string>Gey</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>Jet_Plus_White</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>Jet</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>Hot</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
+      <string>Cool</string>
+     </property>
+    </item>
    </widget>
   </widget>
  </widget>

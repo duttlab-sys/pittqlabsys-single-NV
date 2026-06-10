@@ -52,6 +52,7 @@ class positioning_stages_view(QWidget, Ui_Form):
     snapButtonclicked = pyqtSignal(int)
     save_or_find_nv_button_clicked = pyqtSignal(int)
     take_img_signal = pyqtSignal(int)
+    server_off_button_clicked = pyqtSignal(int)
     def __init__(self, parent = None):
         super().__init__(parent)
         self.setupUi(self)
@@ -121,6 +122,7 @@ class positioning_stages_view(QWidget, Ui_Form):
         self.z_dec_2.clicked.connect(lambda: self.change_position("z", 2, 0))
         self.z_inc_3.clicked.connect(lambda: self.change_position("z", 3, 1))
         self.z_dec_3.clicked.connect(lambda: self.change_position("z", 3, 0))
+        self.server_off_button.clicked.connect(self.close_server)
         self.save_button.clicked.connect(self.save)
         self.Find_NV_Button.clicked.connect(self.find_NV)
         self.snapButton.clicked.connect(self.send_snapshotButtonclicked_signal)
@@ -156,10 +158,10 @@ class positioning_stages_view(QWidget, Ui_Form):
         elif stage_name == 'Newport_Conex_microdrive':
             try:
                 self.stage_1 = Newport_CONEX_CC_xy_stage()
-                _MAX_X_1  = self.stage_1.get_positive_software_limit('x')
-                _MIN_X_1 = self.stage_1.get_negative_software_limit('x')
-                _MAX_Y_1 = self.stage_1.get_positive_software_limit('y')
-                _MIN_Y_1 = self.stage_1.get_negative_software_limit('y')
+                _MAX_X_1  = 24.0
+                _MIN_X_1 = 0.0
+                _MAX_Y_1 = 24.0
+                _MIN_Y_1 = 0.0
                 QMessageBox.information(self, 'Success', f'Connected to Newport_Conex_microdrive')
 
             except Exception as e:
@@ -203,10 +205,10 @@ class positioning_stages_view(QWidget, Ui_Form):
         elif stage_name == 'Newport_Conex_microdrive':
             try:
                 self.stage_2 = Newport_CONEX_CC_xy_stage()
-                _MAX_X_2 = self.stage_2.get_positive_software_limit('x')
-                _MIN_X_2 = self.stage_2.get_negative_software_limit('x')
-                _MAX_Y_2 = self.stage_2.get_positive_software_limit('y')
-                _MIN_Y_2 = self.stage_2.get_negative_software_limit('y')
+                _MAX_X_2 = 24.0
+                _MIN_X_2 = 0.0
+                _MAX_Y_2 = 24.0
+                _MIN_Y_2 = 0.0
                 QMessageBox.information(self, 'Success', f'Connected to Newport_Conex_microdrive')
 
             except Exception as e:
@@ -810,3 +812,6 @@ class positioning_stages_view(QWidget, Ui_Form):
         nv_position = get_xy(structure.INITIAL, "nv")
 
         return old_corners, new_corners, nv_position
+
+    def close_server(self):
+        self.server_off_button_clicked.emit(1)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import sys
 from src.View.windows_and_widgets.camera_widget import Amscope_Camera_View
+from src.View.windows_and_widgets.camera_widget import ROPER_CASCADE_CCD_View
 from src.View.windows_and_widgets.display_design import Ui_Form
 import pyqtgraph as pg
 import numpy as np
@@ -107,6 +108,16 @@ class Display_View(QWidget, Ui_Form):
 
     def connect_to_display(self):
         """This function connects the devices: please make sure that the stage has the function get_position(self, axis)"""
+        # remove any previously-loaded camera view so they don't stack/overlap
+        if self.widget is not None:
+            try:
+                self.widget.stop_live_view()
+            except Exception:
+                pass
+            self.verticalLayout.removeWidget(self.widget)
+            self.widget.setParent(None)
+            self.widget.deleteLater()
+            self.widget = None
         if self.display_choice == 'MU300':
             self.crosshairButton.setEnabled(True)
             # future users: you can do more (make sure you add those options in the positioning_design.ui file)
@@ -114,7 +125,14 @@ class Display_View(QWidget, Ui_Form):
                 self.widget = Amscope_Camera_View()
                 self.verticalLayout.addWidget(self.widget)
                 QMessageBox.information(self, 'Success', f'Connected to: {self.display_choice}')
-
+            except Exception as e:
+                QMessageBox.critical(self, 'Error', str(e))
+        elif self.display_choice == 'CASCADE CCD':
+            self.crosshairButton.setEnabled(True)
+            try:
+                self.widget = ROPER_CASCADE_CCD_View()
+                self.verticalLayout.addWidget(self.widget)
+                QMessageBox.information(self, 'Success', f'Connected to: {self.display_choice}')
             except Exception as e:
                 QMessageBox.critical(self, 'Error', str(e))
         else:
@@ -129,7 +147,8 @@ class Display_View(QWidget, Ui_Form):
             return
         else:
             self.widget.start_live_view()
-            self.build_sliders()
+            if self.display_choice == 'MU300':
+                self.build_sliders()
             try:
                 self.update_timer.start(500)
             except ValueError as e:
@@ -167,9 +186,14 @@ class Display_View(QWidget, Ui_Form):
             img_rgb = self.widget.get_latest_frame()
             if img_rgb is None:
                 return
-            self.h, self.w, _ = img_rgb.shape
-            # Convert RGB to grayscale
-            self.img_gray = np.dot(img_rgb[..., :3], [0.2989, 0.5870, 0.1140])
+            if img_rgb.ndim == 2:
+                # Roper Cascade: already 2-D grayscale (raw CCD counts)
+                self.h, self.w = img_rgb.shape
+                self.img_gray = img_rgb
+            else:
+                # Amscope: RGB -> grayscale (unchanged)
+                self.h, self.w, _ = img_rgb.shape
+                self.img_gray = np.dot(img_rgb[..., :3], [0.2989, 0.5870, 0.1140])
             # Crosshair center coordinates
             x = int(self.crosshair_x.value())
             y = int(self.crosshair_y.value())

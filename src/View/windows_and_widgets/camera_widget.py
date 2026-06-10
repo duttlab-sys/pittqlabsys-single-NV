@@ -1,13 +1,13 @@
-# original: Kai's code
-# modified by: Jannet Trabelsi: 10_2025
+# original amscope only: Kai's code
+# modified by: Jannet Trabelsi: 10_2025: fixed amscope bugs and added roper cascade along with the parameter adjustments
 from __future__ import annotations
 import sys
 import ctypes
 import time
 from typing import Optional
-#from src.Controller import amcam
 from src.Controller import toupcam
 from src.Controller import Amscope_MU_Camera
+from src.Controller import Roper_Cascade_Camera
 from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen
 from PyQt5.QtWidgets import (
@@ -24,27 +24,6 @@ from PyQt5.QtWidgets import (
 import numpy as np
 import weakref
 from src.core.struct_hdf5 import save_parameters_hdf5, load_data
-"""
-        Parameter class for managing experiment parameters with validation and units.
-
-        Supported initialization patterns:
-        - Parameter(name, value, valid_values, info, units)
-        - Parameter({name: value})
-        - Parameter([Parameter(...), Parameter(...)])
-
-        Args:
-            name: Parameter name (str) or dict/list for multiple parameters
-            value: Parameter value (any type)
-            valid_values: Type or list of valid values
-            info: Description string
-            visible: Boolean for GUI visibility
-            units: Units string
-            min_value: Minimum allowed value (for numeric parameters)
-            max_value: Maximum allowed value (for numeric parameters)
-            pattern: Regex pattern for string validation
-            validator: Custom validation function
-        """
-
 
 class SnapWin(QWidget):
     """Separate window that shows still‑image captures."""
@@ -88,7 +67,6 @@ class Amscope_Camera_View(QWidget):
         self._last_tick = time.perf_counter()
 
         self._init_ui()
-        #self._init_camera()
         self.crosshair_enabled = False
         self.crosshair_x = None
         self.crosshair_y = None
@@ -140,7 +118,6 @@ class Amscope_Camera_View(QWidget):
 
         try:
             self.hcam = Amscope_MU_Camera.Amscope_MU_Camera()
-        #except amcam.HRESULTException as ex:
         except toupcam.HRESULTException as ex:
             QMessageBox.warning(self, "", f"Failed to open camera (hr=0x{ex.hr:x})")
             return
@@ -152,7 +129,6 @@ class Amscope_Camera_View(QWidget):
 
         # negotiate RGB/BGR for zero‑copy into QImage
         if sys.platform != "win32":
-            #self.hcam.put_Option(amcam.AMCAM_OPTION_BYTEORDER, 1)  # BGR on Linux/mac
             self.hcam.put_Option(toupcam.TOUPCAM_OPTION_BYTEORDER, 1)  # BGR on Linux/mac
 
         # internal buffer (mutable)
@@ -169,12 +145,8 @@ class Amscope_Camera_View(QWidget):
 
         # start stream
         try:
-            # Instead of:
-            # self.hcam.StartPullModeWithCallback(self._camera_cb, self)
-            # We use:
             self_ref = weakref.ref(self)  # weak reference
             self.hcam.StartPullModeWithCallback(self._camera_cb, self_ref)
-        #except amcam.HRESULTException as ex:
         except toupcam.HRESULTException as ex:
             QMessageBox.warning(self, "", f"Stream start failed (hr=0x{ex.hr:x})")
             return
@@ -197,19 +169,15 @@ class Amscope_Camera_View(QWidget):
 
     @staticmethod
     def _camera_cb(event: int, ctx: "Amscope_Camera_View") -> None:
-        #if event == amcam.AMCAM_EVENT_IMAGE:
         if event == toupcam.TOUPCAM_EVENT_IMAGE:
             try:
                 ctx.hcam.PullImageV2(ctx.buf, 24, None)
-            #except amcam.HRESULTException:
             except toupcam.HRESULTException:
                 return  # drop frame
             ctx.eventImage.emit(event)
-        #elif event == amcam.AMCAM_EVENT_STILLIMAGE:
         elif event == toupcam.TOUPCAM_EVENT_STILLIMAGE:
             try:
                 ctx.hcam.PullStillImageV2(ctx.buf, 24, None)
-            #except amcam.HRESULTException:
             except toupcam.HRESULTException:
                 return
             ctx.eventImage.emit(event)
@@ -221,8 +189,6 @@ class Amscope_Camera_View(QWidget):
         stride = ((self.w * 24 + 31) // 32) * 4
         qimg = QImage(self.buf, self.w, self.h, stride, QImage.Format_RGB888)
         # qimg.save("frame.png")
-
-        #if event == amcam.AMCAM_EVENT_IMAGE:
         if event == toupcam.TOUPCAM_EVENT_IMAGE:
             pixmap = QPixmap.fromImage(qimg)
             self.label.setPixmap(pixmap)
@@ -285,6 +251,174 @@ class Amscope_Camera_View(QWidget):
         except Exception as e:
             print(f"Frame conversion error: {e}")
             return None
+
+class ROPER_CASCADE_CCD_View(QWidget):
+    """Live‑view window. Compatible with the legacy *app.py* launcher."""
+
+    eventImage = pyqtSignal(int)
+    mouseMoved = pyqtSignal(int, int)
+    mouseClicked = pyqtSignal(int, int)
+
+    def __init__(
+            self,
+            gain: float = 1.0,
+            integration_time_us: float = 100.0,
+    ) -> None:
+        super().__init__()
+
+        self.hcam = None
+        self.buf = None
+        self.w = self.h = 0
+        self.gain = gain
+        self.integration = integration_time_us  # µs
+
+        # frame counter for FPS display
+        self._frame_accum = 0
+        self._last_tick = time.perf_counter()
+
+        self._init_ui()
+        self.crosshair_enabled = False
+        self.crosshair_x = None
+        self.crosshair_y = None
+        self.crosshair_thickness = 1
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+
+    def _init_ui(self) -> None:
+        # center the window on whatever display we’re on
+        # self.setFixedSize(820, 640)  # temp; corrected once cam opens
+        geo = self.frameGeometry()
+        geo.moveCenter(QDesktopWidget().availableGeometry().center())
+        self.move(geo.topLeft())
+
+        # widgets
+        self.label = QLabel(self)
+        self.label = CrosshairLabel(self)
+        self.label.mouseMoved.connect(self.mouseMoved)
+        self.label.mouseClicked.connect(self.mouseClicked)
+
+        self.label.setScaledContents(False)  # don’t resample!
+        self.cb_fps = QCheckBox("Show FPS", self)
+        self.inttime = 100.0
+        self.gain = 1.0
+
+        # layout
+        cols = QVBoxLayout(self)
+        cols.addWidget(self.label, stretch=1)
+        row = QHBoxLayout()
+        row.addWidget(self.cb_fps)
+        row.addStretch(1)
+        cols.addLayout(row)
+
+    # ── Camera setup ──────────────────────────────────────────────────────────
+
+    def _init_camera(self) -> None:
+
+        self.camname = "Roper Cascade"
+        self.setWindowTitle(self.camname)
+        self.eventImage.connect(self._on_event_image)
+
+        try:
+            self.hcam = Roper_Cascade_Camera.Roper_Cascade_Camera()
+        except Exception as ex:
+            QMessageBox.warning(self, "", f"Failed to open camera (hr=0x{ex})")
+            return
+
+        # basic settings
+        self.hcam.update({'gain': self.gain})
+        self.hcam.update({'inttime': self.inttime})
+
+        # internal buffer (mutable)
+        stride = ((self.w * 24 + 31) // 32) * 4
+        self.buf = ctypes.create_string_buffer(stride * self.h)
+
+        # resize widget exactly to sensor size (no scaling cost)
+        self.setFixedSize(self.w, self.h + 40)  # + controls bar
+        self.label.setFixedSize(self.w, self.h)
+
+        # start stream
+        try:
+            self.hcam.read_probes("imagefast_int")
+        except Exception as ex:
+            QMessageBox.warning(self, "", f"Stream start failed {ex}")
+            return
+
+    def get_latest_frame(self):
+        """Grab one frame from the Roper via getimagefast -> 2-D float ndarray (raw counts)."""
+        if self.hcam is None:
+            return None
+        try:
+            raw = self.hcam.read_probes("imagefast_int")  # -> matlab.double, 2-D
+            # MATLAB stores data column-major, so reshape with order='F'
+            arr = np.array(raw._data, dtype=np.float64).reshape(raw.size, order="F")
+            return arr
+        except Exception as e:
+            print(f"Frame conversion error: {e}")
+            return None
+
+    @pyqtSlot(int)
+    def _on_event_image(self, event: int) -> None:
+        frame = self.get_latest_frame()
+        if frame is None:
+            return
+
+        # autoscale CCD counts to 8-bit just for display
+        fmin, fmax = float(np.min(frame)), float(np.max(frame))
+        if fmax > fmin:
+            disp = ((frame - fmin) * (255.0 / (fmax - fmin))).astype(np.uint8)
+        else:
+            disp = np.zeros(frame.shape, dtype=np.uint8)
+
+        self._last_disp = np.ascontiguousarray(disp)  # keep ref alive for QImage
+        h, w = self._last_disp.shape
+        qimg = QImage(self._last_disp.data, w, h, w, QImage.Format_Grayscale8)
+        self.label.setPixmap(QPixmap.fromImage(qimg))
+
+        # optional FPS in title (inlined; Roper class has no _update_fps)
+        if self.cb_fps.isChecked():
+            self._frame_accum += 1
+            now = time.perf_counter()
+            if now - self._last_tick >= 1.0:
+                fps = self._frame_accum / (now - self._last_tick)
+                self.setWindowTitle(f"{self.camname} – {fps:.1f} fps")
+                self._frame_accum = 0
+                self._last_tick = now
+
+    def start_live_view(self):
+        self._init_camera()
+        if self.hcam is None:
+            return
+        # size the window from the first real frame (no fixed SDK buffer here)
+        frame = self.get_latest_frame()
+        if frame is not None:
+            self.h, self.w = frame.shape
+            self.setFixedSize(self.w, self.h + 40)
+            self.label.setFixedSize(self.w, self.h)
+        # Roper has no callback mode -> poll on a timer and drive eventImage
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(lambda: self.eventImage.emit(0))
+        self._poll_timer.start(50)  # ms; increase if CCD readout can't keep up
+
+    def stop_live_view(self):
+        timer = getattr(self, "_poll_timer", None)
+        if timer is not None:
+            timer.stop()
+            self._poll_timer = None
+
+    def closeEvent(self, evt):  # noqa: N802 (Qt override)
+        self.stop_live_view()
+        if self.hcam is not None:
+            try:
+                self.hcam.close()  # sends closeinstrument + quits MATLAB engine
+            except Exception as e:
+                print(f"Camera close error: {e}")
+            self.hcam = None
+        super().closeEvent(evt)
+
+    def stop(self):
+        if self.hcam is not None:
+            self.hcam.close()
+            self.hcam = None
 
 class CrosshairLabel(QLabel):
     mouseMoved = pyqtSignal(int, int)
