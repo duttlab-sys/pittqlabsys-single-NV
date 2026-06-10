@@ -236,6 +236,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.positioning_tab.display_choice_changed.connect(self.update_display_choice)
         self.positioning_tab.snapshot_mode_changed.connect(self.update_snapshot_mode)
         self.positioning_tab.save_or_find_nv_button_clicked.connect(self.update_current_data_saving_path) # @
+        self.positioning_tab.server_off_button_clicked.connect(self.server_off)
         self.positioning_tab.take_img_signal.connect(self.take_frame)
         self.positioning_tab.snapButtonclicked.connect(self.take_cam_snapshot)
         gui_logger.debug("setupUi() completed successfully")
@@ -477,6 +478,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         gui_logger.debug("__init__ method completed successfully")
         # if self.config_filepath is None:
         #     self.config_filepath = os.path.join(self._DEFAULT_CONFIG["gui_settings"], 'gui.aqs')
+
+    def server_off(self):
+        if self.Display_View_widget.display_choice == 'CASCADE CCD':
+            self.Display_View_widget.widget.cam.stop_server()
 
     def _handle_directory_parameter(self, item, column):
         """
@@ -721,7 +726,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 if self.snapshot_or_live == "Snapshot":
                     self.Display_View_widget.widget._init_camera()
                     buf = self.latest_display_frame
-                    self.Display_View_widget.img_gray = np.dot(buf[..., :3], [0.2989, 0.5870, 0.1140])
+                    if buf.ndim == 2:
+                        self.Display_View_widget.img_gray = buf
+                    else:
+                        self.Display_View_widget.img_gray = np.dot(buf[..., :3], [0.2989, 0.5870, 0.1140])
             self.Display_View_widget.x_crosshair.connect(self.update_x_crosshair)
             self.Display_View_widget.y_crosshair.connect(self.update_y_crosshair)
             self.Display_View_widget.setMinimumHeight(500)
@@ -813,31 +821,41 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         item = self.tree_experiments.currentItem()
 
         if item is not None:
-            if hasattr(item, 'is_point') and item.is_point():
-               # item_x = item.child(1)
-                item_x = item.child(0)
-                if mouse_point.x() is not None:
-                    self.tree_experiments.setCurrentItem(item_x)
-                    item_x.value = float(mouse_point.x())
-                    item_x.setText(1, '{:0.3f}'.format(float(mouse_point.x())))
-               # item_y = item.child(0)
-                item_y = item.child(1)
-                if mouse_point.y() is not None:
-                    self.tree_experiments.setCurrentItem(item_y)
-                    item_y.value = float(mouse_point.y())
-                    item_y.setText(1, '{:0.3f}'.format(float(mouse_point.y())))
+            if item is not None:
+                if hasattr(item, 'name') and item.name in (
+                'MIN_POINT_CALLBACK_FUNCTION', 'MAX_POINT_CALLBACK_FUNCTION'):
+                    if mouse_point.x() is not None and mouse_point.y() is not None:
+                        new_pt = [round(float(mouse_point.x()), 3), round(float(mouse_point.y()), 3)]
+                        item.value = new_pt
+                        blocker = QSignalBlocker(self.tree_experiments)
+                        item.setText(1, '[{:0.3f}, {:0.3f}]'.format(new_pt[0], new_pt[1]))
+                        del blocker
+                        self.log('Recorded {:s} = {}'.format(item.name, new_pt))
+                elif hasattr(item, 'is_point') and item.is_point():
+                   # item_x = item.child(1)
+                    item_x = item.child(0)
+                    if mouse_point.x() is not None:
+                        self.tree_experiments.setCurrentItem(item_x)
+                        item_x.value = float(mouse_point.x())
+                        item_x.setText(1, '{:0.3f}'.format(float(mouse_point.x())))
+                   # item_y = item.child(0)
+                    item_y = item.child(1)
+                    if mouse_point.y() is not None:
+                        self.tree_experiments.setCurrentItem(item_y)
+                        item_y.value = float(mouse_point.y())
+                        item_y.setText(1, '{:0.3f}'.format(float(mouse_point.y())))
 
-                # focus back on item
-                self.tree_experiments.setCurrentItem(item)
-            else:
-                if item.parent() is not None:
-                    if hasattr(item.parent(), 'is_point') and item.parent().is_point():
-                        if item == item.parent().child(1):
-                            if mouse_point.x() is not None:
-                                item.setData(1, 2, float(mouse_point.x()))
-                        if item == item.parent().child(0):
-                            if mouse_point.y() is not None:
-                                item.setData(1, 2, float(mouse_point.y()))
+                    # focus back on item
+                    self.tree_experiments.setCurrentItem(item)
+                else:
+                    if item.parent() is not None:
+                        if hasattr(item.parent(), 'is_point') and item.parent().is_point():
+                            if item == item.parent().child(1):
+                                if mouse_point.x() is not None:
+                                    item.setData(1, 2, float(mouse_point.x()))
+                            if item == item.parent().child(0):
+                                if mouse_point.y() is not None:
+                                    item.setData(1, 2, float(mouse_point.y()))
 
     def get_time(self):
         """
