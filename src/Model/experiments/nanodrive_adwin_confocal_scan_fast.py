@@ -71,7 +71,13 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         Parameter('cropping', #nested cause it does not need changed often
                   [Parameter('crop_data',True,bool,'Current logic scans over a larger area then crops data to requested size. Added for ease of seeing full image')]),
         #clocks currently not implemented
-        Parameter('laser_clock', 'Pixel', ['Pixel','Line','Frame','Aux'], 'Nanodrive clocked used for turning laser on and off')
+        Parameter('laser_clock', 'Pixel', ['Pixel','Line','Frame','Aux'], 'Nanodrive clocked used for turning laser on and off'),
+        Parameter('Select MIN?', False, bool,
+                  'turn on if you want to select the min coordinate point to start scan'),
+        Parameter('Select MAX?', False, bool,
+                  'turn on if you want to select the max coordinate point to start scan'),
+        Parameter('MIN_POINT_CALLBACK_FUNCTION', [5.0, 5.0], list, 'min x and y positions to select'),
+        Parameter('MAX_POINT_CALLBACK_FUNCTION', [95.0, 95.0], list, 'max x and y positions to select'),
     ]
 
     #For actual experiment use LP100 [MCL_NanoDrive({'serial':2849})]. For testing using HS3 ['serial':2850]
@@ -98,7 +104,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         # testing aom with worst case scenario: longest pulse durations and shortest waiting time:
         # from scc papers, longest shelving is 300 ns, longest ionization is 500 ns, short readout: 3ms, and short initialization 1 us
         # Connect to instrument(PXI)
-        sid = 6  # PXI slot of AWT on chassis
+        sid = 3  # PXI slot of AWT on chassis
         admin = TepAdmin()  # required to control PXI module
         inst = admin.open_instrument(slot_id=sid)
         resp = inst.send_scpi_query("*IDN?")  # Get the instrument's *IDN
@@ -162,39 +168,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
         inst.timeout = 10000  # return to normal
 
-        # Create and download a third Segment
-        segnum = 3
-        amp = 1  # 1
-        segLen = 64000  # must be a multiple of 64 (corresponds to 3 ms)
-        # dacWaveDC = amp * np.ones(segLen)
-        dacWaveDC = np.full(segLen, amp, dtype=float)
-        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
-        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
-        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:SEL {0}'.format(segnum)
-        inst.send_scpi_cmd(cmd)
-
-        inst.timeout = 30000  # increase
-        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
-        inst.timeout = 10000  # return to normal
-
-        # Create and download a third Segment
-        segnum = 4
-        amp = 1
-        segLen = 64000  # must be a multiple of 64 (corresponds to 1 us)
-        dacWaveDC = amp * np.zeros(segLen)
-        print(f"voltage: {inst.send_scpi_query(":VOLT?")}")
-        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
-        dacWaveDC = ((dacWaveDC) * half_dac).astype(data_type)  # +1.0
-        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:SEL {0}'.format(segnum)
-        inst.send_scpi_cmd(cmd)
-        inst.timeout = 30000  # increase
-        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
-        inst.timeout = 10000  # return to normal
-        cmd = ':VOLT:OFFS 0'
+        cmd = ':VOLT:OFFS 0.46'
         rc = inst.send_scpi_cmd(cmd)
         print(f"offset: {inst.send_scpi_query(":VOLT:OFFS?")}")
         # Create a Task Table
@@ -214,22 +188,6 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         inst.send_scpi_cmd(cmd)
         cmd = ':TASK:COMP:SEGM 2'
         inst.send_scpi_cmd(cmd)  # ionization pulse
-        cmd = ':TASK:COMP:NEXT1 3'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEL 3'  # set task 3
-        inst.send_scpi_cmd(cmd)
-        cmd = f':TASK:COMP:TYPE:SEQ'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEGM 3'
-        inst.send_scpi_cmd(cmd)  # readout pulse
-        cmd = ':TASK:COMP:NEXT1 4'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEL 4'  # set task 4
-        inst.send_scpi_cmd(cmd)
-        cmd = f':TASK:COMP:TYPE:END'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEGM 4'
-        inst.send_scpi_cmd(cmd)  # DC: wait for the green and microwave
         cmd = ':TASK:COMP:NEXT1 1'
         inst.send_scpi_cmd(cmd)
         cmd = f':TASK:COMP:SEQ {1}'
@@ -296,7 +254,15 @@ class NanodriveAdwinConfocalScanFast(Experiment):
             self.adw.reboot_adwin()
         self.setup_scan()
         sleep(0.1)
-
+        # Override scan corners from GUI point-selection if enabled
+        if self.settings['Select MIN?']:
+            min_pt = self.settings['MIN_POINT_CALLBACK_FUNCTION']
+            self.settings['point_a']['x'] = float(min_pt[0])
+            self.settings['point_a']['y'] = float(min_pt[1])
+        if self.settings['Select MAX?']:
+            max_pt = self.settings['MAX_POINT_CALLBACK_FUNCTION']
+            self.settings['point_b']['x'] = float(max_pt[0])
+            self.settings['point_b']['y'] = float(max_pt[1])
         #y scanning range is 5 to 95 to compensate for warm up time
         x_min = max(self.settings['point_a']['x'], 0.0)
         y_min = max(self.settings['point_a']['y'], 5.0)
