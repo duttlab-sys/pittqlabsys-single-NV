@@ -2,7 +2,7 @@
 # Please note: the controller class raises errors. However, the GUI sets default values to solve for invalid inputs
 
 import numpy as np
-from PyQt5.QtWidgets import  QMessageBox, QWidget
+from PyQt5.QtWidgets import QMessageBox, QWidget
 import tkinter as tk
 from tkinter import filedialog
 import pandas as pd
@@ -10,8 +10,9 @@ from src.Controller.Agilent8596E import Agilent8596E
 from .agilent_8596E_design import Ui_Form
 import pyqtgraph as pg
 from PyQt5.QtCore import QTimer
+
 # Assuming the .ui file is converted to design.py
-#To convert agilent_8596E_design.ui to .py, paste this into the terminal:
+# To convert agilent_8596E_design.ui to .py, paste this into the terminal:
 # pyuic5 -x agilent_8596E_design.ui -o agilent_8596E_design.py
 # if running from Pittqlabsys single NV the agilent_analyzer will be the agilent class talking to the hardware directly otherwise,
 # it will be the device client class which talks to the server
@@ -21,7 +22,7 @@ _default_smooth_UI = 1
 _max_freq_UI = 12800
 _min_freq_UI = 0.009
 _MAX_SET_AVG_PTS_UI = 16384
-_default_sweep_time = 1000000 # 1 second
+_default_sweep_time = 1000000  # 1 second
 _max_sweep_time = 100000000
 _min_sweep_time_zero_span = 20
 _min_sweep_time_nonzero_span = 20000
@@ -31,10 +32,12 @@ _max_BW = 3
 _min_video_BW = 0.00003
 _MAX_SET_AVG_PTS = 16384
 
+
 class SpectrumAnalyzerView(QWidget, Ui_Form):
     """
     This is the main window of the application. It allows us to control the spectrum analyzer using buttons and LineEdits
     """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setupUi(self)
@@ -53,9 +56,14 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
         # Initialize data arrays for plotting
         self.frequency_data = []
         self.amplitude_data = []
+        self.fftfrequency_data = []
+        self.fftamplitude_data = []
 
         # Initialize plot
-        self.sa_plot = self.plot_widget.plot(pen='r', name='Amplitude (dBm)')
+        self.sa_plot = self.plot_widget.plot(pen='y', name='Amplitude (dBm)')
+        # Create a marker dot (scatter plot item)
+        self.marker_dot = pg.ScatterPlotItem(size=12, brush=pg.mkBrush('yellow'), pen=pg.mkPen('black', width=2))
+        self.plot_widget.addItem(self.marker_dot)
 
         # Connect buttons to functions
         self.connectButton.clicked.connect(self.connect_to_instrument)
@@ -81,18 +89,22 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
         self.fft_sweep_timepushButton.clicked.connect(self.set_fft_sweep_time)
         self.startfftButton.clicked.connect(self.start_fft)
         self.stopfftButton.clicked.connect(self.stop_fft)
+        self.MKRFlineEdit.setEnabled(False)
+        self.MKRAlineEdit.setEnabled(False)
+        self.MKR_L.clicked.connect(self.MKR_L_UI)
+        self.MKR_R.clicked.connect(self.MKR_R_UI)
 
     def connect_to_instrument(self):
         try:
             self.agilent_analyzer = Agilent8596E()
             QMessageBox.information(self, 'Success', f'Connected to Agilent 8596E on GPIB 18')
-            self.cfLineEdit.setText(str(self.agilent_analyzer.read_probes("center frequency")/ 1000000))
-            self.spanLineEdit.setText(str(self.agilent_analyzer.read_probes("span")/ 1000000))
-            self.sweeptimeLineEdit.setText(str(self.agilent_analyzer.read_probes("sweep time")* 1000000))
-            self.resolutionbwLineEdit.setText(str(self.agilent_analyzer.read_probes("resolution band width")/ 1000000))
-            self.videobwLineEdit.setText(str(self.agilent_analyzer.read_probes("video band width")/ 1000000))
-            self.fft_sweep_timeLineEdit.setText(str(self.agilent_analyzer.read_probes("sweep time")* 1000000))
-
+            self.cfLineEdit.setText(str(self.agilent_analyzer.read_probes("center frequency") / 1000000))
+            self.spanLineEdit.setText(str(self.agilent_analyzer.read_probes("span") / 1000000))
+            self.sweeptimeLineEdit.setText(str(self.agilent_analyzer.read_probes("sweep time") * 1000000))
+            self.resolutionbwLineEdit.setText(str(self.agilent_analyzer.read_probes("resolution band width") / 1000000))
+            self.videobwLineEdit.setText(str(self.agilent_analyzer.read_probes("video band width") / 1000000))
+            self.fft_sweep_timeLineEdit.setText(str(self.agilent_analyzer.read_probes("sweep time") * 1000000))
+            self.update_marker_display()
 
         except Exception as e:
             QMessageBox.critical(self, 'Error', str(e))
@@ -100,25 +112,25 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
     def start_process(self):
         try:
             print("Starting process...")
-            self.startButton.setEnabled(False)
             self.stopButton.setEnabled(True)
+            self.startButton.setEnabled(False)
             self.clearButton.setEnabled(False)
-            self.spanLineEdit.setEnabled(False)
-            self.cfLineEdit.setEnabled(False)
-            self.spanButton.setEnabled(False)
-            self.centerfreqButton.setEnabled(False)
+            self.spanLineEdit.setEnabled(True)
+            self.cfLineEdit.setEnabled(True)
+            self.spanButton.setEnabled(True)
+            self.centerfreqButton.setEnabled(True)
             self.snapshotButton.setEnabled(False)
-            self.setsweeptimeButton.setEnabled(False)
-            self.saveButton.setEnabled(False)
-            self.lastspanButton.setEnabled(False)
-            self.resolutionbwButton.setEnabled(False)
-            self.videobwButton.setEnabled(False)
-            self.markerminButton.setEnabled(False)
-            self.markermaxButton.setEnabled(False)
-            self.markerdeltaButton.setEnabled(False)
-            self.markerspanButton.setEnabled(False)
-            self.videoavgButton.setEnabled(False)
-            self.clravgButton.setEnabled(False)
+            self.setsweeptimeButton.setEnabled(True)
+            self.saveButton.setEnabled(True)
+            self.lastspanButton.setEnabled(True)
+            self.resolutionbwButton.setEnabled(True)
+            self.videobwButton.setEnabled(True)
+            self.markerminButton.setEnabled(True)
+            self.markermaxButton.setEnabled(True)
+            self.markerdeltaButton.setEnabled(True)
+            self.markerspanButton.setEnabled(True)
+            self.videoavgButton.setEnabled(True)
+            self.clravgButton.setEnabled(True)
             self.update_timer.start(500)
         except ValueError as e:
             print(f"ValueError: {e}")
@@ -153,6 +165,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
         self.frequency_data.clear()
         self.amplitude_data.clear()
         self.sa_plot.setData([], [])
+        self.marker_dot.setData([])  # Also clear the marker dot
 
     def update_plot(self):
         if self.frequency_data is None or self.amplitude_data is None:
@@ -160,6 +173,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
         if len(self.frequency_data) == 0 or len(self.amplitude_data) == 0:
             return
         self.sa_plot.setData(self.frequency_data, self.amplitude_data)
+        self.update_marker_dot()
 
     def acquire_and_plot_data(self):
         try:
@@ -167,7 +181,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
             self.agilent_analyzer.write("SNGLS;")
             self.agilent_analyzer.write("TS;")
             self.agilent_analyzer.write("MKPK HI;")
-            center_freq = self.agilent_analyzer.read_probes("center frequency")/ 1000000
+            center_freq = self.agilent_analyzer.read_probes("center frequency") / 1000000
             mkfreq = self.agilent_analyzer.read_probes("marker frequency") / 1000000
             amplitude = self.agilent_analyzer.read_probes("marker amplitude")
             print(f"Status: cf={center_freq}")
@@ -176,14 +190,15 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
             self.agilent_analyzer.write("TS;")
             trace_data = np.array(self.agilent_analyzer.read_probes("trace AP"))
             num_points = len(trace_data)
-            center_freq = self.agilent_analyzer.read_probes("center frequency")/ 1000000
+            center_freq = self.agilent_analyzer.read_probes("center frequency") / 1000000
             print(f"Status: cf={center_freq}")
-            span = self.agilent_analyzer.read_probes("span")/ 1000000
+            span = self.agilent_analyzer.read_probes("span") / 1000000
             start_freq = center_freq - (span / 2)
             stop_freq = center_freq + (span / 2)
             freqs = np.linspace(start_freq, stop_freq, num_points)
             self.agilent_analyzer.write("CONTS;")
-            self.frequency_data = list(freqs / 1e9)
+            # Store frequencies in MHz (no conversion)
+            self.frequency_data = list(freqs)
             self.amplitude_data = list(trace_data)
             self.update_plot()
 
@@ -194,7 +209,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
 
     def centerfreq(self):
         print("inside centerfreq...")
-        center_freq = self.agilent_analyzer.read_probes("center frequency")/ 1000000
+        center_freq = self.agilent_analyzer.read_probes("center frequency") / 1000000
         cf = self.cfLineEdit.text()
         if isinstance(cf, str) or isinstance(cf, int) or isinstance(cf, float):
             try:
@@ -208,13 +223,13 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
             print("wrong center frequency input")
             cf = center_freq
         self.agilent_analyzer.update({"center frequency": cf})
-        self.cfLineEdit.setText(str((self.agilent_analyzer.read_probes("center frequency")/ 1000000)))
+        self.cfLineEdit.setText(str((self.agilent_analyzer.read_probes("center frequency") / 1000000)))
 
     def span(self):
         print("Inside span...")
         span = self.spanLineEdit.text()
-        center_freq = self.agilent_analyzer.read_probes("center frequency")/ 1000000
-        sp = self.agilent_analyzer.read_probes("span")/ 1000000
+        center_freq = self.agilent_analyzer.read_probes("center frequency") / 1000000
+        sp = self.agilent_analyzer.read_probes("span") / 1000000
         if isinstance(span, str) or isinstance(span, int) or isinstance(span, float):
             try:
                 span = float(span)
@@ -227,7 +242,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
             print("wrong span input")
             span = sp
         self.agilent_analyzer.update({"span": span})
-        self.spanLineEdit.setText(str(self.agilent_analyzer.read_probes("span")/ 1000000))
+        self.spanLineEdit.setText(str(self.agilent_analyzer.read_probes("span") / 1000000))
 
     def save_data(self):
         if not self.frequency_data or not self.amplitude_data:
@@ -258,28 +273,28 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
         root = tk.Tk()
         root.withdraw()
         file_path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("PNG files", "*.PNG")],
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png")],
             title="Save Snapshot Data As"
         )
-        pixmap = self.plot_widget.grab()
-        pixmap.save(file_path, "PNG")
         if not file_path:
             return
+        pixmap = self.plot_widget.grab()
+        pixmap.save(file_path, "PNG")
 
     def initialize_device(self):
         self.agilent_analyzer.write("IP;")
         self.startButton.setEnabled(True)
-        self.cfLineEdit.setText(str(self.agilent_analyzer.read_probes("center frequency")/ 1000000))
-        self.spanLineEdit.setText(str(self.agilent_analyzer.read_probes("span")/ 1000000))
-        self.sweeptimeLineEdit.setText(str(self.agilent_analyzer.read_probes("sweep time")* 1000000))
+        self.cfLineEdit.setText(str(self.agilent_analyzer.read_probes("center frequency") / 1000000))
+        self.spanLineEdit.setText(str(self.agilent_analyzer.read_probes("span") / 1000000))
+        self.sweeptimeLineEdit.setText(str(self.agilent_analyzer.read_probes("sweep time") * 1000000))
         self.fft_sweep_timeLineEdit.setText(str(self.set_fft_sweep_time()))
-        self.resolutionbwLineEdit.setText(str(self.agilent_analyzer.read_probes("resolution band width")/ 1000000))
-        self.videobwLineEdit.setText(str(self.agilent_analyzer.read_probes("video band width")/ 1000000))
+        self.resolutionbwLineEdit.setText(str(self.agilent_analyzer.read_probes("resolution band width") / 1000000))
+        self.videobwLineEdit.setText(str(self.agilent_analyzer.read_probes("video band width") / 1000000))
 
     def set_last_span_UI(self):
         self.agilent_analyzer.write("LSPAN;")
-        span = self.agilent_analyzer.read_probes("span")/ 1000000
+        span = self.agilent_analyzer.read_probes("span") / 1000000
         self.spanLineEdit.setText(str(span))
 
     def set_fft_sweep_time(self):
@@ -302,16 +317,17 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
             time = _default_sweep_time
             print("Set sweep time: " + str(time))
         self.fft_sweep_timeLineEdit.setText(str(time))
+        return time
 
     def set_sweep_time_UI(self):
         time = self.sweeptimeLineEdit.text()
-        span = self.agilent_analyzer.read_probes("span")/ 1000000
+        span = self.agilent_analyzer.read_probes("span") / 1000000
         if isinstance(time, str) or isinstance(time, int) or isinstance(time, float):
             try:
                 time = float(time)
                 if span == 0:
                     if time < _min_sweep_time_zero_span or time > _max_sweep_time:
-                        print ("wrong sweep time input")
+                        print("wrong sweep time input")
                         time = _default_sweep_time
                         print("Set sweep time: " + str(time))
                     else:
@@ -336,7 +352,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
 
     def set_resolution_bw_UI(self):
         RBWMHZ = self.resolutionbwLineEdit.text()
-        rbw = self.agilent_analyzer.read_probes("resolution band width")/ 1000000
+        rbw = self.agilent_analyzer.read_probes("resolution band width") / 1000000
         if isinstance(RBWMHZ, str) or isinstance(RBWMHZ, int) or isinstance(RBWMHZ, float):
             try:
                 RBWMHZ = float(RBWMHZ)
@@ -351,7 +367,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
 
     def set_video_bw_UI(self):
         VBWMHZ = self.videobwLineEdit.text()
-        vbw = self.agilent_analyzer.read_probes("video band width")/ 1000000
+        vbw = self.agilent_analyzer.read_probes("video band width") / 1000000
         if isinstance(VBWMHZ, str) or isinstance(VBWMHZ, int) or isinstance(VBWMHZ, float):
             try:
                 VBWMHZ = float(VBWMHZ)
@@ -366,17 +382,21 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
 
     def set_marker_min_UI(self):
         self.agilent_analyzer.write("MKMIN;")
+        self.update_marker_display()
 
     def set_marker_max_UI(self):
         self.agilent_analyzer.write("MKPK HI;")
+        self.update_marker_display()
 
     def set_marker_delta_UI(self):
         self.agilent_analyzer.write("MKD;")
+        self.update_marker_display()
 
     def set_marker_span_UI(self):
         self.agilent_analyzer.write("MKSP;")
-        span = self.agilent_analyzer.read_probes("span")/ 1000000
+        span = self.agilent_analyzer.read_probes("span") / 1000000
         self.spanLineEdit.setText(str(span))
+        self.update_marker_display()
 
     def video_avg_UI(self):
         num_points = self.videoavgLineEdit.text()
@@ -394,17 +414,20 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
         self.agilent_analyzer.write("CLRAVG;")
 
     def fft_UI(self):
-        center_frequencyMHZ = self.agilent_analyzer.read_probes("center frequency")/ 1000000
-        spanMHZ=self.agilent_analyzer.read_probes("span")/ 1000000
-        RBWMHZ=self.agilent_analyzer.read_probes("resolution band width")/ 1000000
+        center_frequencyMHZ = self.agilent_analyzer.read_probes("center frequency") / 1000000
+        spanMHZ = self.agilent_analyzer.read_probes("span") / 1000000
+        RBWMHZ = self.agilent_analyzer.read_probes("resolution band width") / 1000000
         fft_sweep_time = float(self.fft_sweep_timeLineEdit.text())
-        QMessageBox.information(self, 'Max Modulation Rate', f'Please note that the maximum modulation rate that our device can resolve is 400/(2*fft_sweep_time) = '+str(400/(2*fft_sweep_time))+' MHz')
+        QMessageBox.information(self, 'Max Modulation Rate',
+                                f'Please note that the maximum modulation rate that our device can resolve is 400/(2*fft_sweep_time) = ' + str(
+                                    400 / (2 * fft_sweep_time)) + ' MHz')
         window = self.comboBox.currentText()
         self.single_FFT(center_frequencyMHZ, spanMHZ, RBWMHZ, fft_sweep_time, window)
         if self.agilent_analyzer.read_probes("FFT clip"):
-            QMessageBox.information(self, 'FFT signal is clipped', f'FFT signal is clipped! Please change your parameters and run FFT again.')
+            QMessageBox.information(self, 'FFT signal is clipped',
+                                    f'FFT signal is clipped! Please change your parameters and run FFT again.')
 
-    def single_FFT(self, center_frequencyMHZ=300, spanMHZ=0.2, RBWMHZ=3, sweep_time=3333, window = "FLATTOP"):
+    def single_FFT(self, center_frequencyMHZ=300, spanMHZ=0.2, RBWMHZ=3, sweep_time=3333, window="FLATTOP"):
         """FFT weights the source trace with the function in the window trace. The transform is computed and the results are placed in the destination
         trace. Unlike FFTAUTO and FFTCONTS, FFT performs the FFT measurement only once. Use
         FFTAUTO or FFTCONTS if you want the FFT measurement to be performed at the end of every
@@ -431,23 +454,23 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
         self.agilent_analyzer.write("SNGLS;")
         self.agilent_analyzer.update({"center frequency": center_frequencyMHZ})
         print("center frequency:")
-        print(self.agilent_analyzer.read_probes("center frequency")/ 1000000)
+        print(self.agilent_analyzer.read_probes("center frequency") / 1000000)
         self.agilent_analyzer.update({"span": spanMHZ})
         print("span:")
-        print(self.agilent_analyzer.read_probes("span")/ 1000000)
+        print(self.agilent_analyzer.read_probes("span") / 1000000)
         self.agilent_analyzer.write("TS;")
         self.agilent_analyzer.write("MKPK HI;")
         print("Marker frequency at peak:")
-        print(self.agilent_analyzer.self.read_probes("marker frequency") / 1000000)
+        print(self.agilent_analyzer.read_probes("marker frequency") / 1000000)
         self.agilent_analyzer.write("MKTRACK ON;")
         self.agilent_analyzer.write("CONTS;")
         self.agilent_analyzer.update({"resolution band width": RBWMHZ})
         print("resolution bw:")
-        print(self.agilent_analyzer.read_probes("resolution band width")/ 1000000)
+        print(self.agilent_analyzer.read_probes("resolution band width") / 1000000)
         self.agilent_analyzer.write("MKTRACK OFF;")
         self.agilent_analyzer.update({"span": 0})
         print("span:")
-        print(self.agilent_analyzer.read_probes("span")/ 1000000)
+        print(self.agilent_analyzer.read_probes("span") / 1000000)
         self.agilent_analyzer.write("MKPK HI;")
         print("marker freq at peak:")
         print(self.agilent_analyzer.read_probes("marker frequency") / 1000000)
@@ -456,7 +479,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
         self.agilent_analyzer.write("SNGLS;")
         self.agilent_analyzer.update({"sweep time": sweep_time})
         print("sweep time:")
-        print(self.agilent_analyzer.read_probes("sweep time")* 1000000)
+        print(self.agilent_analyzer.read_probes("sweep time") * 1000000)
         self.agilent_analyzer.write("TS;")
         self.agilent_analyzer.write("TWNDOW TRB," + window + ";")
         self.agilent_analyzer.write("FFT TRA,TRA,TRB;")
@@ -467,7 +490,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
         print("marker freq at NH peak:")
         print(self.agilent_analyzer.read_probes("marker frequency") / 1000000)
         self.agilent_analyzer.write("MKREAD FFT;")
-        print(self.agilent_analyzer.read_probes("marker frequency") / 1000000 )
+        print(self.agilent_analyzer.read_probes("marker frequency") / 1000000)
 
     def start_fft(self):
         try:
@@ -527,6 +550,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
         if len(self.fftfrequency_data) == 0 or len(self.fftamplitude_data) == 0:
             return
         self.sa_plot.setData(self.fftfrequency_data, self.fftamplitude_data)
+        self.update_marker_dot()
 
     def fftacquire_and_plot_data(self):
         try:
@@ -534,7 +558,7 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
             self.agilent_analyzer.write("SNGLS;")
             self.agilent_analyzer.write("TS;")
             self.agilent_analyzer.write("MKPK HI;")
-            center_freq = self.agilent_analyzer.read_probes("center frequency")/ 1000000
+            center_freq = self.agilent_analyzer.read_probes("center frequency") / 1000000
             mkfreq = self.agilent_analyzer.read_probes("marker frequency") / 1000000
             amplitude = self.agilent_analyzer.read_probes("marker amplitude")
             print(f"Status: cf={center_freq}")
@@ -543,13 +567,16 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
             self.agilent_analyzer.write("TS;")
             ffttrace_data = np.array(self.agilent_analyzer.read_probes("trace AP"))
             num_points = len(ffttrace_data)
-            span = self.agilent_analyzer.read_probes("span")/ 1000000
+            span = self.agilent_analyzer.read_probes("span") / 1000000
             start_freq = 0
             fft_sweep_time = float(self.fft_sweep_timeLineEdit.text())
-            stop_freq = 400/(2*fft_sweep_time)
+            # Fmax in MHz = (400/(2*sweep_time)) * 1000 to convert to MHz? No, 400 is already in MHz?
+            # The formula gives MHz directly if sweep_time is in microseconds
+            stop_freq = 400 / (2 * fft_sweep_time)  # This gives frequency in MHz
             freqs = np.linspace(start_freq, stop_freq, num_points)
             self.agilent_analyzer.write("CONTS;")
-            self.fftfrequency_data = list(freqs / 1e9)
+            # Store frequencies in MHz
+            self.fftfrequency_data = list(freqs)
             self.fftamplitude_data = list(ffttrace_data)
             self.fftupdate_plot()
 
@@ -557,3 +584,131 @@ class SpectrumAnalyzerView(QWidget, Ui_Form):
             print(f"Error acquiring data: {e}")
             self.update_fft.stop()
             QMessageBox.critical(self, "Acquisition Error", str(e))
+
+    def get_marker_position(self):
+        """Get current marker frequency and amplitude from the instrument"""
+        try:
+            mk_freq = self.agilent_analyzer.read_probes("marker frequency") / 1000000  # Convert to MHz
+            mk_amp = self.agilent_analyzer.read_probes("marker amplitude")
+            return mk_freq, mk_amp
+        except Exception as e:
+            print(f"Error getting marker position: {e}")
+            return None, None
+
+    def update_marker_display(self):
+        """Update the MKRFlineEdit and MKRAlineEdit with current marker position"""
+        freq, amp = self.get_marker_position()
+        if freq is not None:
+            self.MKRFlineEdit.setText(f"{freq:.6f}")
+            self.MKRAlineEdit.setText(f"{amp:.6f}")
+            self.update_marker_dot()
+
+    def update_marker_dot(self):
+        """Update the marker dot position on the plot"""
+        try:
+            freq_mhz, amp_dbm = self.get_marker_position()
+
+            # Check which data array is currently being used
+            current_freq_data = self.frequency_data if len(self.frequency_data) > 0 else self.fftfrequency_data
+
+            if freq_mhz is not None and amp_dbm is not None and len(current_freq_data) > 0:
+                # Frequency is already in MHz, no conversion needed
+
+                # Check if frequency is within current plot range
+                if min(current_freq_data) <= freq_mhz <= max(current_freq_data):
+                    # Update marker dot position
+                    self.marker_dot.setData([{'pos': (freq_mhz, amp_dbm), 'data': 1}])
+                    print(f"Marker dot placed at ({freq_mhz} MHz, {amp_dbm} dBm)")
+                else:
+                    # Hide marker if outside range
+                    self.marker_dot.setData([])
+                    print(
+                        f"Marker at {freq_mhz} MHz is outside plot range [{min(current_freq_data)}, {max(current_freq_data)}]")
+        except Exception as e:
+            print(f"Error updating marker dot: {e}")
+
+    def MKR_L_UI(self):
+        """Decrease marker frequency"""
+        try:
+            # Calculate step size based on current span
+            span = self.agilent_analyzer.read_probes("span") / 1000000  # in MHz
+            num_points = 401  # Typical Agilent trace points
+
+            # Step size = span / number of points (resolution)
+            step_size = span / num_points
+
+            # Get current marker frequency
+            current_freq, _ = self.get_marker_position()
+
+            if current_freq is not None:
+                # Move marker left (decrease frequency)
+                new_freq = current_freq - step_size
+
+                # Get current span and center frequency for bounds checking
+                span = self.agilent_analyzer.read_probes("span") / 1000000
+                center_freq = self.agilent_analyzer.read_probes("center frequency") / 1000000
+                start_freq = center_freq - (span / 2)
+                stop_freq = center_freq + (span / 2)
+
+                # Ensure new frequency stays within bounds
+                if new_freq >= start_freq:
+                    # Set marker to new frequency
+                    self.agilent_analyzer.write(f"MKF {new_freq} MHZ;")
+                    print(f"Moved marker left to {new_freq} MHz")
+
+                    # Update display
+                    self.update_marker_display()
+
+                    # Force a plot update to show marker movement
+                    if hasattr(self, 'update_timer') and self.update_timer.isActive():
+                        self.acquire_and_plot_data()
+                    elif hasattr(self, 'update_fft') and self.update_fft.isActive():
+                        self.fftacquire_and_plot_data()
+                else:
+                    print(f"Cannot move left: {new_freq} MHz is below start frequency {start_freq} MHz")
+
+        except Exception as e:
+            print(f"Error in MKR_L_UI: {e}")
+
+    def MKR_R_UI(self):
+        """Increase marker frequency"""
+        try:
+            # Calculate step size based on current span
+            span = self.agilent_analyzer.read_probes("span") / 1000000  # in MHz
+            num_points = 401  # Typical Agilent trace points
+
+            # Step size = span / number of points (resolution)
+            step_size = span / num_points
+
+            # Get current marker frequency
+            current_freq, _ = self.get_marker_position()
+
+            if current_freq is not None:
+                # Move marker right (increase frequency)
+                new_freq = current_freq + step_size
+
+                # Get current span and center frequency for bounds checking
+                span = self.agilent_analyzer.read_probes("span") / 1000000
+                center_freq = self.agilent_analyzer.read_probes("center frequency") / 1000000
+                start_freq = center_freq - (span / 2)
+                stop_freq = center_freq + (span / 2)
+
+                # Ensure new frequency stays within bounds
+                if new_freq <= stop_freq:
+                    # Set marker to new frequency
+                    self.agilent_analyzer.write(f"MKF {new_freq} MHZ;")
+                    print(f"Moved marker right to {new_freq} MHz")
+
+                    # Update display
+                    self.update_marker_display()
+
+                    # Force a plot update to show marker movement
+                    if hasattr(self, 'update_timer') and self.update_timer.isActive():
+                        self.acquire_and_plot_data()
+                    elif hasattr(self, 'update_fft') and self.update_fft.isActive():
+                        self.fftacquire_and_plot_data()
+                else:
+                    print(f"Cannot move right: {new_freq} MHz is above stop frequency {stop_freq} MHz")
+
+        except Exception as e:
+            print(f"Error in MKR_R_UI: {e}")

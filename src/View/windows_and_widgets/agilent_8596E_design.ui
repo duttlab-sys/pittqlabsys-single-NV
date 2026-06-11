@@ -31,20 +31,6 @@
         <layout class="QGridLayout" name="gridLayout_2">
          <item row="0" column="0">
           <layout class="QGridLayout" name="gridLayout">
-           <item row="18" column="0">
-            <widget class="QPushButton" name="clearButton">
-             <property name="text">
-              <string>Clear</string>
-             </property>
-            </widget>
-           </item>
-           <item row="19" column="2">
-            <widget class="QPushButton" name="snapshotButton">
-             <property name="text">
-              <string>Snapshot</string>
-             </property>
-            </widget>
-           </item>
            <item row="3" column="2">
             <widget class="QPushButton" name="spanButton">
              <property name="text">
@@ -52,7 +38,7 @@
              </property>
             </widget>
            </item>
-           <item row="19" column="0">
+           <item row="22" column="0">
             <widget class="QPushButton" name="saveButton">
              <property name="text">
               <string>Save</string>
@@ -73,24 +59,31 @@
              </property>
             </widget>
            </item>
-           <item row="0" column="0">
-            <widget class="QPushButton" name="connectButton">
+           <item row="21" column="0">
+            <widget class="QPushButton" name="clearButton">
              <property name="text">
-              <string>Connect</string>
+              <string>Clear</string>
              </property>
             </widget>
            </item>
-           <item row="18" column="2">
+           <item row="21" column="2">
             <widget class="QPushButton" name="stopButton">
              <property name="text">
               <string>Stop</string>
              </property>
             </widget>
            </item>
-           <item row="6" column="2">
+           <item row="8" column="2">
             <widget class="QPushButton" name="markerdeltaButton">
              <property name="text">
               <string>Set Marker Delta</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="0">
+            <widget class="QPushButton" name="connectButton">
+             <property name="text">
+              <string>Connect</string>
              </property>
             </widget>
            </item>
@@ -101,6 +94,30 @@
              </property>
             </widget>
            </item>
+           <item row="22" column="2">
+            <widget class="QPushButton" name="snapshotButton">
+             <property name="text">
+              <string>Snapshot</string>
+             </property>
+            </widget>
+           </item>
+           <item row="3" column="0">
+            <widget class="QLineEdit" name="spanLineEdit"/>
+           </item>
+           <item row="12" column="2">
+            <widget class="QPushButton" name="videobwButton">
+             <property name="text">
+              <string>Video BW</string>
+             </property>
+            </widget>
+           </item>
+           <item row="8" column="0">
+            <widget class="QPushButton" name="markerminButton">
+             <property name="text">
+              <string>Marker Min</string>
+             </property>
+            </widget>
+           </item>
            <item row="5" column="0">
             <widget class="QPushButton" name="markermaxButton">
              <property name="text">
@@ -108,57 +125,10 @@
              </property>
             </widget>
            </item>
-           <item row="3" column="0">
-            <widget class="QLineEdit" name="spanLineEdit"/>
-           </item>
-           <item row="6" column="0">
-            <widget class="QPushButton" name="markerminButton">
-             <property name="text">
-              <string>Marker Min</string>
-             </property>
-            </widget>
-           </item>
-           <item row="9" column="2">
-            <widget class="QPushButton" name="videobwButton">
-             <property name="text">
-              <string>Video BW</string>
-             </property>
-            </widget>
-           </item>
-           <item row="10" column="0">
-            <widget class="QLineEdit" name="videoavgLineEdit"/>
-           </item>
-           <item row="8" column="2">
+           <item row="11" column="2">
             <widget class="QPushButton" name="resolutionbwButton">
              <property name="text">
               <string>Resolution BW</string>
-             </property>
-            </widget>
-           </item>
-           <item row="11" column="2">
-            <widget class="QPushButton" name="clravgButton">
-             <property name="text">
-              <string>Stop AVG</string>
-             </property>
-            </widget>
-           </item>
-           <item row="10" column="2">
-            <widget class="QPushButton" name="videoavgButton">
-             <property name="text">
-              <string>Video AVG</string>
-             </property>
-            </widget>
-           </item>
-           <item row="9" column="0">
-            <widget class="QLineEdit" name="videobwLineEdit"/>
-           </item>
-           <item row="8" column="0">
-            <widget class="QLineEdit" name="resolutionbwLineEdit"/>
-           </item>
-           <item row="7" column="2">
-            <widget class="QPushButton" name="setsweeptimeButton">
-             <property name="text">
-              <string>Set Sweep Time</string>
              </property>
             </widget>
            </item>
@@ -169,17 +139,30 @@
              </property>
             </widget>
            </item>
-           <item row="7" column="0">
-            <widget class="QLineEdit" name="sweeptimeLineEdit"/>
-           </item>
-           <item row="11" column="0">
-            <widget class="QPushButton" name="fftButton">
+           <item row="10" column="2">
+            <widget class="QPushButton" name="setsweeptimeButton">
              <property name="text">
-              <string>FFT</string>
+              <string>Set Sweep Time</string>
              </property>
             </widget>
            </item>
+           <item row="12" column="0">
+            <widget class="QLineEdit" name="videobwLineEdit"/>
+           </item>
            <item row="13" column="2">
+            <widget class="QPushButton" name="videoavgButton">
+             <property name="text">
+              <string>Video AVG</string>
+             </property>
+            </widget>
+           </item>
+           <item row="11" column="0">
+            <widget class="QLineEdit" name="resolutionbwLineEdit"/>
+           </item>
+           <item row="13" column="0">
+            <widget class="QLineEdit" name="videoavgLineEdit"/>
+           </item>
+           <item row="16" column="2">
             <widget class="QComboBox" name="comboBox">
              <item>
               <property name="text">
@@ -198,6 +181,19 @@
              </item>
             </widget>
            </item>
+           <item row="10" column="0">
+            <widget class="QLineEdit" name="sweeptimeLineEdit"/>
+           </item>
+           <item row="17" column="2">
+            <widget class="QPushButton" name="stopfftButton">
+             <property name="text">
+              <string>fft stop</string>
+             </property>
+            </widget>
+           </item>
+           <item row="15" column="0">
+            <widget class="QLineEdit" name="fft_sweep_timeLineEdit"/>
+           </item>
            <item row="1" column="0">
             <widget class="QPushButton" name="initializeButton">
              <property name="text">
@@ -205,32 +201,59 @@
              </property>
             </widget>
            </item>
-           <item row="12" column="0">
-            <widget class="QLineEdit" name="fft_sweep_timeLineEdit"/>
+           <item row="2" column="0">
+            <widget class="QLineEdit" name="cfLineEdit"/>
            </item>
-           <item row="12" column="2">
+           <item row="17" column="0">
+            <widget class="QPushButton" name="startfftButton">
+             <property name="text">
+              <string>fft start</string>
+             </property>
+            </widget>
+           </item>
+           <item row="15" column="2">
             <widget class="QPushButton" name="fft_sweep_timepushButton">
              <property name="text">
               <string>FFT Sweep Time</string>
              </property>
             </widget>
            </item>
-           <item row="2" column="0">
-            <widget class="QLineEdit" name="cfLineEdit"/>
-           </item>
-           <item row="14" column="2">
-            <widget class="QPushButton" name="stopfftButton">
+           <item row="9" column="2">
+            <widget class="QPushButton" name="clravgButton">
              <property name="text">
-              <string>fft stop</string>
+              <string>Stop AVG</string>
              </property>
             </widget>
            </item>
-           <item row="14" column="0">
-            <widget class="QPushButton" name="startfftButton">
+           <item row="16" column="0">
+            <widget class="QPushButton" name="fftButton">
              <property name="text">
-              <string>fft start</string>
+              <string>FFT</string>
              </property>
             </widget>
+           </item>
+           <item row="9" column="0">
+            <widget class="QWidget" name="widget_3" native="true"/>
+           </item>
+           <item row="6" column="2">
+            <widget class="QLineEdit" name="MKRAlineEdit"/>
+           </item>
+           <item row="7" column="2">
+            <widget class="QPushButton" name="MKR_R">
+             <property name="text">
+              <string>MKR RIGHT</string>
+             </property>
+            </widget>
+           </item>
+           <item row="7" column="0">
+            <widget class="QPushButton" name="MKR_L">
+             <property name="text">
+              <string>MKR LEFT</string>
+             </property>
+            </widget>
+           </item>
+           <item row="6" column="0">
+            <widget class="QLineEdit" name="MKRFlineEdit"/>
            </item>
           </layout>
          </item>
