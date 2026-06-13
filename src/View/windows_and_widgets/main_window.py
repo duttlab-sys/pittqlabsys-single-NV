@@ -24,7 +24,7 @@ from .positioning_stages_GUI import positioning_stages_view
 from PyQt5 import QtGui, QtWidgets
 from PyQt5.uic import loadUiType
 from PyQt5 import QtCore
-from PyQt5.QtWidgets import QSizePolicy
+from PyQt5.QtWidgets import QSizePolicy, QMessageBox
 from PyQt5.QtCore import QThread, pyqtSlot, Qt, QSignalBlocker
 from src.core import Parameter, Device, Experiment, Probe
 from src.core.experiment_iterator import ExperimentIterator
@@ -234,7 +234,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.display_choice = self.positioning_tab.display_choice()
         self.snapshot_or_live = self.positioning_tab.snapshot_or_live()
         self.positioning_tab.display_choice_changed.connect(self.update_display_choice)
+        self.positioning_tab.color_scale_changed.connect(self.update_color_scale)
+        self.positioning_tab.Get_Image_Button_Clicked.connect(self.get_image_snapshot)
         self.positioning_tab.snapshot_mode_changed.connect(self.update_snapshot_mode)
+        if hasattr(self, "Display_View_widget") and self.Display_View_widget is not None:
+            self.Display_View_widget.update_get_img.connect(self.update_get_image)
         self.positioning_tab.save_or_find_nv_button_clicked.connect(self.update_current_data_saving_path) # @
         self.positioning_tab.server_off_button_clicked.connect(self.server_off)
         self.positioning_tab.take_img_signal.connect(self.take_frame)
@@ -481,7 +485,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def server_off(self):
         if self.Display_View_widget.display_choice == 'CASCADE CCD':
-            self.Display_View_widget.widget.cam.stop_server()
+            self.Display_View_widget.widget.hcam.stop_server()
 
     def _handle_directory_parameter(self, item, column):
         """
@@ -524,7 +528,43 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def take_cam_snapshot(self):
         self.data_saving_path = self.data_saving_tab.current_path()
-        frame = self.Display_View_widget.widget.get_latest_frame()
+        view = self.Display_View_widget.widget
+
+        # grab ONE source frame so RGB and raw come from the same exposure
+        if self.Display_View_widget.display_choice == 'MU300':
+            rgb = view.get_latest_frame()  # already (h, w, 3) uint8
+            raw = None  # color sensor: no separate raw counts
+        else:
+            raw = view.get_latest_frame()  # (h, w) float CCD counts
+            rgb = view.frame_to_display_rgb(raw)  # same frame -> displayed RGB
+
+        if rgb is None and raw is None:
+            QMessageBox.warning(self, "Snapshot", "No frame available to save.")
+            return
+
+        # ask what to save
+        box = QMessageBox(self)
+        box.setWindowTitle("Save snapshot")
+        box.setText("What would you like to save?")
+        rgb_btn = box.addButton("RGB", QMessageBox.AcceptRole)
+        raw_btn = box.addButton("Raw data", QMessageBox.AcceptRole)
+        both_btn = box.addButton("Both", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked not in (rgb_btn, raw_btn, both_btn):
+            return  # cancelled / closed
+
+        want_rgb = clicked in (rgb_btn, both_btn)
+        want_raw = clicked in (raw_btn, both_btn)
+
+        # MU300 has no raw counts; fall back to RGB if raw was requested
+        if want_raw and raw is None:
+            QMessageBox.information(self, "Snapshot",
+                                    "Raw data isn't available for this camera; saving RGB instead.")
+            want_raw, want_rgb = False, True
+
+        # the windows-explorer save dialog (unchanged)
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Image", self.data_saving_path, "PNG (*.png)"
         )
@@ -532,7 +572,33 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             return
 
         from PIL import Image
-        Image.fromarray(frame).save(path)
+        import os, datetime
+        from src.core.struct_hdf5 import save_data, MyStruct
+
+        base, _ext = os.path.splitext(path)
+        both = want_rgb and want_raw
+
+        # --- RGB still goes to PNG ---
+        if want_rgb and rgb is not None:
+            rgb_path = f"{base}_rgb.png" if both else f"{base}.png"
+            Image.fromarray(np.asarray(rgb, dtype=np.uint8)).save(rgb_path)
+
+        # --- raw goes to HDF5 via struct_hdf5 ---
+        if want_raw and raw is not None:
+            raw_path = f"{base}_raw.h5" if both else f"{base}.h5"
+            raw_struct = MyStruct(
+                image=np.asarray(raw),  # 2-D CCD counts (dataset)
+                camera=self.Display_View_widget.display_choice,
+                colormap=getattr(view, "color_scale_choice", "Grey"),
+                timestamp=datetime.datetime.now().strftime("%m_%d_%Y_%H:%M:%S"),
+            )
+            # attach current camera settings if the device exposes them
+            try:
+                raw_struct.integration_time_us = view.hcam.read_probes("inttime")
+                raw_struct.gain = view.hcam.read_probes("gain")
+            except Exception:
+                pass
+            save_data(raw_path, raw_struct, mode="w")
 
     def closeEvent(self, event):
         """
@@ -669,6 +735,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         print(f"update_display_choice called: {new_display_choice}")
         self.display_choice = new_display_choice
         self.reload_display_widget()
+
+    def update_color_scale(self, new_color_scale_choice):
+        self.Display_View_widget.update_color_scale_option(new_color_scale_choice)
+
+    def get_image_snapshot(self):
+        self.Display_View_widget.get_image_snapshot()
+
+    def update_get_image(self, enabled):
+        self.positioning_tab.Update_Get_Image_Button(enabled)
 
     def update_snapshot_mode(self, mode):
         print("update_snapshot_mode called", mode)

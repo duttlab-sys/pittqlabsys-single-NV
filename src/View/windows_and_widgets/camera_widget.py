@@ -282,6 +282,9 @@ class ROPER_CASCADE_CCD_View(QWidget):
         self.crosshair_y = None
         self.crosshair_thickness = 1
 
+        self.color_scale_choice = "Grey"
+        self._lut_cache = {}  # caches 256x3 uint8 colormaps built from MATLAB
+
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _init_ui(self) -> None:
@@ -356,6 +359,44 @@ class ROPER_CASCADE_CCD_View(QWidget):
             print(f"Frame conversion error: {e}")
             return None
 
+    def frame_to_display_rgb(self, frame):
+        """Convert a raw 2-D frame to on-screen RGB (autoscale + colormap), (h, w, 3) uint8."""
+        if frame is None:
+            return None
+        fmin, fmax = float(np.min(frame)), float(np.max(frame))
+        if fmax > fmin:
+            idx = ((frame - fmin) * (255.0 / (fmax - fmin))).astype(np.uint8)
+        else:
+            idx = np.zeros(frame.shape, dtype=np.uint8)
+        lut = self._get_lut(self.color_scale_choice)
+        return np.ascontiguousarray(lut[idx])
+
+    def get_display_rgb(self):
+        """Grab a fresh frame and return it as on-screen RGB."""
+        return self.frame_to_display_rgb(self.get_latest_frame())
+
+    def show_frame(self, frame):
+        """Render a given raw 2-D frame to the label (same autoscale + colormap as live)."""
+        rgb = self.frame_to_display_rgb(frame)
+        if rgb is None:
+            return
+        self._last_disp = rgb  # keep ref alive for QImage
+        h, w = frame.shape
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        self.label.setPixmap(QPixmap.fromImage(qimg))
+
+    def get_image(self):
+        if self.hcam is None:
+            return None
+        try:
+            raw = self.hcam.read_probes("image")  # -> matlab.double, 2-D
+            # MATLAB stores data column-major, so reshape with order='F'
+            arr = np.array(raw._data, dtype=np.float64).reshape(raw.size, order="F")
+            return arr
+        except Exception as e:
+            print(f"Error: {e}")
+            return None
+
     @pyqtSlot(int)
     def _on_event_image(self, event: int) -> None:
         frame = self.get_latest_frame()
@@ -365,13 +406,16 @@ class ROPER_CASCADE_CCD_View(QWidget):
         # autoscale CCD counts to 8-bit just for display
         fmin, fmax = float(np.min(frame)), float(np.max(frame))
         if fmax > fmin:
-            disp = ((frame - fmin) * (255.0 / (fmax - fmin))).astype(np.uint8)
+            idx = ((frame - fmin) * (255.0 / (fmax - fmin))).astype(np.uint8)
         else:
-            disp = np.zeros(frame.shape, dtype=np.uint8)
+            idx = np.zeros(frame.shape, dtype=np.uint8)
 
-        self._last_disp = np.ascontiguousarray(disp)  # keep ref alive for QImage
-        h, w = self._last_disp.shape
-        qimg = QImage(self._last_disp.data, w, h, w, QImage.Format_Grayscale8)
+        # map the 8-bit index through the selected colormap -> RGB
+        lut = self._get_lut(self.color_scale_choice)
+        rgb = np.ascontiguousarray(lut[idx])  # (h, w, 3) uint8
+        self._last_disp = rgb  # keep ref alive for QImage
+        h, w = idx.shape
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
         self.label.setPixmap(QPixmap.fromImage(qimg))
 
         # optional FPS in title (inlined; Roper class has no _update_fps)
@@ -419,6 +463,40 @@ class ROPER_CASCADE_CCD_View(QWidget):
         if self.hcam is not None:
             self.hcam.close()
             self.hcam = None
+
+    def _get_lut(self, name):
+        """Return a 256x3 uint8 RGB lookup table for the chosen colormap.
+        jet/hot/cool come straight from MATLAB; built once then cached."""
+        if name in self._lut_cache:
+            return self._lut_cache[name]
+
+        n = 256
+        if name in ("Grey", "Gey"):  # plain grayscale ramp (no MATLAB needed)
+            ramp = np.arange(n, dtype=np.uint8)
+            lut = np.repeat(ramp[:, None], 3, axis=1)
+        else:
+            eng = self.hcam.eng  # MATLAB engine owned by the device class
+            if name == "Jet_Plus_White":
+                jet = np.array(eng.jet(float(n))._data,
+                               dtype=np.float64).reshape((n, 3), order="F")
+                n_white = 32  # rows fading white -> jet's blue (tweak to taste)
+                fade = np.linspace(1.0, 0.0, n_white)[:, None]
+                bottom = fade * np.ones((n_white, 3)) + (1.0 - fade) * jet[0]
+                body = jet[np.linspace(0, n - 1, n - n_white).astype(int)]
+                cmap = np.vstack([bottom, body])
+            else:
+                fn = {"Jet": eng.jet, "Hot": eng.hot, "Cool": eng.cool}.get(name)
+                if fn is None:  # unknown name -> fall back to grayscale
+                    ramp = np.arange(n, dtype=np.uint8)
+                    lut = np.repeat(ramp[:, None], 3, axis=1)
+                    self._lut_cache[name] = lut
+                    return lut
+                cmap = np.array(fn(float(n))._data,
+                                dtype=np.float64).reshape((n, 3), order="F")
+            lut = np.clip(cmap * 255.0, 0, 255).astype(np.uint8)
+
+        self._lut_cache[name] = lut
+        return lut
 
 class CrosshairLabel(QLabel):
     mouseMoved = pyqtSignal(int, int)

@@ -69,7 +69,7 @@ class Roper_Cascade_Camera(Device):
         elif key_internal == "gainlimits":
             value = self.eng.feval(self.cam['getgainlimits'])
         elif key_internal == "image":
-            value = self.eng.feval(self.cam['getimage'])
+            value = self.eng.feval(self.cam['getimage'], float(self.read_probes("inttime")))
         elif key_internal == "imagefast_int":
             value = self.eng.feval(self.cam['getimagefast'])
         elif key_internal == "inttime":
@@ -123,9 +123,11 @@ class Roper_Cascade_Camera(Device):
     def stop_server(self):
         self.eng.DLRC1_stop_server()
 
+    def close(self):
+        pass
+
 if __name__ == "__main__":
     s=Roper_Cascade_Camera()
-    x = s.stop_server()
 
     """print(f"integration time: {s.read_probes("inttime")}")
     print(f"gain: {s.read_probes("gain")}")
@@ -139,4 +141,4 @@ if __name__ == "__main__":
     print(f"maxpixelvalue: {s.read_probes("maxpixelvalue")}")
     print(f"pixelwarninglevel: {s.read_probes("pixelwarninglevel")}")"""
     ##print(f"imagefast_int: {s.read_probes("imagefast_int")}")
-    #print(f"image: {s.read_probes("image")}")
+    ##print(f"image: {s.read_probes("image")}")

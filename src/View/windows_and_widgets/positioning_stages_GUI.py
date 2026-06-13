@@ -53,6 +53,8 @@ class positioning_stages_view(QWidget, Ui_Form):
     save_or_find_nv_button_clicked = pyqtSignal(int)
     take_img_signal = pyqtSignal(int)
     server_off_button_clicked = pyqtSignal(int)
+    color_scale_changed = pyqtSignal(str)
+    Get_Image_Button_Clicked = pyqtSignal(int)
     def __init__(self, parent = None):
         super().__init__(parent)
         self.setupUi(self)
@@ -128,7 +130,9 @@ class positioning_stages_view(QWidget, Ui_Form):
         self.snapButton.clicked.connect(self.send_snapshotButtonclicked_signal)
         # Connect combobox signals to emitters
         self.display_option.currentTextChanged.connect(self.on_display_choice_changed)
+        self.color_scale_option.currentTextChanged.connect(self.on_color_scale_changed)
         self.snapshot_live_comboBox.currentTextChanged.connect(self.on_snapshot_or_live_changed)
+        self.Get_Image_Button.clicked.connect(self.get_image_snapshot)
         self.data_saving_path = None
         self.data_reader = None
         self.frame = None
@@ -401,7 +405,27 @@ class positioning_stages_view(QWidget, Ui_Form):
         print("on_display_choice_changed emitting", text)
         self.display_choice_changed.emit(text)
 
+    def on_color_scale_changed(self, text):
+        option = self.color_scale_option.currentText()
+        if option == "Grey":
+            self.color_scale_changed.emit(text)
+        elif option == "Jet_Plus_White":
+            self.color_scale_changed.emit(text)
+        elif option == "Jet":
+            self.color_scale_changed.emit(text)
+        elif option == "Hot":
+            self.color_scale_changed.emit(text)
+        elif option == "Cool":
+            self.color_scale_changed.emit(text)
+
+    def get_image_snapshot(self):
+        self.Get_Image_Button_Clicked.emit(1)
+
+    def Update_Get_Image_Button(self, enabled):
+        self.Get_Image_Button.setEnabled(enabled)
+
     def on_snapshot_or_live_changed(self, text):
+        # snapshot mode = 0, live mode = 1
         mode = 0 if text.lower() == "snapshot" else 1
         print("on_snapshot_or_live_changed emitting", mode)
         self.snapshot_mode_changed.emit(mode)

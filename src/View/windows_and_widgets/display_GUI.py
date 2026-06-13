@@ -14,7 +14,9 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QMessageBox,
-    QSlider
+    QSlider,
+    QLineEdit,
+    QPushButton,
 )
 # Assuming the .ui file is converted to design.py
 #To convert display_design.ui to .py, paste this into the terminal:
@@ -27,10 +29,24 @@ class Display_View(QWidget, Ui_Form):
     """
     x_crosshair = pyqtSignal(int)
     y_crosshair = pyqtSignal(int)
-    def __init__(self, display_choice = "MU300", snapshot_or_live = "live", parent=None):
+    # ---- AutoTune config (Roper only). EDIT the sequences to match your hardware. ----
+    AUTOTUNE_TARGET_MIN = 15000
+    AUTOTUNE_TARGET_MAX = 39000
+    AUTOTUNE_SATURATION = 40000
+    # both arrays ordered from LEAST to MOST exposure
+    ROPER_NOGAIN_SEQUENCE = [10, 50, 100, 150, 200, 300, 500]  # inttime (us)
+    ROPER_GAIN_SEQUENCE = [(10, 1), (50, 1), (100, 1), (100, 100),
+                           (100, 500), (100, 1000), (100, 1500),
+                           (100, 2000), (100, 2500), (100, 3000), (150, 3000), (200, 3000), (300, 3000), (400, 3000), (500, 3000)]
+    update_get_img = pyqtSignal(int)
+    def __init__(self, display_choice = "MU300", snapshot_or_live = 1, parent=None):
         super().__init__(parent)
         self.setupUi(self)
         self.widget = None
+        self.cascade_controls = None  # container for the Roper line-edits/buttons
+        self._autotune_mode = None
+        self._autotune_seq = None
+        self._autotune_index = 0
         #self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         if hasattr(self, 'horizontalLayout'):
             self.horizontalLayout.setContentsMargins(0, 0, 0, 0)
@@ -78,6 +94,7 @@ class Display_View(QWidget, Ui_Form):
         self.crosshairButton.clicked.connect(self.crosshair)
         self.center_Button.clicked.connect(self.center)
         self.clear_crosshair_Button.clicked.connect(self.clear_crosshair)
+        self.AutoTune_checkBox.toggled.connect(self.on_autotune_toggled)
         self.connect_to_display()
         self.start()
         self.crosshair_x.setMaximum(self.w)
@@ -106,6 +123,10 @@ class Display_View(QWidget, Ui_Form):
             self.snapshot_or_live = snapshot_or_live
         self.start()
 
+    def update_color_scale_option(self, new_color_scale_choice):
+        if self.display_choice == "CASCADE CCD":
+            self.widget.color_scale_choice = new_color_scale_choice
+
     def connect_to_display(self):
         """This function connects the devices: please make sure that the stage has the function get_position(self, axis)"""
         # remove any previously-loaded camera view so they don't stack/overlap
@@ -124,7 +145,10 @@ class Display_View(QWidget, Ui_Form):
             try:
                 self.widget = Amscope_Camera_View()
                 self.verticalLayout.addWidget(self.widget)
-                QMessageBox.information(self, 'Success', f'Connected to: {self.display_choice}')
+                if self.widget is not None:
+                    QMessageBox.information(self, 'Success', f'Connected to: {self.display_choice}')
+                else:
+                    QMessageBox.critical(self, 'Error', f'Could not connect to: {self.display_choice}')
             except Exception as e:
                 QMessageBox.critical(self, 'Error', str(e))
         elif self.display_choice == 'CASCADE CCD':
@@ -132,23 +156,164 @@ class Display_View(QWidget, Ui_Form):
             try:
                 self.widget = ROPER_CASCADE_CCD_View()
                 self.verticalLayout.addWidget(self.widget)
-                QMessageBox.information(self, 'Success', f'Connected to: {self.display_choice}')
+                if self.widget is not None:
+                    QMessageBox.information(self, 'Success', f'Connected to: {self.display_choice}')
+                else:
+                    QMessageBox.critical(self, 'Error', f'Could not connect to: {self.display_choice}')
             except Exception as e:
                 QMessageBox.critical(self, 'Error', str(e))
         else:
             return
 
+    def _update_get_image_button(self):
+        is_roper = (self.display_choice == 'CASCADE CCD')
+        enabled = (is_roper and self.snapshot_or_live == 0)
+        self.update_get_img.emit(enabled)
+        self.AutoTune_checkBox.setEnabled(is_roper)
+
+    def on_autotune_toggled(self, checked):
+        if not checked:  # ignore the un-check
+            return
+        if self.display_choice != 'CASCADE CCD':
+            self.AutoTune_checkBox.setChecked(False)
+            return
+
+        # 1) Gain / No gain / Cancel
+        box = QMessageBox(self)
+        box.setWindowTitle("AutoTune")
+        box.setText("Choose AutoTune mode:")
+        gain_btn = box.addButton("Gain", QMessageBox.AcceptRole)
+        nogain_btn = box.addButton("No gain", QMessageBox.AcceptRole)
+        cancel_btn = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec_()
+        clicked = box.clickedButton()
+
+        if clicked is cancel_btn or clicked is None:
+            self.AutoTune_checkBox.setChecked(False)  # deselect
+            return
+
+        if clicked is gain_btn:
+            self._autotune_mode = "gain"
+            seq = self.ROPER_GAIN_SEQUENCE
+            labels = [f"{i}: inttime={it} us, gain={g}" for i, (it, g) in enumerate(seq)]
+        else:
+            self._autotune_mode = "nogain"
+            seq = self.ROPER_NOGAIN_SEQUENCE
+            labels = [f"{i}: inttime={it} us" for i, it in enumerate(seq)]
+
+        # 2) pick the starting point in the chosen array
+        from PyQt5.QtWidgets import QInputDialog
+        label, ok = QInputDialog.getItem(
+            self, "AutoTune start", "Select the starting point:", labels, 0, False)
+        if not ok:
+            self.AutoTune_checkBox.setChecked(False)
+            return
+
+        self._autotune_seq = seq
+        self._autotune_index = labels.index(label)
+
+        # 3) run the tuning loop
+        self._autotune_run()
+
+    def _apply_autotune_setting(self, setting):
+        if self._autotune_mode == "gain":
+            inttime, gain = setting
+            self.widget.hcam.update({'inttime': float(inttime), 'gain': float(gain)})
+        else:
+            self.widget.hcam.update({'inttime': float(setting)})
+
+    def _autotune_run(self):
+        seq = self._autotune_seq
+        idx = self._autotune_index
+        frame = None
+        max_pixel = None
+        for _ in range(2 * len(seq)):  # bounded; can't spin forever
+            self._apply_autotune_setting(seq[idx])
+            QApplication.processEvents()  # keep UI alive during exposures
+            frame = self.widget.get_latest_frame()
+            if frame is None:
+                break
+            max_pixel = float(np.max(frame))
+            if max_pixel >= self.AUTOTUNE_SATURATION or max_pixel > self.AUTOTUNE_TARGET_MAX:
+                if idx > 0:
+                    idx -= 1  # too bright -> less exposure
+                    continue
+                break  # already at the lowest setting
+            elif max_pixel < self.AUTOTUNE_TARGET_MIN:
+                if idx < len(seq) - 1:
+                    idx += 1  # too dim -> more exposure
+                    continue
+                break  # already at the highest setting
+            else:
+                break  # in the ideal 15k-39k window
+        self._autotune_index = idx
+
+        # reflect the chosen values in the line-edits (if the cascade controls exist)
+        try:
+            if self._autotune_mode == "gain":
+                it, g = seq[idx]
+                self.inttime_edit.setText(str(it))
+                self.gain_edit.setText(str(g))
+            else:
+                self.inttime_edit.setText(str(seq[idx]))
+        except Exception:
+            pass
+
+        # show the tuned frame and refresh the plots
+        if frame is not None:
+            self.widget.show_frame(frame)
+            self.img_gray = frame
+            self.h, self.w = frame.shape
+            self.draw_crosshair(self.x_selected, self.y_selected)
+
+        if max_pixel is not None:
+            QMessageBox.information(
+                self, "AutoTune",
+                f"Final max pixel: {int(max_pixel)} "
+                f"(target {self.AUTOTUNE_TARGET_MIN}-{self.AUTOTUNE_TARGET_MAX}).")
+
+    def get_image_snapshot(self):
+        """Roper snapshot: grab a full image with read_probes('image') and overwrite the display."""
+        try:
+            raw = self.widget.hcam.read_probes("image")
+        except Exception as e:
+            QMessageBox.warning(self, "Get image", f"Could not collect image: {e}")
+            return
+
+        # MATLAB double -> numpy (column-major), same as get_latest_frame
+        try:
+            frame = np.array(raw._data, dtype=np.float64).reshape(raw.size, order="F")
+        except Exception:
+            frame = np.asarray(raw, dtype=np.float64)
+
+        # overwrite whatever was showing
+        self.widget.show_frame(frame)
+
+        # refresh the z-vs-x / z-vs-y plots from the new image
+        self.img_gray = frame
+        self.h, self.w = frame.shape
+        self.draw_crosshair(self.x_selected, self.y_selected)
+
     # 0 means snapshot
     # 1 means live
     def start(self):
-        if self.snapshot_or_live == "Snapshot":
+        self._update_get_image_button()
+        if self.snapshot_or_live == 0:
             self.update_timer.stop()
-            #self.widget.stop_live_view()
-            return
+            if self.widget is not None and self.display_choice == 'CASCADE CCD':
+                try:
+                    self.widget.stop_live_view()
+                except Exception:
+                    pass
         else:
             self.widget.start_live_view()
             if self.display_choice == 'MU300':
+                self._set_sliders_visible(True)
+                self._remove_cascade_controls()
                 self.build_sliders()
+            elif self.display_choice == 'CASCADE CCD':
+                self._set_sliders_visible(False)
+                self.build_cascade_controls()
             try:
                 self.update_timer.start(500)
             except ValueError as e:
@@ -169,6 +334,86 @@ class Display_View(QWidget, Ui_Form):
             min_value, max_value = self.widget.hcam.return_min_max(name)
             slider = getattr(self, f"horizontalSlider_{i}")
             self._add_slider(name, slider, min_value, max_value, current_val)
+
+    def _set_sliders_visible(self, visible):
+        # the MU300 sliders are horizontalSlider_10 .. _18 in the .ui
+        for i in range(10, 19):
+            slider = getattr(self, f"horizontalSlider_{i}", None)
+            if slider is not None:
+                slider.setVisible(visible)
+
+    def build_cascade_controls(self):
+        # rebuild from scratch so they never stack when you switch/restart
+        self._remove_cascade_controls()
+
+        # prefill the fields with the camera's current values
+        try:
+            cur_inttime = self.widget.hcam.read_probes("inttime")
+        except Exception:
+            cur_inttime = ""
+        try:
+            cur_gain = self.widget.hcam.read_probes("gain")
+        except Exception:
+            cur_gain = ""
+
+        container = QWidget()
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+
+        # --- integration time row ---
+        self.inttime_edit = QLineEdit(str(cur_inttime))
+        inttime_btn = QPushButton("Set integration time")
+        inttime_btn.clicked.connect(self._apply_cascade_inttime)
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Integration time (us):"))
+        row1.addWidget(self.inttime_edit)
+        row1.addWidget(inttime_btn)
+        vbox.addLayout(row1)
+
+        # --- gain row ---
+        self.gain_edit = QLineEdit(str(cur_gain))
+        gain_btn = QPushButton("Set gain")
+        gain_btn.clicked.connect(self._apply_cascade_gain)
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Gain:"))
+        row2.addWidget(self.gain_edit)
+        row2.addWidget(gain_btn)
+        vbox.addLayout(row2)
+
+        self.cascade_controls = container
+        self.verticalLayout.addWidget(container)
+
+    def _remove_cascade_controls(self):
+        container = getattr(self, "cascade_controls", None)
+        if container is not None:
+            self.verticalLayout.removeWidget(container)
+            container.setParent(None)
+            container.deleteLater()
+            self.cascade_controls = None
+
+    def _apply_cascade_inttime(self):
+        text = self.inttime_edit.text().strip()
+        try:
+            value = float(text)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid input", f"'{text}' is not a valid number.")
+            return
+        try:
+            self.widget.hcam.update({'inttime': value})
+        except Exception as e:
+            QMessageBox.warning(self, "Camera error", f"Could not set integration time: {e}")
+
+    def _apply_cascade_gain(self):
+        text = self.gain_edit.text().strip()
+        try:
+            value = float(text)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid input", f"'{text}' is not a valid number.")
+            return
+        try:
+            self.widget.hcam.update({'gain': value})
+        except Exception as e:
+            QMessageBox.warning(self, "Camera error", f"Could not set gain: {e}")
 
     def _add_slider(self, name, slider, min_value, max_value, current_val):
         value_label = QLabel(str(current_val))
@@ -229,7 +474,7 @@ class Display_View(QWidget, Ui_Form):
         self.zy_plot.setData(self.z_y, self.y)
 
     def close(self):
-        if self.snapshot_or_live == "Live":
+        if self.snapshot_or_live == 1:
             self.widget.stop_live_view()
             self.widget.stop()
 
@@ -253,7 +498,7 @@ class Display_View(QWidget, Ui_Form):
         thickness = int(self.crosshair_width.value())
         #self.widget.draw_crosshair(x, y, thickness)
         self.widget.label.enable_crosshair(x, y, thickness)
-        if self.snapshot_or_live == "Snapshot":
+        if self.snapshot_or_live == 0:
             # Crosshair center coordinates
             x = int(self.crosshair_x.value())
             y = int(self.crosshair_y.value())
