@@ -41,6 +41,7 @@ class NanodriveAdwinConfocalPoint(Experiment):
     '''
 
     _DEFAULT_SETTINGS = [
+        Parameter('Current_Position', True, bool, 'turn on if you want to collect counts at the current position of the nanodrive'),
         Parameter('keyboard_control_nanodrive',
                   [Parameter('keyboard_control_on', False, bool, 'turn on for keyboard control of the nanodrive'),
                    Parameter('x_neg_key', 'a', str, 'negative x direction key'),
@@ -150,10 +151,14 @@ class NanodriveAdwinConfocalPoint(Experiment):
         # set to zero initially for smoother plotting
         count_rate_data = [0] * self.settings['graph_params']['length_data']
         raw_counts_data = [0] * self.settings['graph_params']['length_data']
-
-        x = self.settings['point']['x']
-        y = self.settings['point']['y']
-        z = self.settings['point']['z']
+        if self.settings['Current_Position']:
+            x = self.nd.read_probes('x_pos')
+            y = self.nd.read_probes('y_pos')
+            z = self.nd.read_probes('z_pos')
+        else:
+            x = self.settings['point']['x']
+            y = self.settings['point']['y']
+            z = self.settings['point']['z']
 
         num_cycles = self.settings['num_cycles']
         self.adw.set_int_var(10,num_cycles)
