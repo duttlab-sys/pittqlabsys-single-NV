@@ -554,7 +554,6 @@ class Experiment(QObject):
                 if device not in self.devices:
                     dev_name = device.name
                     setattr(structure_to_save.basic_data_devices, dev_name, device.get_data())
-
             save_data(filename, structure_to_save)
 
     def save_hdf5(self):
