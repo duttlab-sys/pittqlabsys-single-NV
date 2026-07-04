@@ -23,6 +23,7 @@ import pkgutil
 import numpy as np
 import h5py
 from pyparsing import empty
+import re
 
 
 def get_project_root() -> Path:
@@ -566,9 +567,15 @@ class MatlabSaver:
             value_list: List of values that can be made into an array for saving
             dtype_list: List of dtype touples for numpy array
         '''
-        #ensure the inputs are dictionaries
+        # ensure the inputs are dictionaries
         data_dic = dict(data_dic)
         settings_dic = dict(settings_dic)
+        # sanitize every key into a valid MATLAB struct field name (e.g. '3D_scan'
+        # -> 'x3D_scan') so savemat does not silently drop fields
+        data_dic = self._sanitize_keys(data_dic)
+        settings_dic = self._sanitize_keys(settings_dic)
+        if iterator_info_dic is not None:
+            iterator_info_dic = self._sanitize_keys(dict(iterator_info_dic))
         #list to store dictionary values
         values_list = []
         new_data_types_list = []
@@ -582,7 +589,7 @@ class MatlabSaver:
             field_shapes.append(value_shape)
             new_data_types_list.append((key, value_type, value_shape))
 
-            if value_type == 'f4' and value == None:
+            if value_type == 'f4' and value is None:
                 values_list.append(np.nan)
             else:
                 values_list.append(value)
@@ -873,6 +880,34 @@ class MatlabSaver:
         # Take max dimension-wise
         result = tuple(max(a, b) for a, b in zip(shape1_padded, shape2_padded))
         return result
+
+    def _sanitize_name(self, name):
+        '''
+        Make a single dictionary key a valid MATLAB struct field name. MATLAB field
+        names must start with a letter and contain only letters, digits, and
+        underscores, so any other character is replaced with '_' and a leading 'x' is
+        prepended when the name would start with a digit or underscore. This mirrors
+        MATLAB's own matlab.lang.makeValidName (e.g. '3D_scan' -> 'x3D_scan') and caps
+        the length at 63 characters (MATLAB's namelengthmax).
+        '''
+        name = re.sub(r'[^A-Za-z0-9_]', '_', str(name))
+        if name == '':
+            name = 'field'
+        if name[0].isdigit() or name[0] == '_':
+            name = 'x' + name
+        return name[:63]
+
+    def _sanitize_keys(self, d):
+        '''
+        Return a copy of dictionary d with every key run through _sanitize_name,
+        recursing into nested dictionaries so sub-struct field names are valid too.
+        Non-dict values are left untouched.
+        '''
+        clean = {}
+        for k, v in d.items():
+            clean_key = self._sanitize_name(k)
+            clean[clean_key] = self._sanitize_keys(v) if isinstance(v, dict) else v
+        return clean
 
 
 
