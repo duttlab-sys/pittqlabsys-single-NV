@@ -8,20 +8,28 @@ Author: Gurudev Dutt <gdutt@pitt.edu>
 Created: 2024
 License: GPL v2
 """
-
+import datetime
 import numpy as np
 import pyqtgraph as pg
 from scipy.optimize import curve_fit
 from scipy.signal import savgol_filter
 from typing import List, Dict, Any, Optional, Tuple
 import time
-
+from scipy.signal import savgol_filter, find_peaks   # add find_peaks
+from PyQt5.QtCore import Qt
 from src.core.experiment import Experiment
 from src.core.parameter import Parameter
+from src.core.struct_hdf5 import MyStruct, save_data, StructArray
 from src.Controller.sg384 import SG384Generator
 from src.Controller.adwin_gold import AdwinGoldDevice
 from src.Controller.nanodrive import MCLNanoDrive
 from src.core.adwin_helpers import setup_adwin_for_odmr, read_adwin_odmr_data
+import sys
+import os
+srcpath = os.path.realpath(r'C:\Users\Duttlab\Downloads\PythonExamples\Examples\SourceFiles')
+sys.path.append(srcpath)
+from teproteus import TEProteusAdmin as TepAdmin
+from tevisainst import TEVisaInst
 
 
 class ODMRSweepContinuousExperiment(Experiment):
@@ -59,12 +67,14 @@ class ODMRSweepContinuousExperiment(Experiment):
         ]),
         Parameter('microwave', [
             Parameter('power', -10.0, float, 'Microwave power in dBm', units='dBm'),
-            Parameter('step_freq', 1e6, float, 'Frequency step size in Hz', units='Hz')
+            Parameter('step_freq', 1e6, float, 'Frequency step size in Hz', units='Hz'),
+            Parameter('sweep_function', 'Triangle', str, 'sweep function')
         ]),
         Parameter('acquisition', [
             Parameter('integration_time', 0.001, float, 'Integration time per point in seconds', units='s'),
             Parameter('averages', 10, int, 'Number of sweep averages'),
             Parameter('settle_time', 0.01, float, 'Settle time between sweeps', units='s'),
+            Parameter('ramp_delay', 0.1, float, 'ramp delay', units='s'),
             Parameter('bidirectional', True, bool, 'Enable bidirectional sweeps (doubles acquisition efficiency)')
         ]),
         Parameter('laser', [
@@ -81,7 +91,8 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('smoothing', True, bool, 'Apply smoothing to data'),
             Parameter('smooth_window', 5, int, 'Smoothing window size'),
             Parameter('background_subtraction', True, bool, 'Subtract background')
-        ])
+        ]),
+        Parameter('filename', "ODMR_Sweep_Continuous", str, "file name to be saved")
     ]
     
     _DEVICES = {
@@ -124,6 +135,192 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.microwave = self.devices.get('microwave', {}).get('instance')
         self.adwin = self.devices.get('adwin', {}).get('instance')
         self.nanodrive = self.devices.get('nanodrive', {}).get('instance')
+        ###
+        # Connect to instrument(PXI)
+        sid = 3  # PXI slot of AWT on chassis
+        admin = TepAdmin()  # required to control PXI module
+        inst = admin.open_instrument(slot_id=sid)
+        resp = inst.send_scpi_query("*IDN?")  # Get the instrument's *IDN
+        print('connected to: ' + resp)  # Print *IDN
+
+        # initialize DAC
+        inst.send_scpi_cmd('*CLS; *RST')
+
+        # AWG channel
+        ch = 4  # everything after relates to CH 4
+        cmd = ':INST:CHAN {0}'.format(ch)
+        inst.send_scpi_cmd(cmd)
+        cmd = ':VOLT MAX'
+        rc = inst.send_scpi_cmd(cmd)
+        # cmd = ':VOLT {0}'.format(1)
+        # inst.send_scpi_cmd(cmd)
+
+        sampleRateDAC = 1.25E9
+        cmd = ':FREQ:RAST {0}'.format(sampleRateDAC)
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TRAC:DEL:ALL'  # Clear CH 4 Memory
+        inst.send_scpi_cmd(cmd)
+        cmd = ':INIT:CONT OFF'  # play waveform continuously
+        inst.send_scpi_cmd(cmd)
+
+        # scale to 16 bits
+        max_dac = 65535  # Max Dac
+        half_dac = max_dac / 2  # DC Level
+        data_type = np.uint16  # DAC data type
+
+        segnum = 1
+        amp = 1  # 0.3
+        # must be a multiple of 64 (corresponds to 300 ns)
+        segLen = 64000
+        dacWaveDC = amp * np.ones(segLen)
+        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
+        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
+        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TRAC:SEL {0}'.format(segnum)
+        inst.send_scpi_cmd(cmd)
+
+        inst.timeout = 30000  # increase
+        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
+        inst.timeout = 10000  # return to normal
+
+        # Create and download a second Segment
+        segnum = 2
+        amp = 1
+        # must be a multiple of 64 (corresponds to 500 ns)
+        segLen = 64000
+        dacWaveDC = amp * np.ones(segLen)
+        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
+        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
+        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TRAC:SEL {0}'.format(segnum)
+        inst.send_scpi_cmd(cmd)
+
+        inst.timeout = 30000  # increase
+        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
+        inst.timeout = 10000  # return to normal
+
+        cmd = ':VOLT:OFFS 0.46'
+        rc = inst.send_scpi_cmd(cmd)
+        print(f"offset: {inst.send_scpi_query(":VOLT:OFFS?")}")
+        # Create a Task Table
+        cmd = ':TASK:COMP:LENG 4'  # set task table length
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:SEL 1'  # set task 1
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:TYPE:STAR'
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:SEGM 1'
+        inst.send_scpi_cmd(cmd)  # shelving pulse
+        cmd = ':TASK:COMP:NEXT1 2'
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:SEL 2'  # set task 2
+        inst.send_scpi_cmd(cmd)
+        cmd = f':TASK:COMP:TYPE:SEQ'
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:SEGM 2'
+        inst.send_scpi_cmd(cmd)  # ionization pulse
+        cmd = ':TASK:COMP:NEXT1 1'
+        inst.send_scpi_cmd(cmd)
+        cmd = f':TASK:COMP:SEQ {1}'
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:WRITE'  # write to FPGA
+        inst.send_scpi_cmd(cmd)
+        cmd = ':SOUR:FUNC:MODE TASK'
+        inst.send_scpi_cmd(cmd)
+        cmd = ':OUTP ON'
+        rc = inst.send_scpi_cmd(cmd)
+
+        ###
+        # AWG channel
+        ch = 1 # everything after relates to CH 4
+        cmd = ':INST:CHAN {0}'.format(ch)
+        inst.send_scpi_cmd(cmd)
+        cmd = 1.0
+        rc = inst.send_scpi_cmd(cmd)
+        # cmd = ':VOLT {0}'.format(1)
+        # inst.send_scpi_cmd(cmd)
+
+        sampleRateDAC = 1.25E9
+        cmd = ':FREQ:RAST {0}'.format(sampleRateDAC)
+        inst.send_scpi_cmd(cmd)
+        cmd = ':INIT:CONT OFF'  # play waveform continuously
+        inst.send_scpi_cmd(cmd)
+
+        # scale to 16 bits
+        max_dac = 65535  # Max Dac
+        half_dac = max_dac / 2  # DC Level
+        data_type = np.uint16  # DAC data type
+
+        segnum = 1
+        amp = 1  # 0.3
+        # must be a multiple of 64 (corresponds to 300 ns)
+        segLen = 64000
+        dacWaveDC = amp * np.ones(segLen)
+        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
+        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
+        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TRAC:SEL {0}'.format(segnum)
+        inst.send_scpi_cmd(cmd)
+
+        inst.timeout = 30000  # increase
+        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
+        inst.timeout = 10000  # return to normal
+
+        # Create and download a second Segment
+        segnum = 2
+        amp = 1
+        # must be a multiple of 64 (corresponds to 500 ns)
+        segLen = 64000
+        dacWaveDC = amp * np.ones(segLen)
+        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
+        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
+        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TRAC:SEL {0}'.format(segnum)
+        inst.send_scpi_cmd(cmd)
+
+        inst.timeout = 30000  # increase
+        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
+        inst.timeout = 10000  # return to normal
+
+        cmd = ':VOLT:OFFS 0.46'
+        rc = inst.send_scpi_cmd(cmd)
+        print(f"offset: {inst.send_scpi_query(":VOLT:OFFS?")}")
+        # Create a Task Table
+        cmd = ':TASK:COMP:LENG 4'  # set task table length
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:SEL 1'  # set task 1
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:TYPE:STAR'
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:SEGM 1'
+        inst.send_scpi_cmd(cmd)  # shelving pulse
+        cmd = ':TASK:COMP:NEXT1 2'
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:SEL 2'  # set task 2
+        inst.send_scpi_cmd(cmd)
+        cmd = f':TASK:COMP:TYPE:SEQ'
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:SEGM 2'
+        inst.send_scpi_cmd(cmd)  # ionization pulse
+        cmd = ':TASK:COMP:NEXT1 1'
+        inst.send_scpi_cmd(cmd)
+        cmd = f':TASK:COMP:SEQ {1}'
+        inst.send_scpi_cmd(cmd)
+        cmd = ':TASK:COMP:WRITE'  # write to FPGA
+        inst.send_scpi_cmd(cmd)
+        cmd = ':SOUR:FUNC:MODE TASK'
+        inst.send_scpi_cmd(cmd)
+        cmd = ':OUTP ON'
+        rc = inst.send_scpi_cmd(cmd)
+        ###
+
+        inst.close_instrument()
+        admin.close_inst_admin()
+        ###
         
         if not self.microwave:
             raise ValueError("SG384 microwave generator is required")
@@ -181,15 +378,27 @@ class ODMRSweepContinuousExperiment(Experiment):
         # CRITICAL: Disable internal sweep - let ADwin DAC control frequency via FM input
         self.microwave.set_modulation_type('Freq sweep')  # Use FM input, not internal sweep
         self.microwave.set_modulation_function("External")  # Don't enable internal modulation
-
+        self.microwave.set_sweep_function('External')     # SFNC 5
+        # set external mod input coupling = DC  (front panel, or add COUP to driver)
         try:
             modfunc = self.microwave.read_probes('modulation_function')
             modtype = self.microwave.read_probes("modulation_type")
+            sweepfunc = self.microwave.read_probes("sweep_function")
+            print(f"Modulation function: {modfunc}")
+            print(f"Modulation type: {modtype}")
+            print(f"Sweep function: {sweepfunc}")
+            coupling = self.microwave._query("COUP?")
+            if coupling == 0:
+                print("Coupling is AC")
+            else:
+                print("Coupling is DC")
             if modtype == "Freq sweep":
+                print("Frequency sweep mode")
                 print(f"SG384 setup for phase continuous sweep")
                 self.log(
                     f"SG384 setup for phase continuous sweep")
             else:
+                print("Unknown or Incorrect modulation type Sweep mode")
                 raise IOError(f"Unknown or Incorrect modulation type: {modtype}")
             if modfunc == "External":
                 print(f"SG384 setup for external DAC control:{center_freq/1e9:.3f} GHz ± {deviation/1e6:.1f} MHz")
@@ -255,6 +464,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             
             # Par_3: Dwell/integration time in microseconds
             self.log(f"🔍 Setting Par_3 (DWELL_US) = {self.integration_time_us}")
+            print(f"🔍 Setting Par_3 (DWELL_US) = {self.integration_time_us}")
             self.adwin.set_int_var(3, self.integration_time_us)
             
             # Par_4: Edge mode (0=rising, 1=falling) - use rising like debug script
@@ -456,9 +666,13 @@ class ODMRSweepContinuousExperiment(Experiment):
             
             # Calculate sweep parameters first
             self._calculate_sweep_parameters()
-            
+            start_time = datetime.datetime.now()
+            self.s_t = start_time.strftime("%m_%d_%Y_%H:%M:%S")
+
             # Run multiple sweep averages
             self._run_sweep_averages()
+            end_time = datetime.datetime.now()
+            self.e_t = end_time.strftime("%m_%d_%Y_%H:%M:%S")
             
             # Analyze the data
             self._analyze_data()
@@ -467,7 +681,9 @@ class ODMRSweepContinuousExperiment(Experiment):
             self._store_results_in_data()
             
             self.log("ODMR Phase Continuous Sweep Experiment completed successfully")
-            
+            if self.settings['save']:
+                self.save_hdf5()
+            self.cleanup()
         except Exception as e:
             self.log(f"Error in ODMR sweep experiment: {e}")
             raise
@@ -476,50 +692,47 @@ class ODMRSweepContinuousExperiment(Experiment):
         """Run multiple sweep averages."""
         averages = self.settings['acquisition']['averages']
         settle_time = self.settings['acquisition']['settle_time']
-        
+
         self.log(f"Starting sweep averages: {averages} sweeps")
-        
-        # Preallocate arrays for bidirectional sweep data
-        n_steps = self.num_steps         # 300
-        half = n_steps - 1               # 299 (each direction)
-        
+
+        n_steps = self.num_steps
+        half = n_steps - 1               # points per direction
+
         # Preallocate once (before the averages loop)
         all_forward = np.empty((averages, half), dtype=np.int32)
         all_reverse = np.empty((averages, half), dtype=np.int32)
         all_v_fwd = np.empty((averages, half), dtype=np.float32)
         all_v_rev = np.empty((averages, half), dtype=np.float32)
-        
+
         for avg in range(averages):
             self.log(f"Running sweep {avg + 1}/{averages}")
-            
-            # Run single sweep - get raw data
+
             counts, volts = self._run_single_sweep()
-            
-            # Split into equal halves (299 + 299 = 598)
+
             n_points = len(counts)
             assert n_points == 2 * n_steps - 2, f"Expected {2 * n_steps - 2} points, got {n_points}"
-            
-            forward = counts[:half]
-            reverse = counts[half:]
-            v_fwd = volts[:half]
-            v_rev = volts[half:]
-            
-            # Store data
-            all_forward[avg, :] = forward
-            all_reverse[avg, :] = reverse
-            all_v_fwd[avg, :] = v_fwd
-            all_v_rev[avg, :] = v_rev
-            
-            # Settle time between sweeps
+
+            all_forward[avg, :] = counts[:half]
+            all_reverse[avg, :] = counts[half:]
+            all_v_fwd[avg, :] = volts[:half]
+            all_v_rev[avg, :] = volts[half:]
+
             if avg < averages - 1:
                 time.sleep(settle_time)
-        
+
         # Average the data
         self.counts_forward = np.mean(all_forward, axis=0)
-        self.counts_reverse = np.mean(all_reverse, axis=0)
+        self.counts_reverse = np.mean(all_reverse, axis=0)[::-1]     # flip to align with forward
         self.counts_averaged = (self.counts_forward + self.counts_reverse) / 2
-        self.voltages = np.mean(all_v_fwd, axis=0)  # Use forward voltage for main voltage array
-        
+        self.voltages = np.mean(all_v_fwd, axis=0)
+
+        # keep every individual sweep so they can be saved / inspected
+        # (reverse stored flipped so each row aligns in frequency with forward)
+        self.all_forward = all_forward
+        self.all_reverse = all_reverse[:, ::-1]
+        self.all_v_fwd = all_v_fwd
+        self.all_v_rev = all_v_rev
+
         self.log("Sweep averages completed")
     
     def _run_single_sweep(self):
@@ -647,26 +860,11 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.adwin.set_int_var(20, 0)
         
         return counts, volts
-    
+
     def _analyze_data(self):
-        """Analyze the ODMR sweep data."""
         self.log("Analyzing ODMR sweep data...")
-        
-        # Use averaged data for analysis
-        data = self.counts_averaged
-        
-        # Apply smoothing if enabled
-        if self.settings['analysis']['smoothing']:
-            data = self._smooth_data(data)
-        
-        # Subtract background if enabled
-        if self.settings['analysis']['background_subtraction']:
-            data = self._subtract_background(data)
-        
-        # Fit resonances if enabled
         if self.settings['analysis']['auto_fit']:
             self._fit_resonances()
-        
         self.log("Data analysis completed")
     
     def _monitor_sweep_progress(self, total_wait_time: float):
@@ -731,70 +929,60 @@ class ODMRSweepContinuousExperiment(Experiment):
         # Simple background subtraction using minimum value
         background = np.min(data)
         return data - background
-    
+
+
     def _fit_resonances(self):
-        """Fit Lorentzian functions to identify resonances."""
         try:
-            # Find peaks (simple approach - can be enhanced)
             peaks = self._find_peaks()
-            
-            if len(peaks) == 0:
-                self.log("No peaks found for fitting")
-                return
-            
-            # Fit each peak with Lorentzian
-            fit_params = []
-            for peak_idx in peaks:
-                # Define fitting range around peak
-                fit_range = 10  # points on each side
-                start_idx = max(0, peak_idx - fit_range)
-                end_idx = min(len(self.frequencies), peak_idx + fit_range)
-                
-                x_fit = self.frequencies[start_idx:end_idx]
-                y_fit = self.counts_averaged[start_idx:end_idx]
-                
-                # Initial guess for Lorentzian parameters
-                amplitude = np.max(y_fit) - np.min(y_fit)
-                center = self.frequencies[peak_idx]
-                width = 1e6  # 1 MHz initial guess
-                offset = np.min(y_fit)
-                
-                initial_guess = [amplitude, center, width, offset]
-                
+            contrast, _ = self._prepare_contrast()
+            self.fit_parameters, self.resonance_frequencies = [], []
+            for pk in peaks:
+                lo, hi = max(0, pk - 15), min(len(self.frequencies), pk + 15)
+                x, yc = self.frequencies[lo:hi], contrast[lo:hi]
+                p0 = [-(1.0 - yc.min()), self.frequencies[pk], 5e6, 1.0]  # dip: neg amp
                 try:
-                    # Fit Lorentzian
-                    popt, pcov = curve_fit(self._lorentzian_function, x_fit, y_fit, 
-                                         p0=initial_guess, maxfev=1000)
-                    fit_params.append(popt)
-                    
-                    # Store resonance frequency
-                    if self.resonance_frequencies is None:
-                        self.resonance_frequencies = []
-                    self.resonance_frequencies.append(popt[1])
-                    
+                    popt, _ = curve_fit(self._lorentzian_function, x, yc, p0=p0, maxfev=5000)
+                    if x[0] <= popt[1] <= x[-1] and popt[0] < 0:  # in-window AND a dip
+                        self.fit_parameters.append(popt)
+                        self.resonance_frequencies.append(popt[1])
                 except Exception as e:
-                    self.log(f"Failed to fit peak at {center/1e9:.3f} GHz: {e}")
-            
-            self.fit_parameters = fit_params
-            self.log(f"Fitted {len(fit_params)} resonances")
-            
+                    self.log(f"Fit failed near {self.frequencies[pk] / 1e9:.3f} GHz: {e}")
+            self.log(f"Fitted {len(self.resonance_frequencies)} resonance(s): "
+                     f"{[f'{r / 1e9:.4f}' for r in self.resonance_frequencies]}")
         except Exception as e:
             self.log(f"Error in resonance fitting: {e}")
-    
-    def _find_peaks(self) -> List[int]:
-        """Find peaks in the ODMR spectrum."""
-        # Simple peak finding using local maxima
-        peaks = []
-        data = self.counts_averaged
-        
-        for i in range(1, len(data) - 1):
-            if data[i] > data[i-1] and data[i] > data[i+1]:
-                # Check if it's significantly above background
-                threshold = np.mean(data) + 2 * np.std(data)
-                if data[i] > threshold:
-                    peaks.append(i)
-        
-        return peaks
+
+    def _find_peaks(self):
+        contrast, noise = self._prepare_contrast()
+        df = abs(self.frequencies[1] - self.frequencies[0]) if len(self.frequencies) > 1 else 1e6
+        min_prom = max(3.0 * noise, 0.003)  # >=3σ dip, or 0.3% — TUNE the 3.0
+        min_width = max(2, int(2e6 / df))  # >= ~2 MHz linewidth
+        min_dist = max(3, int(5e6 / df))  # >= ~5 MHz apart
+        idx, props = find_peaks(1.0 - contrast,  # invert: dips -> peaks
+                                prominence=min_prom, width=min_width, distance=min_dist)
+        order = np.argsort(props['prominences'])[::-1]  # strongest first
+        idx = np.sort(idx[order][:4])
+        self.log(f"Found {len(idx)} dip(s) (noise={noise:.4f}, min_prom={min_prom:.4f})")
+        return list(idx)
+
+    def _prepare_contrast(self):
+        """Smoothed, baseline-flattened contrast (≈1.0 off-resonance, <1 at a dip)."""
+        y = np.asarray(self.counts_averaged, dtype=float)
+        if self.settings['analysis'].get('smoothing', True):
+            w = int(self.settings['analysis'].get('smooth_window', 5))
+            if 3 <= w < len(y):
+                if w % 2 == 0: w += 1  # savgol needs odd window
+                y = savgol_filter(y, w, 3)
+        x = np.arange(len(y))
+        mask = np.ones(len(y), bool)  # iteratively fit baseline,
+        for _ in range(3):  # masking out the dips
+            base = np.polyval(np.polyfit(x[mask], y[mask], 2), x)
+            resid = y - base
+            mask = resid > -2.0 * np.std(resid[mask])
+        base = np.polyval(np.polyfit(x[mask], y[mask], 2), x)
+        contrast = y / base
+        noise = np.std(contrast[mask])  # fractional noise on flat part
+        return contrast, noise
     
     def _lorentzian_function(self, x: np.ndarray, amplitude: float, center: float, 
                             width: float, offset: float) -> np.ndarray:
@@ -812,50 +1000,76 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.data['num_steps'] = self.num_steps
         self.data['fit_parameters'] = self.fit_parameters
         self.data['resonance_frequencies'] = self.resonance_frequencies
-        self.data['settings'] = self.settings
-    
-    def _plot(self, axes_list: List[pg.PlotItem]):
-        """Plot the ODMR sweep data."""
-        if len(axes_list) < 1:
+
+    def _plot(self, axes_list):
+        """Plot into pyqtgraph. The GUI passes GraphicsLayoutWidget containers,
+        so we fetch/create a PlotItem from each before plotting."""
+        if not axes_list:
             return
-        
-        # Clear previous plots
-        for ax in axes_list:
-            ax.clear()
-        
-        # Plot main ODMR spectrum
-        if self.frequencies is not None and self.counts_averaged is not None:
-            ax = axes_list[0]
-            
-            # Plot forward and reverse sweeps
-            ax.plot(self.frequencies / 1e9, self.counts_forward, 'b-', linewidth=1, 
-                   label='Forward Sweep', alpha=0.7)
-            ax.plot(self.frequencies / 1e9, self.counts_reverse, 'g-', linewidth=1, 
-                   label='Reverse Sweep', alpha=0.7)
-            
-            # Plot averaged data
-            ax.plot(self.frequencies / 1e9, self.counts_averaged, 'r-', linewidth=2, 
-                   label='Averaged Spectrum')
-            
-            # Plot resonance frequencies if available
-            if self.resonance_frequencies:
-                for i, freq in enumerate(self.resonance_frequencies):
-                    ax.axvline(x=freq/1e9, color='orange', linestyle='--', 
-                              label=f'Resonance {i+1}: {freq/1e9:.3f} GHz')
-            
-            ax.set_xlabel('Frequency (GHz)')
-            ax.set_ylabel('Photon Counts')
-            ax.set_title('ODMR Phase Continuous Sweep Spectrum')
-            ax.legend()
-            ax.grid(True)
+
+        def _plot_item(w):
+            # already a PlotItem/PlotWidget we can draw on
+            if hasattr(w, "plot") and hasattr(w, "clear"):
+                return w
+            # GraphicsLayoutWidget: reuse its existing PlotItem or add one
+            if hasattr(w, "ci") and hasattr(w, "addPlot"):
+                items = [it for it in w.ci.items if isinstance(it, pg.PlotItem)]
+                return items[0] if items else w.addPlot(row=0, col=0)
+            return None
+
+        axes = [pi for pi in (_plot_item(w) for w in axes_list) if pi is not None]
+        if not axes:
+            return
+
+        ax = axes[0]
+        ax.clear()
+
+        if self.frequencies is None or self.counts_averaged is None:
+            return
+        # ... keep the rest of your _plot body unchanged from here ...
+
+        f_ghz = self.frequencies / 1e9
+
+        # pyqtgraph pens (NOT matplotlib 'b-'/linewidth/alpha)
+        ax.plot(f_ghz, self.counts_forward, pen=None, symbol='o', symbolSize=5,
+                symbolBrush='b', symbolPen=None, name='Forward')
+        ax.plot(f_ghz, self.counts_reverse, pen=None, symbol='o', symbolSize=5,
+                symbolBrush='g', symbolPen=None, name='Reverse')
+        ax.plot(f_ghz, self.counts_averaged, pen=None, symbol='o', symbolSize=6,
+                symbolBrush='r', symbolPen=None, name='Averaged')
+
+        if self.resonance_frequencies:
+            for freq in self.resonance_frequencies:
+                ax.addItem(pg.InfiniteLine(pos=freq / 1e9, angle=90,
+                                           pen=pg.mkPen('y', style=Qt.DashLine)))
+
+        # pyqtgraph labels/title (NOT set_xlabel/set_ylabel/set_title/grid)
+        ax.setLabel('bottom', 'Frequency (GHz)')
+        ax.setLabel('left', 'Photon Counts')
+        ax.setTitle('ODMR Continuous Sweep Spectrum')
+        ax.showGrid(x=True, y=True, alpha=0.3)
+
+        # second graph: voltage ramp, if the GUI gave us a second axis
+        if len(axes) > 1:
+            ax2 = axes[1]
+            ax2.clear()
+            if self.voltages is not None:
+                ax2.plot(f_ghz, self.voltages, pen=None, symbol='o', symbolSize=5,
+                         symbolBrush='m', symbolPen=None,
+                         name='Voltage Ramp (SG384 FM Input)')
+                ax2.setLabel('bottom', 'Frequency (GHz)')
+                ax2.setLabel('left', 'Voltage (V)')
+                ax2.setTitle('SG384 FM Input Voltage Ramp')
+                ax2.showGrid(x=True, y=True, alpha=0.3)
     
     def _update(self, axes_list: List[pg.PlotItem]):
         """Update the plots with new data."""
         self._plot(axes_list)
     
-    def get_axes_layout(self, figure_list: List[str]) -> List[List[str]]:
-        """Get the layout of plot axes."""
-        return [['odmr_sweep_spectrum']]
+    def get_axes_layout(self, figure_list):
+        """Return the actual graph objects to plot into (pyqtgraph PlotWidgets),
+        not string labels. The GUI passes the two graphs as figure_list."""
+        return figure_list
     
     def get_experiment_info(self) -> Dict[str, Any]:
         """Get information about the experiment."""
@@ -870,4 +1084,52 @@ class ODMRSweepContinuousExperiment(Experiment):
             'num_steps': self.num_steps,
             'averages': self.settings['acquisition']['averages'],
             'integration_time': f"{self.settings['acquisition']['integration_time']*1e3:.1f} ms"
-        } 
+        }
+
+    def save_hdf5(self):
+        """this function defines its custom data and metadata to be saved and then calls the
+        save_hdf_data function that is in the parent Experiment class, which adds the external
+        devices in case you ever check the Get Basic Data checkbox in the GUI"""
+        structure_to_save = MyStruct()
+        frequencies = self.data['frequencies'] = self.frequencies
+        counts_forward = self.data['counts_forward'] = self.counts_forward
+        counts_reverse = self.data['counts_reverse'] = self.counts_reverse
+        counts_averaged = self.data['counts_averaged'] = self.counts_averaged
+        voltages = self.data['voltages'] = self.voltages
+        sweep_time = self.data['sweep_time'] = self.sweep_time
+        num_steps = self.data['num_steps'] = self.num_steps
+        fit_parameters = self.data['fit_parameters'] = self.fit_parameters
+        resonance_frequencies = self.data['resonance_frequencies'] = self.resonance_frequencies
+        settings = self.settings
+        for k in self.data:
+            print("DATA KEY:", k, "->", type(self.data[k]).__name__)
+
+        # per-sweep raw data (averages × points). Reverse stack is in raw
+        # acquisition order; flip along axis=1 if you want it frequency-aligned.
+        all_forward = getattr(self, "all_forward", None)
+        all_reverse = getattr(self, "all_reverse", None)
+        all_v_fwd = getattr(self, "all_v_fwd", None)
+
+        structure_to_save.data = MyStruct(
+            frequencies=frequencies,
+            counts_forward=counts_forward,  # averaged
+            counts_reverse=counts_reverse,  # averaged (flipped)
+            counts_averaged=counts_averaged,  # averaged
+            voltages=voltages,
+            sweep_time=sweep_time,
+            num_steps=num_steps,
+            fit_parameters=fit_parameters,
+            resonance_frequencies=resonance_frequencies,
+            # NEW: all individual sweeps
+            all_counts_forward=all_forward,  # shape (averages, half)
+            all_counts_reverse=all_reverse,  # shape (averages, half)
+            all_voltages_forward=all_v_fwd,  # shape (averages, half)
+            n_averages=int(self.settings['acquisition']['averages']),
+        )
+        structure_to_save.meta = MyStruct(
+            settings=settings,
+            end_time=self.e_t,
+            start_time=self.s_t
+        )
+        structure_to_save.devices = self.devices
+        self.save_hdf_data(structure_to_save)
