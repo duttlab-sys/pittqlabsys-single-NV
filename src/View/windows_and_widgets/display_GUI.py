@@ -1,9 +1,10 @@
 # Created by Jannet Trabelsi on 2025-10-10
+# UI rebuilt in code (no .ui / Ui_Form) with responsive layouts; plot + camera
+# sizes are driven by the actual frame dimensions instead of hardcoded 680x510.
 from __future__ import annotations
 import sys
 from src.View.windows_and_widgets.camera_widget import Amscope_Camera_View
 from src.View.windows_and_widgets.camera_widget import ROPER_CASCADE_CCD_View
-from src.View.windows_and_widgets.display_design import Ui_Form
 import pyqtgraph as pg
 import numpy as np
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
@@ -13,19 +14,22 @@ from PyQt5.QtWidgets import (
     QLabel,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QMessageBox,
     QSlider,
     QLineEdit,
     QPushButton,
+    QComboBox,
+    QDoubleSpinBox,
+    QSpinBox,
+    QCheckBox,
 )
-# Assuming the .ui file is converted to design.py
-#To convert display_design.ui to .py, paste this into the terminal:
-# pyuic5 -x display_design.ui -o display_design.py
 
-# constants:
-class Display_View(QWidget, Ui_Form):
+
+class Display_View(QWidget):
     """
-    This is the widget of the positioning stages. It allows us to control positioning devices using buttons and LineEdits
+    Display widget: live/snapshot camera view with z-vs-x / z-vs-y line plots
+    and crosshair controls. All widgets are created in code (no .ui file).
     """
     x_crosshair = pyqtSignal(int)
     y_crosshair = pyqtSignal(int)
@@ -33,50 +37,55 @@ class Display_View(QWidget, Ui_Form):
     AUTOTUNE_TARGET_MIN = 15000
     AUTOTUNE_TARGET_MAX = 39000
     AUTOTUNE_SATURATION = 40000
+    # microns per pixel (from calibration)
+    MICRONS_PER_PIXEL_H = 0.3064457122  # horizontal -> z_vs_x_widget (x axis)
+    MICRONS_PER_PIXEL_V = 0.3045589354  # vertical   -> z_vs_y_widget (y axis)
     # both arrays ordered from LEAST to MOST exposure
     ROPER_NOGAIN_SEQUENCE = [10, 50, 100, 150, 200, 300, 500]  # inttime (us)
     ROPER_GAIN_SEQUENCE = [(10, 1), (50, 1), (100, 1), (100, 100),
                            (100, 500), (100, 1000), (100, 1500),
-                           (100, 2000), (100, 2500), (100, 3000), (150, 3000), (200, 3000), (300, 3000), (400, 3000), (500, 3000)]
+                           (100, 2000), (100, 2500), (100, 3000), (150, 3000),
+                           (200, 3000), (300, 3000), (400, 3000), (500, 3000)]
     update_get_img = pyqtSignal(int)
-    def __init__(self, display_choice = "MU300", snapshot_or_live = 1, parent=None):
+
+    # default plot "thickness" (the short dimension of each strip plot)
+    _ZX_HEIGHT = 150   # z_vs_x is wide and short
+    _ZY_WIDTH = 165    # z_vs_y is tall and narrow
+
+    def __init__(self, display_choice="MU300", snapshot_or_live=1, parent=None):
         super().__init__(parent)
-        self.setupUi(self)
+        self._build_ui()                      # <-- replaces self.setupUi(self)
         self.widget = None
-        self.cascade_controls = None  # container for the Roper line-edits/buttons
+        self.cascade_controls = None          # container for the Roper line-edits/buttons
+        self._suppress_crosshair_signal = False
         self._autotune_mode = None
         self._autotune_seq = None
         self._autotune_index = 0
-        #self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        if hasattr(self, 'horizontalLayout'):
-            self.horizontalLayout.setContentsMargins(0, 0, 0, 0)
-            self.horizontalLayout.setSpacing(0)
         self.parent_widget.setStyleSheet("background-color: white;")
 
         self.display_choice = display_choice
         self.snapshot_or_live = snapshot_or_live
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.acquire_and_plot_data)
+
         # plots
         self.z_vs_x_plot = pg.PlotWidget(title="z vs x")
         self.z_vs_x_plot.setLabel('left', 'z')
         self.z_vs_x_plot.setLabel('bottom', 'x')
         self.z_vs_x_widget.setLayout(QVBoxLayout())
+        self.z_vs_x_widget.layout().setContentsMargins(0, 0, 0, 0)
         self.z_vs_x_widget.layout().addWidget(self.z_vs_x_plot)
 
-        # Set up plot
         self.z_vs_y_plot = pg.PlotWidget(title="z vs y")
-        self.z_vs_y_plot.setLabel('left', 'y')  # y is now on vertical axis
-        self.z_vs_y_plot.setLabel('top', 'z')  # z is now on horizontal axis
-
-        # Invert the Y-axis to make it go top to bottom
-        self.z_vs_y_plot.invertY(True)
-
-        # Add the plot to your layout
+        self.z_vs_y_plot.setLabel('left', 'y')   # y on vertical axis
+        self.z_vs_y_plot.setLabel('top', 'z')    # z on horizontal axis
+        self.z_vs_y_plot.invertY(True)           # top to bottom
         self.z_vs_y_widget.setLayout(QVBoxLayout())
+        self.z_vs_y_widget.layout().setContentsMargins(0, 0, 0, 0)
         self.z_vs_y_widget.layout().addWidget(self.z_vs_y_plot)
-        self.crosshair_y.setValue(0) # THIS WILL LATER LOAD WITH CONFIG FILE
-        self.crosshair_x.setValue(0) # THIS WILL LATER LOAD WITH CONFIG FILE
+
+        self.crosshair_y.setValue(0)   # THIS WILL LATER LOAD WITH CONFIG FILE
+        self.crosshair_x.setValue(0)   # THIS WILL LATER LOAD WITH CONFIG FILE
         self.crosshair_width.setValue(1)
 
         # Initialize data arrays for plotting
@@ -85,11 +94,14 @@ class Display_View(QWidget, Ui_Form):
         self.z_x = []
         self.z_y = []
 
-        # Initialize plot
+        # Initialize plot curves
         self.zx_plot = self.z_vs_x_plot.plot(pen='r', name='zx')
         self.zy_plot = self.z_vs_y_plot.plot(pen='r', name='zy')
-        self.w = 680
-        self.h = 510
+
+        # image dimensions: start at 0, filled in from the real camera frame
+        self.w = 0
+        self.h = 0
+
         # Connect buttons to functions
         self.crosshairButton.clicked.connect(self.crosshair)
         self.center_Button.clicked.connect(self.center)
@@ -97,10 +109,7 @@ class Display_View(QWidget, Ui_Form):
         self.AutoTune_checkBox.toggled.connect(self.on_autotune_toggled)
         self.connect_to_display()
         self.start()
-        self.crosshair_x.setMaximum(self.w)
-        self.crosshair_x.setMinimum(0.1)
-        self.crosshair_y.setMaximum(self.h)
-        self.crosshair_y.setMinimum(0.1)
+        self._apply_crosshair_ranges()
         self.widget.mouseMoved.connect(self.on_widget_hover)
         self.widget.mouseClicked.connect(self.on_widget_click)
         self.crosshair_frozen = False  # Default: move with hover
@@ -109,9 +118,202 @@ class Display_View(QWidget, Ui_Form):
         self.crosshair_width.valueChanged.connect(self.on_crosshair_changed)
         self.x_selected = 0
         self.y_selected = 0
+        self.Rotate_Button.clicked.connect(self.rotate_image)
+        self.axis_choice.currentTextChanged.connect(self.on_axis_choice_changed)
+        self._apply_axis_labels()
+        self._match_plot_sizes()
+
+    # ============================================================
+    # UI construction (was previously the generated Ui_Form)
+    # ============================================================
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self.parent_widget = QWidget()
+        outer.addWidget(self.parent_widget)
+
+        grid = QGridLayout(self.parent_widget)
+        grid.setContentsMargins(6, 6, 6, 6)
+        grid.setSpacing(6)
+
+        # plot containers
+        self.z_vs_x_widget = QWidget()
+        self.z_vs_x_widget.setFixedHeight(self._ZX_HEIGHT)
+        self.z_vs_y_widget = QWidget()
+        self.z_vs_y_widget.setFixedWidth(self._ZY_WIDTH)
+
+        # crosshair control panel (top-right)
+        self._build_crosshair_panel()
+
+        # camera container: verticalLayout holds the camera view + cascade controls
+        self.camera_container = QWidget()
+        self.verticalLayout = QVBoxLayout(self.camera_container)
+        self.verticalLayout.setContentsMargins(0, 0, 0, 0)
+        self.verticalLayout.setSpacing(4)
+        self.verticalLayout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+        # MU300 sliders panel (bottom, full width)
+        self._build_sliders_panel()
+
+        # layout:
+        #   row0: [ z vs x ]      [ crosshair panel ]
+        #   row1: [ camera   ]    [ z vs y          ]
+        #   row2: [ MU300 sliders (spanning)        ]
+        grid.addWidget(self.z_vs_x_widget,   0, 0)
+        grid.addWidget(self.crosshair_panel, 0, 1)
+        grid.addWidget(self.camera_container, 1, 0, Qt.AlignTop | Qt.AlignLeft)
+        grid.addWidget(self.z_vs_y_widget,   1, 1, Qt.AlignTop)
+        grid.addWidget(self.sliders_panel,   2, 0, 1, 2)
+
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 0)
+        grid.setRowStretch(1, 1)
+
+    def _build_crosshair_panel(self):
+        self.crosshair_panel = QWidget()
+        g = QGridLayout(self.crosshair_panel)
+        g.setContentsMargins(4, 4, 4, 4)
+        g.setSpacing(4)
+
+        self.crosshairButton = QPushButton("+")
+        self.clear_crosshair_Button = QPushButton("Clear")
+        self.axis_choice = QComboBox()
+        self.axis_choice.addItem("Pixels")
+        self.axis_choice.addItem("Microns")
+
+        self.crosshair_width = QSpinBox()
+        self.crosshair_width.setMaximum(10000)
+        self.step_label = QLabel("step")
+        self.crosshair_step = QLineEdit()
+
+        self.x_label = QLabel("x:")
+        self.crosshair_x = QDoubleSpinBox()
+        self.crosshair_x.setDecimals(2)
+        self.crosshair_x.setMaximum(1e9)
+        self.y_label = QLabel("y:")
+        self.crosshair_y = QDoubleSpinBox()
+        self.crosshair_y.setDecimals(2)
+        self.crosshair_y.setMaximum(1e9)
+
+        self.center_Button = QPushButton("center")
+        self.Rotate_Button = QPushButton("Rot")
+        self.AutoTune_checkBox = QCheckBox("AutoTune")
+
+        g.addWidget(self.crosshairButton,        0, 0)
+        g.addWidget(self.clear_crosshair_Button, 0, 1)
+        g.addWidget(self.axis_choice,            0, 2)
+        g.addWidget(self.crosshair_width,        1, 0)
+        g.addWidget(self.step_label,             1, 1)
+        g.addWidget(self.crosshair_step,         1, 2)
+        g.addWidget(self.x_label,                2, 0)
+        g.addWidget(self.crosshair_x,            2, 1, 1, 2)
+        g.addWidget(self.y_label,                3, 0)
+        g.addWidget(self.crosshair_y,            3, 1, 1, 2)
+        g.addWidget(self.center_Button,          4, 0)
+        g.addWidget(self.Rotate_Button,          4, 1)
+        g.addWidget(self.AutoTune_checkBox,      4, 2)
+        g.setRowStretch(5, 1)
+
+    def _build_sliders_panel(self):
+        # the 9 MU300 sliders, named horizontalSlider_10 .. _18 (used by build_sliders)
+        self.sliders_panel = QWidget()
+        g = QGridLayout(self.sliders_panel)
+        g.setContentsMargins(4, 4, 4, 4)
+        names = ["exposure gain", "exposure time", "brightness", "saturation",
+                 "contrast", "Gamma", "Temp", "Tint", "Hue"]
+        for k, name in enumerate(names):
+            idx = 10 + k
+            slider = QSlider(Qt.Horizontal)
+            setattr(self, f"horizontalSlider_{idx}", slider)
+            col = (k // 3) * 2     # 3 columns of (label, slider)
+            row = k % 3
+            g.addWidget(QLabel(name), row, col)
+            g.addWidget(slider, row, col + 1)
+
+    def _match_plot_sizes(self):
+        """Schedule an alignment pass (after layout settles) so the plot data
+        areas line up with the camera image edges."""
+        QTimer.singleShot(0, self._align_axes_to_camera)
+
+    def _align_axes_to_camera(self):
+        """Align the plot DATA areas (not the widgets) with the camera image:
+        x=0 at the image's left edge, y=0 at the image's top edge, and the data
+        span equal to the image width/height."""
+        if not self.w or not self.h or self.widget is None:
+            return
+        try:
+            # data-area rectangles inside each plot widget (in widget pixels)
+            rx = self.z_vs_x_plot.getPlotItem().getViewBox().geometry()
+            ry = self.z_vs_y_plot.getPlotItem().getViewBox().geometry()
+            if rx.width() <= 0 or ry.height() <= 0:
+                return  # not rendered yet; a later pass will catch it
+
+            # z vs x: make the data area exactly as wide as the image
+            nondata_w = self.z_vs_x_widget.width() - rx.width()
+            self.z_vs_x_widget.setFixedWidth(int(round(self.w + max(0, nondata_w))))
+
+            # z vs y: make the data area exactly as tall as the image
+            nondata_h = self.z_vs_y_widget.height() - ry.height()
+            self.z_vs_y_widget.setFixedHeight(int(round(self.h + max(0, nondata_h))))
+
+            # shift the camera so its top-left corner meets the two data origins:
+            #   left margin  = where z-vs-x data starts (past its z value-axis)
+            #   top margin   = where z-vs-y data starts (past its title/top axis)
+            left_off = int(round(rx.left()))
+            top_off = int(round(ry.top()))
+            self.verticalLayout.setContentsMargins(left_off, top_off, 0, 0)
+        except Exception:
+            pass
+
+    # ============================================================
+    # Units / scaling helpers
+    # ============================================================
+    def _x_scale(self):  # microns per pixel, or 1.0 in pixel mode (horizontal)
+        return self.MICRONS_PER_PIXEL_H if self._using_microns() else 1.0
+
+    def _y_scale(self):  # vertical
+        return self.MICRONS_PER_PIXEL_V if self._using_microns() else 1.0
+
+    def _set_crosshair_px(self, px, py):
+        """Put PIXEL coords into the spinboxes, shown in the current unit (no re-trigger)."""
+        self._suppress_crosshair_signal = True
+        self.crosshair_x.setValue(px * self._x_scale())
+        self.crosshair_y.setValue(py * self._y_scale())
+        self._suppress_crosshair_signal = False
+
+    def _get_crosshair_px(self):
+        """Read the spinboxes (current unit) and return PIXEL coords."""
+        px = int(round(self.crosshair_x.value() / self._x_scale()))
+        py = int(round(self.crosshair_y.value() / self._y_scale()))
+        return px, py
+
+    def _apply_crosshair_ranges(self):
+        self._suppress_crosshair_signal = True
+        self.crosshair_x.setMinimum(0.0)
+        self.crosshair_y.setMinimum(0.0)
+        self.crosshair_x.setMaximum(self.w * self._x_scale())
+        self.crosshair_y.setMaximum(self.h * self._y_scale())
+        self._suppress_crosshair_signal = False
+
+    def rotate_image(self):
+        view = self.widget
+        if view is None or not hasattr(view, "rotate_90"):
+            return  # only the Roper view supports rotation
+        view.rotate_90()
+        # refresh immediately with a rotated frame
+        frame = view.get_latest_frame()
+        if frame is not None:
+            view.show_frame(frame)
+            self.img_gray = frame
+            self.h, self.w = frame.shape
+            self._apply_crosshair_ranges()
+            self._match_plot_sizes()
+            self.draw_crosshair(self.x_selected, self.y_selected)
+            self._update_intensity_readout()
 
     def update_choices(self, display_choice, snapshot_or_live):
-        # this function gets the signals from main (that are emitted by the positioning class) and only updates the display of the choices are different from what we have
+        # gets the signals from main and only updates the display if the choices differ
         if display_choice != self.display_choice:
             print("update_choices called display choice changed")
             self.update_timer.stop()
@@ -128,7 +330,7 @@ class Display_View(QWidget, Ui_Form):
             self.widget.color_scale_choice = new_color_scale_choice
 
     def connect_to_display(self):
-        """This function connects the devices: please make sure that the stage has the function get_position(self, axis)"""
+        """Connect the camera device; remove any previously-loaded view first."""
         # remove any previously-loaded camera view so they don't stack/overlap
         if self.widget is not None:
             try:
@@ -141,7 +343,6 @@ class Display_View(QWidget, Ui_Form):
             self.widget = None
         if self.display_choice == 'MU300':
             self.crosshairButton.setEnabled(True)
-            # future users: you can do more (make sure you add those options in the positioning_design.ui file)
             try:
                 self.widget = Amscope_Camera_View()
                 self.verticalLayout.addWidget(self.widget)
@@ -264,7 +465,9 @@ class Display_View(QWidget, Ui_Form):
             self.widget.show_frame(frame)
             self.img_gray = frame
             self.h, self.w = frame.shape
+            self._match_plot_sizes()
             self.draw_crosshair(self.x_selected, self.y_selected)
+            self._update_intensity_readout()
 
         if max_pixel is not None:
             QMessageBox.information(
@@ -292,10 +495,12 @@ class Display_View(QWidget, Ui_Form):
         # refresh the z-vs-x / z-vs-y plots from the new image
         self.img_gray = frame
         self.h, self.w = frame.shape
+        self._apply_crosshair_ranges()
+        self._match_plot_sizes()
         self.draw_crosshair(self.x_selected, self.y_selected)
+        self._update_intensity_readout()
 
-    # 0 means snapshot
-    # 1 means live
+    # 0 means snapshot, 1 means live
     def start(self):
         self._update_get_image_button()
         if self.snapshot_or_live == 0:
@@ -307,6 +512,11 @@ class Display_View(QWidget, Ui_Form):
                     pass
         else:
             self.widget.start_live_view()
+            # pick up the real sensor size from the camera view and size everything to it
+            if getattr(self.widget, 'w', 0) and getattr(self.widget, 'h', 0):
+                self.w, self.h = self.widget.w, self.widget.h
+                self._apply_crosshair_ranges()
+                self._match_plot_sizes()
             if self.display_choice == 'MU300':
                 self._set_sliders_visible(True)
                 self._remove_cascade_controls()
@@ -329,14 +539,15 @@ class Display_View(QWidget, Ui_Form):
             "contrast", "Gamma", "Temp", "Tint", "Hue"]
         i = 9
         for name in params:
-            i+=1
+            i += 1
             current_val = self.widget.hcam.read_probes(name)
             min_value, max_value = self.widget.hcam.return_min_max(name)
             slider = getattr(self, f"horizontalSlider_{i}")
             self._add_slider(name, slider, min_value, max_value, current_val)
 
     def _set_sliders_visible(self, visible):
-        # the MU300 sliders are horizontalSlider_10 .. _18 in the .ui
+        # hide/show the whole MU300 slider panel (and the individual sliders)
+        self.sliders_panel.setVisible(visible)
         for i in range(10, 19):
             slider = getattr(self, f"horizontalSlider_{i}", None)
             if slider is not None:
@@ -380,8 +591,15 @@ class Display_View(QWidget, Ui_Form):
         row2.addWidget(gain_btn)
         vbox.addLayout(row2)
 
+        # --- live min/max intensity readouts ---
+        self.min_intensity_label = QLabel("min intensity: --")
+        self.max_intensity_label = QLabel("max intensity: --")
+        vbox.addWidget(self.min_intensity_label)
+        vbox.addWidget(self.max_intensity_label)
+
         self.cascade_controls = container
         self.verticalLayout.addWidget(container)
+        self._update_intensity_readout()
 
     def _remove_cascade_controls(self):
         container = getattr(self, "cascade_controls", None)
@@ -390,6 +608,25 @@ class Display_View(QWidget, Ui_Form):
             container.setParent(None)
             container.deleteLater()
             self.cascade_controls = None
+        self.min_intensity_label = None
+        self.max_intensity_label = None
+
+    def _update_intensity_readout(self):
+        """Refresh the min/max intensity labels from the current frame (Roper panel only)."""
+        minlbl = getattr(self, "min_intensity_label", None)
+        maxlbl = getattr(self, "max_intensity_label", None)
+        if minlbl is None or maxlbl is None:
+            return
+        img = getattr(self, "img_gray", None)
+        if img is None:
+            return
+        try:
+            vmin = float(np.min(img))
+            vmax = float(np.max(img))
+            minlbl.setText(f"min intensity: {vmin:.0f}")
+            maxlbl.setText(f"max intensity: {vmax:.0f}")
+        except Exception:
+            pass
 
     def _apply_cascade_inttime(self):
         text = self.inttime_edit.text().strip()
@@ -439,26 +676,27 @@ class Display_View(QWidget, Ui_Form):
                 # Amscope: RGB -> grayscale (unchanged)
                 self.h, self.w, _ = img_rgb.shape
                 self.img_gray = np.dot(img_rgb[..., :3], [0.2989, 0.5870, 0.1140])
-            # Crosshair center coordinates
-            x = int(self.crosshair_x.value())
-            y = int(self.crosshair_y.value())
+            # Crosshair center coordinates (pixels)
+            x = int(self.x_selected)
+            y = int(self.y_selected)
             # Crosshair thickness (averaging width)
             width = int(self.crosshair_width.value())
             half_w = max(1, width // 2)
-            # Ensure bounds don’t exceed image size
+            # Ensure bounds don't exceed image size
             y_min = max(0, y - half_w)
             y_max = min(self.h, y + half_w)
             x_min = max(0, x - half_w)
             x_max = min(self.w, x + half_w)
-            # Average along the band around the crosshair
             # z vs x = average intensity across horizontal stripe
             self.z_x = np.mean(self.img_gray[y_min:y_max, :], axis=0)
             # z vs y = average intensity across vertical stripe
             self.z_y = np.mean(self.img_gray[:, x_min:x_max], axis=1)
-            # Axes
+            # Axes (always stored in pixels)
             self.x = np.arange(self.w)
             self.y = np.arange(self.h)
             self.update_plot()
+            self._match_plot_sizes()
+            self._update_intensity_readout()
 
         except Exception as e:
             print(f"Error acquiring data: {e}")
@@ -470,8 +708,32 @@ class Display_View(QWidget, Ui_Form):
             return
         if len(self.x) == 0 or len(self.y) == 0 or len(self.z_x) == 0 or len(self.z_y) == 0:
             return
-        self.zx_plot.setData(self.x, self.z_x)
-        self.zy_plot.setData(self.z_y, self.y)
+        x_axis, y_axis = self._scaled_axes()
+        self.zx_plot.setData(x_axis, self.z_x)
+        self.zy_plot.setData(self.z_y, y_axis)
+
+    def _using_microns(self):
+        return self.axis_choice.currentText().lower().startswith("micron")
+
+    def _scaled_axes(self):
+        # self.x / self.y are always stored in pixels; convert only for display
+        x = np.asarray(self.x, dtype=float)
+        y = np.asarray(self.y, dtype=float)
+        if self._using_microns():
+            x = x * self.MICRONS_PER_PIXEL_H  # horizontal
+            y = y * self.MICRONS_PER_PIXEL_V  # vertical
+        return x, y
+
+    def _apply_axis_labels(self):
+        unit = "microns" if self._using_microns() else "pixels"
+        self.z_vs_x_plot.setLabel('bottom', f'x ({unit})')  # horizontal axis
+        self.z_vs_y_plot.setLabel('left', f'y ({unit})')    # vertical axis
+
+    def on_axis_choice_changed(self, _text=None):
+        self._apply_axis_labels()
+        self._apply_crosshair_ranges()  # ranges first (so the value isn't clamped)
+        self._set_crosshair_px(self.x_selected, self.y_selected)  # re-show current point in new unit
+        self.update_plot()
 
     def close(self):
         if self.snapshot_or_live == 1:
@@ -485,75 +747,65 @@ class Display_View(QWidget, Ui_Form):
             self.x_selected = mouse_point.x()
             self.y_selected = mouse_point.y()
 
-    def crosshair(self):
-        # as you hover coordinates change
-        self.widget.label.waiting_for_crosshair_click(True)
-        self.crosshair_frozen = False
-        self.crosshair_x.setValue(self.x_selected)
-        self.crosshair_y.setValue(self.y_selected)
-        # Once clicked on point: CALL self.draw_crosshair(x, y)
-        self.draw_crosshair(self.x_selected, self.y_selected)
-
     def draw_crosshair(self, x, y):
+        x = int(x)
+        y = int(y)
         thickness = int(self.crosshair_width.value())
-        #self.widget.draw_crosshair(x, y, thickness)
-        self.widget.label.enable_crosshair(x, y, thickness)
+        self.widget.label.enable_crosshair(x, y, thickness)  # overlay is always in pixels
         if self.snapshot_or_live == 0:
-            # Crosshair center coordinates
-            x = int(self.crosshair_x.value())
-            y = int(self.crosshair_y.value())
-            # Crosshair thickness (averaging width)
-            width = int(self.crosshair_width.value())
-            half_w = max(1, width // 2)
-            # Ensure bounds don’t exceed image size
+            half_w = max(1, thickness // 2)
             y_min = max(0, y - half_w)
             y_max = min(self.h, y + half_w)
             x_min = max(0, x - half_w)
             x_max = min(self.w, x + half_w)
-            # Average along the band around the crosshair
-            # z vs x = average intensity across horizontal stripe
             self.z_x = np.mean(self.img_gray[y_min:y_max, :], axis=0)
-            # z vs y = average intensity across vertical stripe
             self.z_y = np.mean(self.img_gray[:, x_min:x_max], axis=1)
-            # Axes
             self.x = np.arange(self.w)
             self.y = np.arange(self.h)
             self.update_plot()
 
-    def center(self):
-        x_center = self.w // 2
-        y_center = self.h // 2
-        self.crosshair_x.setValue(x_center)
-        self.crosshair_y.setValue(y_center)
-        self.draw_crosshair(x_center, y_center)
+    def on_crosshair_changed(self):
+        if self._suppress_crosshair_signal:  # ignore programmatic setValue
+            return
+        px, py = self._get_crosshair_px()  # user typed/stepped in current unit
+        self.x_selected = px
+        self.y_selected = py
+        self.draw_crosshair(px, py)
+        self.x_crosshair.emit(px)
+        self.y_crosshair.emit(py)
 
-    def on_widget_hover(self, x, y):
+    def on_widget_hover(self, x, y):  # x, y are pixels from the label
         if not self.crosshair_frozen:
-            self.crosshair_x.setValue(x)
-            self.crosshair_y.setValue(y)
+            self.x_selected = x
+            self.y_selected = y
+            self._set_crosshair_px(x, y)
+            self.draw_crosshair(x, y)
 
-    def on_widget_click(self, x, y):
-        # set the values on the QDoubleSpinBoxes and no update as you hover over the widget anymore
+    def on_widget_click(self, x, y):  # x, y are pixels from the label
         self.crosshair_frozen = True
         self.x_selected = x
         self.y_selected = y
-        self.crosshair_x.setValue(x)
-        self.crosshair_y.setValue(y)
+        self._set_crosshair_px(x, y)
         self.draw_crosshair(x, y)
         self.widget.label.waiting_for_crosshair_click(False)
 
-    # as inc/ dec buttons are clicked:
-    def on_crosshair_changed(self):
-        x = int(self.crosshair_x.value())
-        y = int(self.crosshair_y.value())
-        self.x_selected = x
-        self.y_selected = y
-        self.draw_crosshair(x, y)
-        self.x_crosshair.emit(x)
-        self.y_crosshair.emit(y)
+    def center(self):
+        x_center = self.w // 2
+        y_center = self.h // 2
+        self.x_selected = x_center
+        self.y_selected = y_center
+        self._set_crosshair_px(x_center, y_center)
+        self.draw_crosshair(x_center, y_center)
+
+    def crosshair(self):
+        self.widget.label.waiting_for_crosshair_click(True)
+        self.crosshair_frozen = False
+        self._set_crosshair_px(self.x_selected, self.y_selected)
+        self.draw_crosshair(self.x_selected, self.y_selected)
 
     def clear_crosshair(self):
         self.widget.label.disable_crosshair()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

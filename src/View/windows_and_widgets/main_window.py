@@ -240,6 +240,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         if hasattr(self, "Display_View_widget") and self.Display_View_widget is not None:
             self.Display_View_widget.update_get_img.connect(self.update_get_image)
         self.positioning_tab.save_or_find_nv_button_clicked.connect(self.update_current_data_saving_path) # @
+        self.positioning_tab.get_img.connect(self._get_img)
         self.positioning_tab.server_off_button_clicked.connect(self.server_off)
         self.positioning_tab.take_img_signal.connect(self.take_frame)
         self.positioning_tab.snapButtonclicked.connect(self.take_cam_snapshot)
@@ -516,10 +517,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     self.update_parameters(self.tree_experiments, item, column)
 
     def update_current_data_saving_path(self):
-        print("updating current path")
         self.data_saving_path = self.data_saving_tab.current_path()
-        print(f"self.data_saving_path {self.data_saving_path}")
         self.positioning_tab.data_saving_path = self.data_saving_path
+        self.positioning_tab.x_crosshair, self.positioning_tab.y_crosshair = self.Display_View_widget._get_crosshair_px()
+
+    def _get_img(self):
+        self.positioning_tab.frame_ready = True
+        self.Display_View_widget.widget.hcam.update({'inttime': 10000.0})
+        self.positioning_tab.frame = self.Display_View_widget.widget.get_image()
 
     def take_frame(self):
         frame = self.Display_View_widget.widget.get_latest_frame()
@@ -592,6 +597,24 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 colormap=getattr(view, "color_scale_choice", "Grey"),
                 timestamp=datetime.datetime.now().strftime("%m_%d_%Y_%H:%M:%S"),
             )
+            stage_1_name = self.positioning_tab.comboBox_1.currentText()
+            stage_2_name = self.positioning_tab.comboBox_2.currentText()
+            if hasattr(self.positioning_tab, 'stage_1'):
+                if "nanodrive" in stage_1_name.lower() and self.positioning_tab.stage_1 is not None:
+                    raw_struct.nano_x = self.positioning_tab.stage_1.get_position('x')
+                    raw_struct.nano_y = self.positioning_tab.stage_1.get_position('y')
+                    raw_struct.nano_z = self.positioning_tab.stage_1.get_position('z')
+                elif "microdrive" in stage_1_name.lower() and self.positioning_tab.stage_1 is not None:
+                    raw_struct.micro_x = self.positioning_tab.stage_2.get_position('x')
+                    raw_struct.micro_y = self.positioning_tab.stage_2.get_position('y')
+            if hasattr(self.positioning_tab, 'stage_2'):
+                if "nanodrive" in stage_2_name.lower() and self.positioning_tab.stage_2 is not None:
+                    raw_struct.nano_x = self.positioning_tab.stage_1.get_position('x')
+                    raw_struct.nano_y = self.positioning_tab.stage_1.get_position('y')
+                    raw_struct.nano_z = self.positioning_tab.stage_1.get_position('z')
+                elif "microdrive" in stage_2_name.lower() and self.positioning_tab.stage_2 is not None:
+                    raw_struct.micro_x = self.positioning_tab.stage_2.get_position('x')
+                    raw_struct.micro_y = self.positioning_tab.stage_2.get_position('y')
             # attach current camera settings if the device exposes them
             try:
                 raw_struct.integration_time_us = view.hcam.read_probes("inttime")
@@ -790,15 +813,20 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def load_display_widget(self):
         print("Loading Display_View_widget...")
         try:
-            self.snapshot_or_live = self.positioning_tab.snapshot_live_comboBox.currentText()
+            text = self.positioning_tab.snapshot_live_comboBox.currentText()
+            self.snapshot_or_live = 0 if text.strip().lower() == "snapshot" else 1
             print(f"snapshot_or_live: {self.snapshot_or_live}")
             # Hide original layout contents
             self.remove_and_store_layout_contents(self.verticalLayout_2)
 
             # Create and add display view widget
             self.Display_View_widget = Display_View(self.display_choice, self.snapshot_or_live)
+            # re-apply the colormap the user had selected; a brand-new Roper view
+            # otherwise defaults back to Grey on every tab switch
+            self.Display_View_widget.update_color_scale_option(
+                self.positioning_tab.color_scale_option.currentText())
             if self.first_time_positioning == False:
-                if self.snapshot_or_live == "Snapshot":
+                if self.snapshot_or_live == 0:
                     self.Display_View_widget.widget._init_camera()
                     buf = self.latest_display_frame
                     if buf.ndim == 2:
@@ -1480,7 +1508,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     experiment, path_to_experiment, _ = item.get_experiment()
                     # only plot if experiment has been selected but not if a parameter has been selected
                     if path_to_experiment == []:
-                        gui_logger.info(f"Plotting experiment: {experiment.name}")
+                        #gui_logger.info(f"Plotting experiment: {experiment.name}")
                         self.plot_experiment(experiment)
                     else:
                         gui_logger.debug(f"Plot request ignored - parameter selected: {path_to_experiment}")
@@ -2413,7 +2441,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         Args:
             experiment: experiment to be plotted
         """
-        gui_logger.info(f"Plotting experiment: {experiment.name}")
+        #gui_logger.info(f"Plotting experiment: {experiment.name}")
         try:
             experiment.plot([self.pyqtgraphwidget_1.graph, self.pyqtgraphwidget_2.graph])
             gui_logger.debug("Experiment plot completed successfully")

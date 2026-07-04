@@ -14,6 +14,7 @@ import numpy as np
 import cv2
 from typing import List, Tuple
 from PyQt5.QtWidgets import QMessageBox, QPushButton
+from PyQt5.QtWidgets import QInputDialog
 # Assuming the .ui file is converted to design.py
 #To convert positioning_stages_design.ui to .py, paste this into the terminal:
 # pyuic5 -x positioning_stages_design.ui -o positioning_stages_design.py
@@ -41,6 +42,10 @@ _MAX_MCL_nanodrive_Z =100
 _MIN_MCL_nanodrive_Z = 0
 _MAX_MCL_microdrive_Z = 50000
 _MIN_MCL_microdrive_Z = 0
+_MAX_X_CONEX = 24000.0
+_MIN_X_CONEX = 0.0
+_MAX_Y_CONEX = 24000.0
+_MIN_Y_CONEX = 0.0
 from PyQt5.QtCore import pyqtSignal
 
 class positioning_stages_view(QWidget, Ui_Form):
@@ -51,6 +56,7 @@ class positioning_stages_view(QWidget, Ui_Form):
     snapshot_mode_changed = pyqtSignal(int)
     snapButtonclicked = pyqtSignal(int)
     save_or_find_nv_button_clicked = pyqtSignal(int)
+    get_img = pyqtSignal(int)
     take_img_signal = pyqtSignal(int)
     server_off_button_clicked = pyqtSignal(int)
     color_scale_changed = pyqtSignal(str)
@@ -136,6 +142,10 @@ class positioning_stages_view(QWidget, Ui_Form):
         self.data_saving_path = None
         self.data_reader = None
         self.frame = None
+        self.x_crosshair = None
+        self.y_crosshair = None
+        self.start_camera_scan.clicked.connect(self._start_camera_scan)
+        self.go_to_nv.clicked.connect(self._go_to_nv)
 
     def connect_to_instrument_1(self):
         """This function connects the devices: please make sure that your stage has the function get_position(self, axis)"""
@@ -162,10 +172,10 @@ class positioning_stages_view(QWidget, Ui_Form):
         elif stage_name == 'Newport_Conex_microdrive':
             try:
                 self.stage_1 = Newport_CONEX_CC_xy_stage()
-                _MAX_X_1  = 24.0
-                _MIN_X_1 = 0.0
-                _MAX_Y_1 = 24.0
-                _MIN_Y_1 = 0.0
+                _MAX_X_1  = _MAX_X_CONEX
+                _MIN_X_1 = _MIN_X_CONEX
+                _MAX_Y_1 = _MAX_Y_CONEX
+                _MIN_Y_1 = _MIN_Y_CONEX
                 QMessageBox.information(self, 'Success', f'Connected to Newport_Conex_microdrive')
 
             except Exception as e:
@@ -209,10 +219,10 @@ class positioning_stages_view(QWidget, Ui_Form):
         elif stage_name == 'Newport_Conex_microdrive':
             try:
                 self.stage_2 = Newport_CONEX_CC_xy_stage()
-                _MAX_X_2 = 24.0
-                _MIN_X_2 = 0.0
-                _MAX_Y_2 = 24.0
-                _MIN_Y_2 = 0.0
+                _MAX_X_2 = _MAX_X_CONEX
+                _MIN_X_2 = _MIN_X_CONEX
+                _MAX_Y_2 = _MAX_Y_CONEX
+                _MIN_Y_2 = _MIN_Y_CONEX
                 QMessageBox.information(self, 'Success', f'Connected to Newport_Conex_microdrive')
 
             except Exception as e:
@@ -276,7 +286,6 @@ class positioning_stages_view(QWidget, Ui_Form):
                     if pos:
                         pos = float(pos)
                         if min<=pos<=max:
-                            print("inside set_position in positioning GUI")
                             stage.set_position(axis, pos)
                             #time.sleep(15)
                             line_edit.setText(str(stage.get_position(axis)))
@@ -379,7 +388,6 @@ class positioning_stages_view(QWidget, Ui_Form):
                     new_pos = pos + inc_step
                 else:
                     new_pos = pos - inc_step
-                print(f'new position inc/dec: {new_pos}')
                 if new_pos < max and new_pos > min:
                     stage.set_position(axis, new_pos)
                     time.sleep(1)
@@ -402,7 +410,6 @@ class positioning_stages_view(QWidget, Ui_Form):
         disp = self.display_option.currentText()
         if disp == "MU300":
             self.snapshot_live_comboBox.setEnabled(True)
-        print("on_display_choice_changed emitting", text)
         self.display_choice_changed.emit(text)
 
     def on_color_scale_changed(self, text):
@@ -427,7 +434,6 @@ class positioning_stages_view(QWidget, Ui_Form):
     def on_snapshot_or_live_changed(self, text):
         # snapshot mode = 0, live mode = 1
         mode = 0 if text.lower() == "snapshot" else 1
-        print("on_snapshot_or_live_changed emitting", mode)
         self.snapshot_mode_changed.emit(mode)
 
     def display_choice(self):
@@ -443,9 +449,7 @@ class positioning_stages_view(QWidget, Ui_Form):
         self.snapButtonclicked.emit(1)
 
     def save(self):
-        print("save is pressed 1")
         self.save_or_find_nv_button_clicked.emit(1)
-        print("save is pressed 2")
 
         # --- UI → keys ---
         sample_selection = self.Sample_Selector_comboBox.currentText()
@@ -453,19 +457,23 @@ class positioning_stages_view(QWidget, Ui_Form):
         point_status = self.point_status_comboBox.currentText()
 
         point_key = point_selection.lower().replace(" ", "_")
-
         if point_status == "FINAL" and point_selection == "NV":
             self.error_box(
                 "YOU CANNOT SELECT FINAL NV POINT",
                 "To find NV, click find NV button!"
             )
             return
+        if not hasattr(self, 'stage_1') or not hasattr(self, 'stage_2') or not hasattr(self, 'stage_3') or self.stage_1 == None or self.stage_2 == None or self.stage_3 == None:
+            self.error_box(
+                "No stage connected",
+                "Please connect to the stages first"
+            )
+            return
 
         # --------------------------------------------------
         # File handling
         # --------------------------------------------------
-        if sample_selection == "New Sample":
-            point_status = "INITIAL"
+        if sample_selection == "New Sample" and point_status == "INITIAL":
             directory, filename = self.open_directory_dialog(self.data_saving_path)
             if filename is None:
                 return
@@ -504,23 +512,23 @@ class positioning_stages_view(QWidget, Ui_Form):
         # Identify stages
         # --------------------------------------------------
         stage_1_name = self.comboBox_1.currentText()
-        if "nanodrive" in stage_1_name.lower():
-            nano = self.stage_1
-            micro = self.stage_2
-        else:
-            nano = self.stage_2
-            micro = self.stage_1
-
         # --------------------------------------------------
         # Snapshot metadata
         # --------------------------------------------------
-        point.micro_x = self.xlineEdit_2.text()
-        point.micro_y = self.ylineEdit_2.text()
+        if "nanodrive" in stage_1_name.lower():
+            point.nano_x = self.stage_1.get_position("x")
+            point.nano_y = self.stage_1.get_position("y")
+            point.nano_z = self.stage_1.get_position("z")
+            point.micro_x = self.stage_2.get_position("x")
+            point.micro_y = self.stage_2.get_position("y")
+        else:
+            point.nano_x = self.stage_2.get_position("x")
+            point.nano_y = self.stage_2.get_position("y")
+            point.nano_z = self.stage_2.get_position("z")
+            point.micro_x = self.stage_1.get_position("x")
+            point.micro_y = self.stage_1.get_position("y")
 
-        point.nano_x = self.xlineEdit_1.text()
-        point.nano_y = self.ylineEdit_1.text()
-        point.nano_z = self.zlineEdit_1.text()
-
+        point.micro_z = self.stage_3.get_position()
         point.camera_x = self.x_crosshair
         point.camera_y = self.y_crosshair
 
@@ -531,8 +539,6 @@ class positioning_stages_view(QWidget, Ui_Form):
         # --------------------------------------------------
 
         self.take_img_signal.emit(1)
-        print("snapshot called")
-        print(self.frame)
         point.camera_image = self.frame
         # --------------------------------------------------
         # SAVE (single call)
@@ -780,62 +786,299 @@ class positioning_stages_view(QWidget, Ui_Form):
         else:
             return "USAC_MAGSAC"
 
+    def _start_camera_scan(self):
+        number_of_z_points = 1
+        z_range = 0
+        if self.z_scan_checkBox.isChecked():
+            z_min, ok = QInputDialog.getDouble(self, "Z Scan", "Minimum Z (µm):", 0.0)
+            if not ok:
+                return
+            z_max, ok = QInputDialog.getDouble(self, "Z Scan", "Maximum Z (µm):", 10.0)
+            if not ok:
+                return
+            z_step, ok = QInputDialog.getDouble(self, "Z Scan", "Z Step (µm):", 1.0)
+            if not ok:
+                return
+            z_range = z_max - z_min
+            if z_max <= z_min or z_range > 50:
+                QMessageBox.warning(self, "Invalid Range", "Please select a range smaller than 50 microns and larger than zero")
+                return
+            number_of_z_points = int(round(z_range / z_step)) + 1
+            if number_of_z_points < 1:
+                QMessageBox.warning(self, "Invalid Step", "Please select a valid Z step.")
+                return
+        # Continue with the scan...
+        edges_path = self.open_file_dialog(self.data_saving_path)
+        if not edges_path:
+            return
+        scan_directory, scan_filename = self.open_directory_dialog(self.data_saving_path)
+        if scan_filename is None:
+            return
+
+        self.data_saving_path = scan_directory
+        scan_full_path = os.path.join(scan_directory, scan_filename)
+
+        if os.path.exists(scan_full_path):
+            if not self.confirm_overwrite(scan_filename):
+                return
+
+        mode = "w"
+        structure = load_data(edges_path)
+        initial_coords = self.get_coords(structure.INITIAL, "wire_edge", "microxy")
+        final_coords = self.get_coords(structure.FINAL, "wire_edge", "microxy")
+        initialx = initial_coords[0]*1000 # conex is in mm so we multiply by 1000 to go to microns
+        initialy = initial_coords[1]*1000 # conex is in mm so we multiply by 1000 to go to microns
+        finalx = final_coords[0]*1000 # conex is in mm so we multiply by 1000 to go to microns
+        finaly = final_coords[1]*1000 # conex is in mm so we multiply by 1000 to go to microns
+        x_range = (finalx - initialx)
+        y_range = (finaly - initialy)
+
+        if x_range > y_range:
+            longer_range = x_range
+            shorter_range = y_range
+            longer_axis = "x"
+            shorter_axis = "y"
+            shorter_axis_initial = initialy
+            longer_axis_initial = initialx
+        else:
+            longer_range = y_range
+            shorter_range = x_range
+            longer_axis = "y"
+            shorter_axis = "x"
+            shorter_axis_initial = initialx
+            longer_axis_initial = initialy
+        longer_axis_steps = 90 # 90 microns is the biggest scan range using the nanodrive
+        number_of_2D_points = int(longer_range / longer_axis_steps)
+        if number_of_2D_points  == 0:
+            number_of_2D_points = 1
+        number_of_scans = number_of_z_points * number_of_2D_points
+        settle_time = 100  # ms
+        #estimated_time = (10000 * 2 + settle_time) * number_of_scans
+        shorter_axis_steps = shorter_range/ number_of_2D_points
+        focused_z_location = self.get_coords(structure.INITIAL, "wire_edge", "microz")
+        returned = self.error_box("Warning", "Please put filters in the path. Click Ok when ready.", "Camera_Safety")
+        image_number = 0
+        if returned == True:
+            if self.z_scan_checkBox.isChecked():
+                z_pos = z_min
+            else:
+                z_pos = focused_z_location
+            shorter_axis_pos = shorter_axis_initial
+            longer_axis_pos = longer_axis_initial
+            root = MyStruct()
+            self.error_box("Starting Scan", "Camera Scan has started", "Scan Status")
+            while image_number < number_of_scans:
+                # take data focused_z_location => max; take data min => focused_z_location such as focused_z_location is the z location of the focused laser
+                image_number += 1
+                if (z_pos != self.stage_3.get_position("z")):
+                    self.stage_3.set_position("z", z_pos)
+                self.stage_2.set_position(shorter_axis, shorter_axis_pos/ 1000)
+                self.stage_2.set_position(longer_axis, longer_axis_pos / 1000)
+                time.sleep(settle_time/1000)
+                self.frame_ready = False
+                self.get_img.emit(1)
+                point_status = f"image_{image_number}"
+                setattr(root, point_status, MyStruct())
+                point = getattr(root, point_status)
+                point.micro_x = self.stage_2.get_position("x")
+                point.micro_y = self.stage_2.get_position("y")
+                point.micro_z = self.stage_3.get_position("z")
+                point.timestamp = datetime.utcnow().isoformat()
+                while self.frame_ready == False:
+                    time.sleep(10000/1000)
+                point.camera_image = self.frame
+                if self.z_scan_checkBox.isChecked():
+                    if z_pos < z_max:
+                        z_pos = z_pos + z_step
+                    else:
+                        z_pos = z_min
+                        shorter_axis_pos += shorter_axis_steps
+                        longer_axis_pos += longer_axis_steps
+                else:
+                    shorter_axis_pos += shorter_axis_steps
+                    longer_axis_pos += longer_axis_steps
+            save_data(
+                filename=scan_full_path,
+                obj=root,
+                mode=mode,
+                swmr=False  # snapshot, not live
+            )
+            self.error_box("Finished Scanning", "Camera Scan is finished.", "Scan Status")
+
+        else:
+            return
+
+    def _go_to_nv(self):
+        path = self.open_file_dialog(self.data_saving_path)
+        if not path:
+            return
+        structure = load_data(path)
+
+        def _scalar(v):
+            if v is None:
+                return float("nan")
+            a = np.asarray(v).ravel()
+            return float(a[0]) if a.size else float("nan")
+
+        results = []
+        for name in vars(structure):  # image_1, image_2, ...
+            if not name.startswith("image_"):
+                continue
+            point = getattr(structure, name)
+            img = getattr(point, "camera_image", None)
+            if img is None:
+                continue
+            arr = np.asarray(img)
+            if arr.size == 0:
+                continue
+            results.append((
+                float(arr.max()),  # brightest single pixel
+                name,
+                _scalar(getattr(point, "micro_x", None)),
+                _scalar(getattr(point, "micro_y", None)),
+                _scalar(getattr(point, "micro_z", None)),
+            ))
+
+        if not results:
+            QMessageBox.warning(self, "No Data", "No images with camera_image found.")
+            return
+
+        results.sort(key=lambda r: r[0], reverse=True)
+        top3 = results[:3]
+
+        # let the user pick which candidate to drive to
+        choice = self._choose_nv_candidate(top3)
+        if choice is None:
+            return  # cancelled
+        _peak, _name, x, y, z = choice
+
+        self._go_to_micro_position(x, y, z)
+        return choice
+
+    def _choose_nv_candidate(self, top3):
+        """Show the top-3 candidates as radio buttons; return the chosen tuple or None."""
+        from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QRadioButton,
+                                     QDialogButtonBox, QButtonGroup, QLabel)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Top 3 NV Candidates")
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("Select the point to move to:"))
+
+        group = QButtonGroup(dlg)
+        for i, (peak, name, x, y, z) in enumerate(top3):
+            rb = QRadioButton(
+                f"{name}:   peak={peak:.1f}    x={x:.4f}  y={y:.4f}  z={z:.4f}")
+            if i == 0:
+                rb.setChecked(True)  # default to the brightest
+            group.addButton(rb, i)
+            layout.addWidget(rb)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+        idx = group.checkedId()
+        if idx < 0:
+            return None
+        return top3[idx]
+
+    def _go_to_micro_position(self, micro_x, micro_y, micro_z):
+        """Drive the XY stage (stage_2) to (micro_x, micro_y), then the Z stage
+        (stage_3) to micro_z. Connect a stage first if it isn't already.
+        Values are used in the stages' NATIVE units (same units they were saved
+        in), so no unit conversion is applied here."""
+        # --- XY: stage_2 ---
+        if getattr(self, "stage_2", None) is None:
+            self.connect_to_instrument_2()  # reads comboBox_2 and connects
+        if getattr(self, "stage_2", None) is None:
+            self.error_box("No XY stage",
+                           "Could not connect the XY stage. Select it in its "
+                           "dropdown and try again.")
+            return
+
+        if np.isnan(micro_x) or np.isnan(micro_y):
+            self.error_box("Missing XY", "This point has no micro_x / micro_y saved.")
+        else:
+            try:
+                self.stage_2.set_position("x", float(micro_x))
+                self.stage_2.set_position("y", float(micro_y))
+            except Exception as e:
+                self.error_box("XY move failed", str(e))
+                return
+
+        # --- Z: stage_3 ---
+        if getattr(self, "stage_3", None) is None:
+            self.connect_to_instrument_3()  # reads comboBox_3 and connects
+        if getattr(self, "stage_3", None) is None:
+            self.error_box("No Z stage",
+                           "Moved XY, but could not connect the Z stage.")
+            return
+
+        if np.isnan(micro_z):
+            self.error_box("Missing Z", "This point has no micro_z saved.")
+        else:
+            try:
+                self.stage_3.set_position("z", float(micro_z))
+            except Exception as e:
+                self.error_box("Z move failed", str(e))
+                return
+
+        # reflect the new positions in the line-edits (best effort)
+        try:
+            self.xlineEdit_2.setText(str(self.stage_2.get_position("x")))
+            self.ylineEdit_2.setText(str(self.stage_2.get_position("y")))
+            self.zlineEdit_3.setText(str(self.stage_3.get_position("z")))
+        except Exception:
+            pass
+
     def find_NV(self) -> np.ndarray:
 
         self.save_or_find_nv_button_clicked.emit(1)
-        print("find_NV is pressed")
         path = self.open_file_dialog(self.data_saving_path)
         if not path:
             return
         method = self.choose_method()
         structure = load_data(path)
         if method == "affine":
-            """for i, structure in enumerate(Objects._items):"""
-            print(f"struct: {structure}")
-
             old_corners, new_corners, MNV_old = self.extract_corners(structure)
             # Compute transformations
             DMT = self.from_four_corners_to_DMT_or_DMNT(old_corners)
             DMNT = self.from_four_corners_to_DMT_or_DMNT(new_corners)
 
             MNV_new_direct = self.from_DMT_and_MNV_old_get_DNV_old(MNV_old, np.linalg.inv(DMNT) @ DMT)
-            print(f"affine solution: {MNV_new_direct}")
             return MNV_new_direct
         elif method == "homography":
             method = self.choose_homography_method()
-            """for i, structure in enumerate(Objects._items):"""
-            print(f"struct: {structure}")
 
             old_corners, new_corners, MNV_old = self.extract_corners(structure)
             H_direct = self.compute_homography_from_corners(old_corners, new_corners, method)
             nv_new = self.map_point_with_homography(MNV_old, H_direct)
-            print(f"homography solution with {method} method: {nv_new}")
             return nv_new
         else:
             raise ValueError(f"Method {method} not implemented")
 
     def extract_corners(self, structure):
         order = ["top_left", "top_right", "bottom_right", "bottom_left"]
-
-        def get_xy(block, name):
-            pt = getattr(block, name)  # MyStruct directly
-
-            if pt is None:
-                raise ValueError(f"No data for {name}")
-
-            print(f"{name} micro_x: {pt.micro_x}, micro_y: {pt.micro_y}")
-
-            return np.array([
-                float(pt.micro_x),
-                float(pt.micro_y)
-            ])
-        print(f"structure.initial {structure.INITIAL}")
-        print(f"structure.final {structure.FINAL}")
-        old_corners = [get_xy(structure.INITIAL, n) for n in order]
-        new_corners = [get_xy(structure.FINAL, n) for n in order]
-        nv_position = get_xy(structure.INITIAL, "nv")
+        old_corners = [self.get_coords(structure.INITIAL, n, "microxy") for n in order]
+        new_corners = [self.get_coords(structure.FINAL, n, "microxy") for n in order]
+        nv_position = self.get_coords(structure.INITIAL, "nv", "microxy")
 
         return old_corners, new_corners, nv_position
+
+    def get_coords(self, block, name, coords):
+        pt = getattr(block, name)  # MyStruct directly
+
+        if pt is None:
+            raise ValueError(f"No data for {name}")
+        if coords == "microxy":
+            return np.array([float(pt.micro_x), float(pt.micro_y)])
+        elif coords == "microz":
+            return np.array([float(pt.micro_z)])
+        else:
+            raise ValueError(f"Unknown coordinates {coords}")
 
     def close_server(self):
         self.server_off_button_clicked.emit(1)

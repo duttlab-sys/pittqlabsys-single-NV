@@ -365,10 +365,10 @@ class data_saving_tab_view(QWidget, Ui_Form):
                 # Display scalar directly - no brackets
                 second_col = QStandardItem(str(normalize_value(value)))
                 parent.parent().setChild(parent.row(), 1, second_col)
-        else:
-                # Other types (lists, dicts, etc.)
-                second_col = QStandardItem(f"<{type(value).__name__}>")
-                parent.parent().setChild(parent.row(), 1, second_col)
+            else:
+                    # Other types (lists, dicts, etc.)
+                    second_col = QStandardItem(f"<{type(value).__name__}>")
+                    parent.parent().setChild(parent.row(), 1, second_col)
 
         return model
 
@@ -390,7 +390,17 @@ class data_saving_tab_view(QWidget, Ui_Form):
             action = menu.exec_(self.hdf5_tree.viewport().mapToGlobal(pos))
 
             if action == view_action:
-                ImageViewer(value, title=item.text(), parent=self).exec_()
+                lut = None
+                if np.asarray(value).ndim == 2:  # grayscale -> pick colormap
+                    name, ok = QInputDialog.getItem(
+                        self, "Colormap", "Choose a colormap:",
+                        ["Grey", "Hot", "Jet", "Cool", "Jet_Plus_White"],
+                        0, False
+                    )
+                    if not ok:
+                        return
+                    lut = _colormap_lut(name)
+                ImageViewer(value, title=item.text(), lut=lut, parent=self).exec_()
             elif action == save_action:
                 self.export_png(value)
 
@@ -453,22 +463,33 @@ class data_saving_tab_view(QWidget, Ui_Form):
 
 
 class ImageViewer(QDialog):
-    def __init__(self, img: np.ndarray, title="Image", parent=None):
+    def __init__(self, img: np.ndarray, title="Image", lut=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
 
-        h, w = img.shape[:2]
+        a = np.asarray(img)
+        h, w = a.shape[:2]
 
-        if img.ndim == 2:
-            qimg = QImage(
-                img.data, w, h, w,
-                QImage.Format_Grayscale8
-            )
+        if a.ndim == 2:
+            if a.dtype != np.uint8:                       # autoscale min->max to 8-bit
+                a = a.astype(np.float64)
+                lo, hi = float(a.min()), float(a.max())
+                a = (a - lo) / (hi - lo) * 255.0 if hi > lo else np.zeros_like(a)
+                a = a.astype(np.uint8)
+            if lut is not None:                           # apply colormap -> RGB
+                rgb = np.ascontiguousarray(lut[a])
+                self._buf = rgb
+                qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+            else:
+                a = np.ascontiguousarray(a)
+                self._buf = a
+                qimg = QImage(a.data, w, h, w, QImage.Format_Grayscale8)
         else:
-            qimg = QImage(
-                img.data, w, h, 3 * w,
-                QImage.Format_RGB888
-            )
+            if a.dtype != np.uint8:
+                a = a.astype(np.uint8)
+            a = np.ascontiguousarray(a[:, :, :3])
+            self._buf = a
+            qimg = QImage(a.data, w, h, 3 * w, QImage.Format_RGB888)
 
         label = QLabel()
         label.setPixmap(QPixmap.fromImage(qimg))
@@ -477,6 +498,34 @@ class ImageViewer(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(label)
         self.resize(min(w, 1000), min(h, 800))
+
+def _colormap_lut(name, n=256):
+    """256x3 uint8 RGB LUT. Pure numpy, mirrors the camera's _get_lut maps."""
+    x = np.linspace(0.0, 1.0, n)
+    if name == "Grey":
+        ramp = np.linspace(0, 255, n).astype(np.uint8)
+        return np.repeat(ramp[:, None], 3, axis=1)
+    if name == "Cool":
+        cmap = np.stack([x, 1.0 - x, np.ones_like(x)], axis=1)
+    elif name == "Hot":
+        r = np.clip(x / 0.375, 0, 1)
+        g = np.clip((x - 0.375) / 0.375, 0, 1)
+        b = np.clip((x - 0.75) / 0.25, 0, 1)
+        cmap = np.stack([r, g, b], axis=1)
+    else:  # Jet and Jet_Plus_White
+        pos = [0.0, 0.125, 0.375, 0.625, 0.875, 1.0]
+        r = np.interp(x, pos, [0.0, 0.0, 0.0, 1.0, 1.0, 0.5])
+        g = np.interp(x, pos, [0.0, 0.0, 1.0, 1.0, 0.0, 0.0])
+        b = np.interp(x, pos, [0.5, 1.0, 1.0, 0.0, 0.0, 0.0])
+        cmap = np.stack([r, g, b], axis=1)
+        if name == "Jet_Plus_White":  # same construction as your _get_lut
+            jet = cmap
+            n_white = 32
+            fade = np.linspace(1.0, 0.0, n_white)[:, None]
+            bottom = fade * np.ones((n_white, 3)) + (1.0 - fade) * jet[0]
+            body = jet[np.linspace(0, n - 1, n - n_white).astype(int)]
+            cmap = np.vstack([bottom, body])
+    return np.clip(cmap * 255.0, 0, 255).astype(np.uint8)
 
 class ValueViewer(QDialog):
     def __init__(self, name, value, parent=None):

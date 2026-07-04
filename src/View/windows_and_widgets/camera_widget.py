@@ -239,7 +239,8 @@ class Amscope_Camera_View(QWidget):
         self.hcam.stop()
 
     def start_live_view(self):
-        self._init_camera()
+        if self.hcam is None:                 # open hardware only once
+            self._init_camera()
 
     def get_latest_frame(self) -> Optional[np.ndarray]:
         """Returns the latest frame as a NumPy array."""
@@ -283,6 +284,7 @@ class ROPER_CASCADE_CCD_View(QWidget):
         self.crosshair_thickness = 1
 
         self.color_scale_choice = "Grey"
+        self.rotation = 0  # degrees, multiples of 90; applied to every frame
         self._lut_cache = {}  # caches 256x3 uint8 colormaps built from MATLAB
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -346,15 +348,20 @@ class ROPER_CASCADE_CCD_View(QWidget):
             QMessageBox.warning(self, "", f"Stream start failed {ex}")
             return
 
+    def rotate_90(self):
+        """Rotate all subsequent frames by another 90 degrees (cumulative)."""
+        self.rotation = (self.rotation + 90) % 360
+
     def get_latest_frame(self):
         """Grab one frame from the Roper via getimagefast -> 2-D float ndarray (raw counts)."""
         if self.hcam is None:
             return None
         try:
             raw = self.hcam.read_probes("imagefast_int")  # -> matlab.double, 2-D
-            # MATLAB stores data column-major, so reshape with order='F'
             arr = np.array(raw._data, dtype=np.float64).reshape(raw.size, order="F")
-            return arr
+            if self.rotation:
+                arr = np.rot90(arr, k=self.rotation // 90)
+            return np.ascontiguousarray(arr)
         except Exception as e:
             print(f"Frame conversion error: {e}")
             return None
@@ -429,18 +436,20 @@ class ROPER_CASCADE_CCD_View(QWidget):
                 self._last_tick = now
 
     def start_live_view(self):
-        self._init_camera()
-        if self.hcam is None:
-            return
-        # size the window from the first real frame (no fixed SDK buffer here)
-        frame = self.get_latest_frame()
-        if frame is not None:
-            self.h, self.w = frame.shape
-            self.setFixedSize(self.w, self.h + 40)
-            self.label.setFixedSize(self.w, self.h)
-        # Roper has no callback mode -> poll on a timer and drive eventImage
-        self._poll_timer = QTimer(self)
-        self._poll_timer.timeout.connect(lambda: self.eventImage.emit(0))
+        if self.hcam is None:                 # open hardware only once
+            self._init_camera()
+            if self.hcam is None:
+                return
+            # size the window from the first real frame (no fixed SDK buffer here)
+            frame = self.get_latest_frame()
+            if frame is not None:
+                self.h, self.w = frame.shape
+                self.setFixedSize(self.w, self.h + 40)
+                self.label.setFixedSize(self.w, self.h)
+        # (re)start polling; reuse the timer so resuming doesn't reopen the camera
+        if getattr(self, "_poll_timer", None) is None:
+            self._poll_timer = QTimer(self)
+            self._poll_timer.timeout.connect(lambda: self.eventImage.emit(0))
         self._poll_timer.start(50)  # ms; increase if CCD readout can't keep up
 
     def stop_live_view(self):
@@ -471,7 +480,8 @@ class ROPER_CASCADE_CCD_View(QWidget):
             return self._lut_cache[name]
 
         n = 256
-        if name in ("Grey", "Gey"):  # plain grayscale ramp (no MATLAB needed)
+        if name == "Grey":
+            # plain grayscale ramp (no MATLAB needed)
             ramp = np.arange(n, dtype=np.uint8)
             lut = np.repeat(ramp[:, None], 3, axis=1)
         else:
@@ -529,8 +539,9 @@ class CrosshairLabel(QLabel):
             pen = QPen(Qt.red, 1)
             painter.setPen(pen)
             x, y = self._crosshair_pos
-            x_line_len = 680
-            y_line_len = 510
+            # span the full label (image) instead of a hardcoded 680x510
+            x_line_len = self.width()
+            y_line_len = self.height()
             half_thickness = self._crosshair_thickness//2
 
             painter.drawLine(x - x_line_len, y - half_thickness, x + x_line_len, y - half_thickness)
