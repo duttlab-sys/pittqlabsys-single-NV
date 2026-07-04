@@ -49,7 +49,7 @@ _GHz = 1.0e9  # Gigahertz
 _MHz = 1.0e6  # Megahertz
 _us = 1.0e-6  # Microseconds
 _ns = 1.0e-9  # Nanoseconds
-_SID = 6
+_SID = 3
 
 class ProteusDriver:
     """
@@ -474,7 +474,7 @@ class ProteusDriver:
         else:
             return mkrData.astype(np.uint8)
 
-    def send_wfm_to_proteus(self, samplingRate, channel, segment, myWfm, dacRes, initialize=False):
+    def send_wfm_to_proteus(self, samplingRate, channel, segment, myWfm, dacRes, initialize=False, phase = 0.0):
         try:
             print(f"=== Waveform Download Debug ===")
             print(f"Channel: {channel}, Segment: {segment}, DAC Mode: {dacRes}")
@@ -492,7 +492,7 @@ class ProteusDriver:
             self.inst.send_scpi_cmd(cmd)
             cmd = ':FREQ:RAST {0}'.format(samplingRate)
             self.inst.send_scpi_cmd(cmd)
-            cmd = ':TRAC:DEL:ALL'  # Clear CH Memory
+            cmd = f':TRAC:DEL:SEGM {segment}'  # Clear CH Memory
             self.inst.send_scpi_cmd(cmd)
             cmd = ':INIT:CONT ON'  # play waveform continuously
             self.inst.send_scpi_cmd(cmd)
@@ -509,7 +509,6 @@ class ProteusDriver:
             self.inst.timeout = 10000  # return to normal
 
             # The instrument now has a waveform stored in its internal segment memory location number 1. The next step is to play it out. This is simply done by selecting segment and switching the instruments output on.
-
             cmd = ':FUNC:MODE:SEGM {0}'.format(segnum)
             self.inst.send_scpi_cmd(cmd)
             cmd = ':OUTP ON'
@@ -1129,7 +1128,7 @@ class ProteusDriver:
             raise ValueError(f'no sampling rate provided for model number {model}')
 
     def set_function_generator(self, channel, function='SIN', frequency=10e6,
-                               voltage=1, phase=0.0, enable=True):
+                               voltage=1.0, phase=0.0, offset = 0.0, enable=True):
         if channel not in self.chan_list:
             self.logger.error(f"Invalid channel: {channel}")
             return False
@@ -1157,21 +1156,21 @@ class ProteusDriver:
         # Waveform generation
         function = function.upper()
         if function == 'SIN':
-            dacWave = voltage * np.sin(w * time / segLen + phase_rad)
+            dacWave = np.sin(w * time / segLen + phase_rad)
         elif function == 'SQU':
-            dacWave = voltage * np.sign(np.sin(w * time / segLen + phase_rad))
+            dacWave = np.sign(np.sin(w * time / segLen + phase_rad))
         elif function == 'TRI':
             phase_samp = (phase / 360.0) * segLen
             x = ((time + phase_samp) / segLen) % 1
-            dacWave = voltage * 4 * np.abs(x - 0.5) - 1
+            dacWave = 4 * np.abs(x - 0.5) - 1
         elif function == 'RAMP':
             phase_samp = (phase / 360.0) * segLen
             x = ((time + phase_samp) / segLen) % 1
-            dacWave = voltage * 2 * x - 1
+            dacWave = 2 * x - 1
         elif function == 'NOIS':
-            dacWave = voltage * np.random.uniform(-1.0, 1.0, segLen)
+            dacWave = np.random.uniform(-1.0, 1.0, segLen)
         elif function == 'DC':
-            dacWave = voltage * np.ones(segLen)
+            dacWave = np.ones(segLen)
         else:
             self.logger.error(f"Unsupported waveform function: {function}")
             return False
@@ -1179,14 +1178,19 @@ class ProteusDriver:
         max_dac = 65535  # Max Dac
         half_dac = max_dac / 2  # DC Level
         data_type = np.uint16  # DAC data type
-        dacWave = ((dacWave) + 1.0) * half_dac
+        dacWave = np.clip((dacWave + 1.0)*half_dac, 0, max_dac)
         dacWave = dacWave.astype(data_type)
         # Upload to instrument
         try:
             # Use auto-detected DAC mode and target sampling rate
             self.send_wfm_to_proteus(samplingRate=baseband_rate, channel=channel, segment=channel, myWfm=dacWave,
-                                     dacRes=dac_mode, initialize=True if enable else False)
-            #self.send_command(f":SOUR:VOLT {voltage}")
+                                     dacRes=dac_mode, initialize=True if enable else False, phase = phase)
+            self.set_voltage(voltage)
+            if not isinstance(offset, (float, int)):
+                raise ValueError(f"Invalid voltage: {offset}")
+            if not (-0.5 <= offset <= 0.5):
+                raise ValueError(f"Invalid voltage: {offset}")
+            self.send_command(f':VOLT:OFFS {offset}')
             print('Done')
             return True
 
@@ -3075,7 +3079,7 @@ class ProteusDevice(Device):
 
             for ch in (1, 2):  # Assuming we're working with two channels
                 self.driver.set_amplitude(ch)  # Configure each channel
-                self.driver.set_offset(ch)
+                self.driver.set_voltage_offset(ch)
                 self.driver.set_marker(ch, 1)  # Marker 1
                 self.driver.set_marker(ch, 2)  # Marker 2
 
@@ -3160,9 +3164,9 @@ class ProteusDevice(Device):
         return 0
 
     def set_function_generator(self, channel, function='SIN', frequency=10e6,
-                               voltage=2.0, phase=0.0, enable=True):
+                               voltage=1.0, phase=0.0, offset = 0.0, enable=True):
         """Configure function generator parameters for a specific channel."""
-        return self.driver.set_function_generator(channel, function, frequency, voltage, phase, enable)
+        return self.driver.set_function_generator(channel, function, frequency, voltage, phase, offset, enable)
 
     def get_function_generator_status(self, channel):
         #Get current function generator status for a specific channel.
@@ -3219,9 +3223,19 @@ class ProteusDevice(Device):
 
 if __name__ == "__main__":
     dev = ProteusDriver('192.168.2.4')
-    dev.set_function_generator(1, 'SQU', 1000000)
+    BASEBAND_FREQ = 1 / (128e-9)  # 7,812,500 Hz  (64on + 64off)
+    FG_AMP = 0.55
+    FG_OFFSET = 0.37
+    FG_AMP_SET = 0.98  # = 0.5 / 0.5709
+    FG_OFFSET_SET = 0.019  # = 0.0 + 0.0194
+    # Ch1: min = 0.019 − 0.876 = −0.857 set → actual ≈ −0.500 V
+    # Ch2: same amplitude, phase = 90°
+    # Verify on scope: should read −0.50 V to +0.50 V
+    #dev.set_function_generator(1, 'SQU', 1000000)
     #dev.set_function_generator(4, 'SIN')
-    dev.set_function_generator(3, 'SQU', 1000000)
+    dev.set_function_generator(1, 'SIN', BASEBAND_FREQ, FG_AMP_SET, 0.0, FG_OFFSET_SET)
+    dev.set_function_generator(2, 'SIN', BASEBAND_FREQ, FG_AMP_SET, 90.0, FG_OFFSET_SET)
+    #dev.set_function_generator(3, 'SIN', 7000000, 0.55, 0.0, 0.37)
     #dev.set_function_generator(2, 'SIN')
     #dev.set_ch1_marker1_voltage(-0.5, 0.5)
     #time.sleep(10)
