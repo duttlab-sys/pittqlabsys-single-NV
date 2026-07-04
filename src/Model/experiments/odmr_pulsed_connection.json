@@ -5,7 +5,7 @@
       "1": {
         "connection": "IQ_modulator_I_input",
         "type": "analog",
-        "calibration_delays": ["iq_delay"],
+        "calibration_delays": [],
         "description": "Microwave I quadrature input to IQ modulator",
         "voltage_range": "±1V",
         "impedance": "50Ω"
@@ -13,7 +13,7 @@
       "2": {
         "connection": "IQ_modulator_Q_input",
         "type": "analog", 
-        "calibration_delays": ["iq_delay"],
+        "calibration_delays": [],
         "description": "Microwave Q quadrature input to IQ modulator",
         "voltage_range": "±1V",
         "impedance": "50Ω"
@@ -72,8 +72,8 @@
   },
   "calibration_delays": {
     "description": "Calibration delays for ODMR pulsed experiments",
-    "green_laser_delay": 6265.0,
-    "orange_laser_delay": 10.0,
+    "green_laser_delay": 0.0,
+    "orange_laser_delay": 0.0,
     "mw_delay": 25.0,
     "iq_delay": 30.0,
     "counter_delay": 15.0,
