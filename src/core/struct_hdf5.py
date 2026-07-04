@@ -164,13 +164,14 @@ def _read_mystruct(h5group, mystruct):
 def is_image_array(arr: np.ndarray) -> bool:
     if not isinstance(arr, np.ndarray):
         return False
-    if arr.dtype != np.uint8:
+    if not np.issubdtype(arr.dtype, np.number):
         return False
-    if arr.ndim == 2:
-        return True              # grayscale
+    if arr.ndim == 2 and arr.shape[0] > 1 and arr.shape[1] > 1:
+        return True              # grayscale, any numeric dtype (uint16, float, ...)
     if arr.ndim == 3 and arr.shape[2] in (3, 4):
         return True              # RGB / RGBA
     return False
+
 def iter_struct(obj, prefix=""):
     """
     Yields (path, value)
