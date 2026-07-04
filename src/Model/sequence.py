@@ -105,6 +105,7 @@ class Sequence:
                     continue
 
                 mk_markers = mk.generate_markers()
+                print("mk_markers dtype:", mk_markers.dtype)
 
                 # Check first pulse
                 on_indices = np.where(mk_markers != 0)[0]
@@ -114,7 +115,7 @@ class Sequence:
                     while first_pulse_end < len(mk_markers) and mk_markers[first_pulse_end] != 0:
                         first_pulse_end += 1
 
-                markers |= mk_markers
+                markers |= np.asarray(mk.generate_markers()).astype(np.uint8) #mk_markers
 
             # Store per-channel waveform
             output[ch] = {"envelope": envelope, "markers": markers}
