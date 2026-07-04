@@ -128,7 +128,9 @@ class Roper_Cascade_Camera(Device):
 
 if __name__ == "__main__":
     s=Roper_Cascade_Camera()
-
+    print(f"integration time: {s.read_probes("inttime")}")
+    s.update({'inttime': 99.0})
+    print(f"integration time: {s.read_probes("inttime")}")
     """print(f"integration time: {s.read_probes("inttime")}")
     print(f"gain: {s.read_probes("gain")}")
     print(f"resolution: {s.read_probes("resolution")}")
