@@ -11,8 +11,31 @@ from pathlib import Path
 import numpy as np
 
 from .sequence_description import SequenceDescription, PulseDescription, LoopDescription, ConditionalDescription, MarkerDescription
-from .pulses import Pulse, GaussianPulse, SechPulse, LorentzianPulse, SquarePulse, DataPulse, MarkerEvent
+from .pulses import (Pulse, GaussianPulse, SechPulse, LorentzianPulse, SquarePulse,
+                     DataPulse, MarkerEvent, ChirpPulse, HyperbolicSecantPulse,
+                     AsymmetricHyperbolicSecantPulse)
 from .sequence import Sequence
+
+def _display_envelope(pulse) -> np.ndarray:
+    """Amplitude envelope for PLOTTING only.
+
+    generate_samples() on a frequency-swept pulse (chirp / hs / asymm_hs) returns
+    one oscillating IQ quadrature (A(t)cos phi or A(t)sin phi). Drawn across a full
+    sequence axis those ~ns-period oscillations pack together and read as a solid
+    rectangle. For those pulses, reconstruct the true amplitude A(t) = sqrt(I^2+Q^2)
+    so the envelope shows. Non-swept pulses are returned unchanged.
+    """
+    env = np.asarray(pulse.generate_samples(), dtype=float)
+    if hasattr(pulse, "bandwidth") and hasattr(pulse, "quadrature"):
+        saved = pulse.quadrature
+        try:
+            pulse.quadrature = "I"; I = np.asarray(pulse.generate_samples(), dtype=float)
+            pulse.quadrature = "Q"; Q = np.asarray(pulse.generate_samples(), dtype=float)
+        finally:
+            pulse.quadrature = saved
+        if I.size and I.size == Q.size:
+            return np.sqrt(I ** 2 + Q ** 2)
+    return env
 
 
 class SequenceBuilder:
@@ -336,13 +359,25 @@ class SequenceBuilder:
 
         expr = expr.strip()
         # Allowed operators
+        import math
+        # Allowed operators
         operators = {
             ast.Add: operator.add,
             ast.Sub: operator.sub,
             ast.Mult: operator.mul,
             ast.Div: operator.truediv,
+            ast.Pow: operator.pow,
             ast.USub: operator.neg,
+            ast.UAdd: operator.pos,
         }
+        # Allowed functions and constants (e.g. phase sweeps: cos(phase), sin(phase))
+        functions = {
+            "sin": math.sin, "cos": math.cos, "tan": math.tan,
+            "asin": math.asin, "acos": math.acos, "atan": math.atan,
+            "sqrt": math.sqrt, "exp": math.exp, "log": math.log,
+            "abs": abs,
+        }
+        constants = {"pi": math.pi, "e": math.e}
 
         def _eval(node):
             if isinstance(node, ast.Expression):
@@ -365,10 +400,21 @@ class SequenceBuilder:
             elif isinstance(node, ast.UnaryOp):
                 return operators[type(node.op)](_eval(node.operand))
 
+            elif isinstance(node, ast.Call):
+                # function call, e.g. cos(phase), sin(phase/2)
+                if not isinstance(node.func, ast.Name) or node.func.id not in functions:
+                    raise ValueError(f"Unsupported function in expression: {expr}")
+                if node.keywords:
+                    raise ValueError(f"Keyword arguments not allowed: {expr}")
+                return functions[node.func.id](*[_eval(arg) for arg in node.args])
+
             elif isinstance(node, ast.Name):
-                if node.id not in variables:
-                    raise KeyError(f"Unknown variable '{node.id}'")
-                return variables[node.id]
+                # variables take precedence, then math constants (pi, e)
+                if node.id in variables:
+                    return variables[node.id]
+                if node.id in constants:
+                    return constants[node.id]
+                raise KeyError(f"Unknown variable '{node.id}'")
 
             else:
                 raise ValueError(f"Unsupported expression: {expr}")
@@ -543,6 +589,50 @@ class SequenceBuilder:
                 name=pulse_desc.name,
                 length=pulse_length,
                 filename=filename
+            )
+        elif pulse_desc.shape.value == "chirp":
+            bandwidth = pulse_desc.get_parameter("bandwidth")
+            if bandwidth is None:
+                raise ValueError(f"chirp pulse '{pulse_desc.name}' requires a 'bandwidth' parameter (Hz)")
+            return ChirpPulse(
+                name=pulse_desc.name, length=pulse_length, sample_rate=self.sample_rate,
+                bandwidth=float(bandwidth), amplitude=pulse_desc.amplitude,
+                quadrature=pulse_desc.get_parameter("quadrature", "I"),
+                center_freq=float(pulse_desc.get_parameter("center_freq", 0.0)),
+                edge_fraction=float(pulse_desc.get_parameter("edge_fraction", 0.0)),
+                phase0=float(pulse_desc.get_parameter("phase0", 0.0)),
+                fixed_timing=getattr(pulse_desc, 'fixed_timing', False)
+            )
+
+        elif pulse_desc.shape.value == "hs":
+            bandwidth = pulse_desc.get_parameter("bandwidth")
+            if bandwidth is None:
+                raise ValueError(f"hs pulse '{pulse_desc.name}' requires a 'bandwidth' parameter (Hz)")
+            return HyperbolicSecantPulse(
+                name=pulse_desc.name, length=pulse_length, sample_rate=self.sample_rate,
+                bandwidth=float(bandwidth), beta=float(pulse_desc.get_parameter("beta", 5.3)),
+                amplitude=pulse_desc.amplitude,
+                quadrature=pulse_desc.get_parameter("quadrature", "I"),
+                center_freq=float(pulse_desc.get_parameter("center_freq", 0.0)),
+                phase0=float(pulse_desc.get_parameter("phase0", 0.0)),
+                fixed_timing=getattr(pulse_desc, 'fixed_timing', False)
+            )
+
+        elif pulse_desc.shape.value == "asymm_hs":
+            bandwidth = pulse_desc.get_parameter("bandwidth")
+            if bandwidth is None:
+                raise ValueError(f"asymm_hs pulse '{pulse_desc.name}' requires a 'bandwidth' parameter (Hz)")
+            return AsymmetricHyperbolicSecantPulse(
+                name=pulse_desc.name, length=pulse_length, sample_rate=self.sample_rate,
+                bandwidth=float(bandwidth),
+                n_left=float(pulse_desc.get_parameter("n_left", 1.0)),
+                n_right=float(pulse_desc.get_parameter("n_right", 6.0)),
+                beta=float(pulse_desc.get_parameter("beta", 5.3)),
+                amplitude=pulse_desc.amplitude,
+                quadrature=pulse_desc.get_parameter("quadrature", "I"),
+                center_freq=float(pulse_desc.get_parameter("center_freq", 0.0)),
+                phase0=float(pulse_desc.get_parameter("phase0", 0.0)),
+                fixed_timing=getattr(pulse_desc, 'fixed_timing', False)
             )
         
         else:
@@ -803,7 +893,7 @@ class SequenceBuilder:
                 # Use the pulse's actual shape from SequenceBuilder
                 try:
                     # Get the actual pulse envelope that was already generated
-                    pulse_envelope = pulse.generate_samples()
+                    pulse_envelope = _display_envelope(pulse)
                     
                     # Scale and position the envelope for visualization
                     pulse_time = np.arange(max(0, start_time_ns), min(len(time_ns), end_time_ns))
@@ -813,7 +903,7 @@ class SequenceBuilder:
                         envelope_values = pulse_envelope[envelope_indices]
                         
                         # Scale to visualization amplitude (0.4 above baseline)
-                        scaled_values = 0.4 * envelope_values / np.max(envelope_values) if np.max(envelope_values) > 0 else 0
+                        scaled_values = 0.4 * envelope_values / np.max(np.abs(envelope_values))
                         
                         valid_indices = (pulse_time >= 0) & (pulse_time < len(time_ns))
                         channel_signals[channel][pulse_time[valid_indices]] = scaled_values[valid_indices]
@@ -980,65 +1070,35 @@ class SequenceBuilder:
 
                 # Create pulse shape based on pulse type
                 if hasattr(pulse, 'generate_samples'):
-                    # Use the pulse's actual shape from SequenceBuilder
                     try:
-                        # Get the actual pulse envelope that was already generated
-                        pulse_envelope = pulse.generate_samples()
+                        pulse_envelope = _display_envelope(pulse)
 
                         # Skip waits / zero pulses
-                        if (
-                                pulse_envelope is None
-                                or np.isscalar(pulse_envelope)
+                        if (pulse_envelope is None or np.isscalar(pulse_envelope)
                                 or len(pulse_envelope) == 0
-                                or np.max(np.abs(pulse_envelope)) == 0
-                        ):
+                                or np.max(np.abs(pulse_envelope)) == 0):
                             continue
 
-                        pulse_time = np.arange(
-                            max(0, start_time_ns),
-                            min(len(time_ns), end_time_ns)
-                        )
-
+                        pulse_time = np.arange(max(0, start_time_ns),
+                                               min(len(time_ns), end_time_ns))
                         if len(pulse_time) == 0:
                             continue
 
                         envelope_indices = np.linspace(
-                            0, len(pulse_envelope) - 1,
-                            len(pulse_time),
-                            dtype=int
-                        )
-
+                            0, len(pulse_envelope) - 1, len(pulse_time), dtype=int)
                         envelope_values = pulse_envelope[envelope_indices]
 
-                        channel_signals[channel][pulse_time] = (
-                                0.4 * envelope_values / np.max(envelope_values)
-                        )
-
-                        # Scale and position the envelope for visualization
-                        pulse_time = np.arange(max(0, start_time_ns), min(len(time_ns), end_time_ns))
-                        if len(pulse_time) > 0:
-                            # Map pulse envelope to time range
-                            envelope_indices = np.linspace(0, len(pulse_envelope) - 1, len(pulse_time), dtype=int)
-                            envelope_values = pulse_envelope[envelope_indices]
-
-                            # Scale to visualization amplitude (0.4 above baseline)
-                            #scaled_values = 0.4 * envelope_values / np.max(envelope_values) if np.max(envelope_values) > 0 else 0
-                            scaled_values = 0.4 * envelope_values if np.max(
-                                envelope_values) > 0 else 0
-
-                            valid_indices = (pulse_time >= 0) & (pulse_time < len(time_ns))
-                            channel_signals[channel][pulse_time[valid_indices]] = scaled_values[valid_indices]
+                        # peak -> 0.4 above baseline (abs() so a signed envelope scales right)
+                        peak = np.max(np.abs(envelope_values))
+                        channel_signals[channel][pulse_time] = 0.4 * envelope_values / peak
                     except Exception as e:
-                        # If pulse generation fails, use square pulse as fallback
-                        print(f"Warning3: Could not generate pulse shape for {pulse.name}, using square fallback: {e}")
-                        if start_time_ns >= 0 and start_time_ns < len(time_ns):
-                            end_idx = min(len(time_ns), end_time_ns)
-                            channel_signals[channel][start_time_ns:end_idx] = 0.4
+                        print(
+                            f"Warning3: Could not generate pulse shape for {pulse.name}, using square fallback: {e}")
+                        if 0 <= start_time_ns < len(time_ns):
+                            channel_signals[channel][start_time_ns:min(len(time_ns), end_time_ns)] = 0.4
                 else:
-                    # For pulses without generate_samples method, use square pulse
-                    if start_time_ns >= 0 and start_time_ns < len(time_ns):
-                        end_idx = min(len(time_ns), end_time_ns)
-                        channel_signals[channel][start_time_ns:end_idx] = 0.4
+                    if 0 <= start_time_ns < len(time_ns):
+                        channel_signals[channel][start_time_ns:min(len(time_ns), end_time_ns)] = 0.4
 
             # Plot signals
             for channel in channels:

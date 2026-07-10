@@ -20,6 +20,9 @@ class PulseShape(Enum):
     SINE = "sine"
     LOADFILE = "loadfile"
     DATA = "data"
+    CHIRP = "chirp"  # linear frequency-swept adiabatic inversion pulse
+    HS = "hs"  # symmetric hyperbolic secant (sech/tanh, HS1)
+    ASYMM_HS = "asymm_hs"  # asymmetric hyperbolic secant HS{n_left, n_right}
 
 
 class TimingType(Enum):

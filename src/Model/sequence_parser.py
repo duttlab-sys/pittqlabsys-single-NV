@@ -444,6 +444,10 @@ class SequenceTextParser:
                             # Handle frequency with units
                             numeric_value, unit = self._parse_value_with_unit(param_value)
                             parameters[param_name] = numeric_value
+                        elif param_name in ("bandwidth", "center_freq"):
+                            # frequency-like sweep parameters, allow units (e.g. 300MHz)
+                            numeric_value, unit = self._parse_value_with_unit(param_value)
+                            parameters[param_name] = numeric_value
                         else:
                             # Generic parameter
                             try:

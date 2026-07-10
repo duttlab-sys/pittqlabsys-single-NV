@@ -1065,11 +1065,25 @@ class ODMRSweepContinuousExperiment(Experiment):
     def _update(self, axes_list: List[pg.PlotItem]):
         """Update the plots with new data."""
         self._plot(axes_list)
-    
+
     def get_axes_layout(self, figure_list):
-        """Return the actual graph objects to plot into (pyqtgraph PlotWidgets),
-        not string labels. The GUI passes the two graphs as figure_list."""
-        return figure_list
+        """Build (or reuse) one PlotItem per GraphicsLayoutWidget.
+
+        On a refresh we clear each layout widget and create fresh PlotItems.
+        Clearing is what discards any PlotItem (and its view state) left behind
+        by a previously-run experiment -- e.g. the fixed x-range the confocal
+        point experiment pins with setXRange(). Without it the ODMR curve
+        inherits that stale range and every point lands on the same x pixel.
+        """
+        axes_list = []
+        if self._plot_refresh is True:
+            for graph in figure_list:
+                graph.clear()
+                axes_list.append(graph.addPlot(row=0, col=0))
+        else:
+            for graph in figure_list:
+                axes_list.append(graph.getItem(row=0, col=0))
+        return axes_list
     
     def get_experiment_info(self) -> Dict[str, Any]:
         """Get information about the experiment."""

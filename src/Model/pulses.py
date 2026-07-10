@@ -142,3 +142,146 @@ class MarkerEvent:
         return markers
 
 
+# ======================================================================
+# Frequency-swept (adiabatic) pulses for chirp / HS DEER pumping.
+# These are FREQUENCY-MODULATED: the baseband is complex, z(t)=A(t)e^{i*phi(t)},
+# so the I channel carries Re[z] and Q carries Im[z]. Each pulse emits ONE
+# quadrature (quadrature='I' or 'Q'); place an I copy on the I channel and a Q
+# copy on the Q channel with identical parameters. bandwidth/center_freq are
+# BASEBAND frequencies in Hz (the LO sets the RF center of the sweep).
+# ======================================================================
+
+def _phase_from_frequency(freq_hz: np.ndarray, sample_rate: float) -> np.ndarray:
+    """Instantaneous phase (rad): 2*pi * cumulative integral of f(t), referenced to pulse center."""
+    dt = 1.0 / sample_rate
+    phase = 2.0 * np.pi * np.cumsum(freq_hz) * dt
+    phase -= phase[len(phase) // 2]      # global phase reference at the temporal center
+    return phase
+
+
+def _apply_quadrature(amp_env: np.ndarray, phase: np.ndarray, quadrature: str, phase0: float = 0.0) -> np.ndarray:
+    q = str(quadrature).upper()
+    if q == "I":
+        return (amp_env * np.cos(phase + phase0)).astype(float)
+    if q == "Q":
+        return (amp_env * np.sin(phase + phase0)).astype(float)
+    raise ValueError(f"quadrature must be 'I' or 'Q' (got {quadrature!r})")
+
+
+class ChirpPulse(Pulse):
+    """
+    Linear frequency-swept ('chirp') adiabatic inversion pulse, one IQ quadrature.
+        amplitude(t) = A0                (flat top, optional quarter-sine edges)
+        f(t)         = center_freq - bandwidth/2 + bandwidth * t/Tp   (linear sweep)
+        I = A0 cos(phi(t)),  Q = A0 sin(phi(t)),   phi = 2*pi * integral f dt
+    """
+    def __init__(self, name: str, length: int, sample_rate: float, bandwidth: float,
+                 amplitude: float = 1.0, quadrature: str = "I", center_freq: float = 0.0,
+                 edge_fraction: float = 0.0, phase0: float = 0.0, fixed_timing: bool = False):
+        super().__init__(name, length, fixed_timing)
+        self.sample_rate = float(sample_rate)
+        self.bandwidth = float(bandwidth)
+        self.amplitude = float(amplitude)
+        self.quadrature = quadrature
+        self.center_freq = float(center_freq)
+        self.edge_fraction = float(edge_fraction)
+        self.phase0 = float(phase0)
+
+    def generate_samples(self) -> np.ndarray:
+        n = self.length
+        if n <= 0:
+            return np.zeros(0, dtype=float)
+        t = np.arange(n) / self.sample_rate
+        Tp = n / self.sample_rate
+        f = self.center_freq - self.bandwidth / 2.0 + self.bandwidth * (t / Tp)
+        amp = np.full(n, self.amplitude, dtype=float)
+        ne = int(self.edge_fraction * n)
+        if ne > 0:
+            ramp = np.sin(np.linspace(0.0, np.pi / 2.0, ne))
+            amp[:ne] *= ramp
+            amp[-ne:] *= ramp[::-1]
+        phase = _phase_from_frequency(f, self.sample_rate)
+        return _apply_quadrature(amp, phase, self.quadrature, self.phase0)
+
+
+class HyperbolicSecantPulse(Pulse):
+    """
+    Symmetric hyperbolic-secant (sech/tanh, 'HS1') adiabatic inversion pulse, one IQ quadrature.
+        x            = linspace(-1, 1, N)                (normalized time, 0 at center)
+        amplitude(t) = A0 * sech(beta * x)
+        f(t)         = center_freq + (bandwidth/2) * tanh(beta*x)/tanh(beta)
+    beta = dimensionless truncation (sech(beta) is the edge amplitude; beta ~ 5.3 -> ~1%).
+    bandwidth = full edge-to-edge sweep in Hz.
+    """
+    def __init__(self, name: str, length: int, sample_rate: float, bandwidth: float,
+                 beta: float = 5.3, amplitude: float = 1.0, quadrature: str = "I",
+                 center_freq: float = 0.0, phase0: float = 0.0, fixed_timing: bool = False):
+        super().__init__(name, length, fixed_timing)
+        self.sample_rate = float(sample_rate)
+        self.bandwidth = float(bandwidth)
+        self.beta = float(beta)
+        self.amplitude = float(amplitude)
+        self.quadrature = quadrature
+        self.center_freq = float(center_freq)
+        self.phase0 = float(phase0)
+
+    def generate_samples(self) -> np.ndarray:
+        n = self.length
+        if n <= 0:
+            return np.zeros(0, dtype=float)
+        x = np.linspace(-1.0, 1.0, n)
+        amp = self.amplitude / np.cosh(self.beta * x)
+        f = self.center_freq + (self.bandwidth / 2.0) * np.tanh(self.beta * x) / np.tanh(self.beta)
+        phase = _phase_from_frequency(f, self.sample_rate)
+        return _apply_quadrature(amp, phase, self.quadrature, self.phase0)
+
+
+class AsymmetricHyperbolicSecantPulse(Pulse):
+    """
+    Asymmetric hyperbolic-secant pulse 'HS{n_left, n_right}' (e.g. HS{1,6}), one IQ quadrature.
+    Offset-independent-adiabaticity (OIA) construction: stretched-sech amplitude with different
+    steepness on the two halves; frequency sweep proportional to the running integral of amp^2
+    (so the pulse dwells longest where B1 is largest).
+        x            = linspace(-1, 1, N)
+        n(x)         = n_left for x < 0, else n_right
+        amplitude(t) = A0 * sech(beta * |x|**n(x))
+        f(t)         = center_freq + bandwidth * (G(x) - 0.5),  G = normalized cumulative integral of amp^2
+    n_left == n_right -> symmetric HSn; n_left == n_right == 1 -> HS1. Jeschke et al.: HS{1,6} best for short DEER traces.
+    """
+    def __init__(self, name: str, length: int, sample_rate: float, bandwidth: float,
+                 n_left: float = 1.0, n_right: float = 6.0, beta: float = 5.3,
+                 amplitude: float = 1.0, quadrature: str = "I", center_freq: float = 0.0,
+                 phase0: float = 0.0, fixed_timing: bool = False):
+        super().__init__(name, length, fixed_timing)
+        self.sample_rate = float(sample_rate)
+        self.bandwidth = float(bandwidth)
+        self.n_left = float(n_left)
+        self.n_right = float(n_right)
+        self.beta = float(beta)
+        self.amplitude = float(amplitude)
+        self.quadrature = quadrature
+        self.center_freq = float(center_freq)
+        self.phase0 = float(phase0)
+
+    def generate_samples(self) -> np.ndarray:
+        n = self.length
+        if n <= 0:
+            return np.zeros(0, dtype=float)
+        x = np.linspace(-1.0, 1.0, n)
+        order = np.where(x < 0.0, self.n_left, self.n_right)
+        amp = self.amplitude / np.cosh(self.beta * np.abs(x) ** order)
+        g = np.cumsum(amp ** 2)
+        g = (g - g[0]) / (g[-1] - g[0])          # normalize running integral to [0, 1]
+        f = self.center_freq + self.bandwidth * (g - 0.5)
+        phase = _phase_from_frequency(f, self.sample_rate)
+        return _apply_quadrature(amp, phase, self.quadrature, self.phase0)
+
+
+def adiabaticity_Q(bandwidth_hz: float, duration_s: float, rabi_hz: float) -> float:
+    """
+    Adiabaticity parameter Q = Omega1^2 / |d(delta)/dt| at resonance (Appendix A). Need Q >> 1.
+    For a linear sweep |d(delta)/dt| = 2*pi*bandwidth/duration. rabi_hz = Omega1/2pi = gamma*B1/2pi.
+    """
+    sweep_rate = 2.0 * np.pi * bandwidth_hz / duration_s
+    omega1 = 2.0 * np.pi * rabi_hz
+    return (omega1 ** 2) / sweep_rate
