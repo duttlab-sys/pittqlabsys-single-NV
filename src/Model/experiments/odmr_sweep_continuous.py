@@ -92,6 +92,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('smooth_window', 5, int, 'Smoothing window size'),
             Parameter('background_subtraction', True, bool, 'Subtract background')
         ]),
+        Parameter('2D_Plot', False, bool, 'Plot every individual sweep as a 2D map (no averaging) instead of the averaged 1D spectrum'),
         Parameter('filename', "ODMR_Sweep_Continuous", str, "file name to be saved")
     ]
     
@@ -1000,10 +1001,14 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.data['num_steps'] = self.num_steps
         self.data['fit_parameters'] = self.fit_parameters
         self.data['resonance_frequencies'] = self.resonance_frequencies
+        self.data['resonance_frequencies'] = self.resonance_frequencies
+        # per-sweep raw data (for the 2D view and for reloading)
+        self.data['all_counts_forward'] = getattr(self, 'all_forward', None)
+        self.data['all_counts_reverse'] = getattr(self, 'all_reverse', None)
+        self.data['all_voltages_forward'] = getattr(self, 'all_v_fwd', None)
 
-    def _plot(self, axes_list):
-        """Plot into pyqtgraph. The GUI passes GraphicsLayoutWidget containers,
-        so we fetch/create a PlotItem from each before plotting."""
+    """def _plot(self, axes_list):
+        #Plot into pyqtgraph. The GUI passes GraphicsLayoutWidget containers, so we fetch/create a PlotItem from each before plotting.
         if not axes_list:
             return
 
@@ -1060,7 +1065,167 @@ class ODMRSweepContinuousExperiment(Experiment):
                 ax2.setLabel('bottom', 'Frequency (GHz)')
                 ax2.setLabel('left', 'Voltage (V)')
                 ax2.setTitle('SG384 FM Input Voltage Ramp')
+                ax2.showGrid(x=True, y=True, alpha=0.3)"""
+
+
+    def _plot(self, axes_list):
+        """Plot into pyqtgraph. Works whether axes_list holds PlotItems
+        (from the fixed get_axes_layout) or raw GraphicsLayoutWidgets."""
+        if not axes_list:
+            return
+
+        def _plot_item(w):
+            if hasattr(w, "plot") and hasattr(w, "clear"):
+                return w
+            if hasattr(w, "ci") and hasattr(w, "addPlot"):
+                items = [it for it in w.ci.items if isinstance(it, pg.PlotItem)]
+                return items[0] if items else w.addPlot(row=0, col=0)
+            return None
+
+        axes = [pi for pi in (_plot_item(w) for w in axes_list) if pi is not None]
+        if not axes:
+            return
+
+        # 2D per-sweep map vs the usual 1D averaged spectrum
+        if bool(self.settings.get('2D_Plot', False)):
+            self._plot_2d(axes)
+            return
+
+        # ---------------- 1D averaged view (unchanged) ----------------
+        ax = axes[0]
+        ax.clear()
+
+        if self.frequencies is None or self.counts_averaged is None:
+            return
+
+        f_ghz = self.frequencies / 1e9
+
+        ax.plot(f_ghz, self.counts_forward, pen=None, symbol='o', symbolSize=5,
+                symbolBrush='b', symbolPen=None, name='Forward')
+        ax.plot(f_ghz, self.counts_reverse, pen=None, symbol='o', symbolSize=5,
+                symbolBrush='g', symbolPen=None, name='Reverse')
+        ax.plot(f_ghz, self.counts_averaged, pen=None, symbol='o', symbolSize=6,
+                symbolBrush='r', symbolPen=None, name='Averaged')
+
+        if self.resonance_frequencies:
+            for freq in self.resonance_frequencies:
+                ax.addItem(pg.InfiniteLine(pos=freq / 1e9, angle=90,
+                                           pen=pg.mkPen('y', style=Qt.DashLine)))
+
+        ax.setLabel('bottom', 'Frequency (GHz)')
+        ax.setLabel('left', 'Photon Counts')
+        ax.setTitle('ODMR Continuous Sweep Spectrum')
+        ax.showGrid(x=True, y=True, alpha=0.3)
+
+        if len(axes) > 1:
+            ax2 = axes[1]
+            ax2.clear()
+            if self.voltages is not None:
+                ax2.plot(f_ghz, self.voltages, pen=None, symbol='o', symbolSize=5,
+                         symbolBrush='m', symbolPen=None,
+                         name='Voltage Ramp (SG384 FM Input)')
+                ax2.setLabel('bottom', 'Frequency (GHz)')
+                ax2.setLabel('left', 'Voltage (V)')
+                ax2.setTitle('SG384 FM Input Voltage Ramp')
                 ax2.showGrid(x=True, y=True, alpha=0.3)
+
+
+    def _plot_2d(self, axes):
+        """2D 'waterfall' view: one row per individual sweep, NO averaging.
+        x = frequency, y = sweep #, colour = photon counts. Pane 1 = forward
+        sweeps, pane 2 = reverse sweeps."""
+        # prefer the live per-sweep arrays; fall back to self.data (e.g. reload)
+        all_fwd = getattr(self, 'all_forward', None)
+        if all_fwd is None and self.data:
+            all_fwd = self.data.get('all_counts_forward')
+        all_rev = getattr(self, 'all_reverse', None)  # already flipped to align in freq
+        if all_rev is None and self.data:
+            all_rev = self.data.get('all_counts_reverse')
+
+        if all_fwd is None or self.frequencies is None:
+            for ax in axes:  # nothing acquired yet
+                ax.clear()
+            return
+
+        f_ghz = self.frequencies / 1e9
+
+        self._draw_sweep_map(axes[0], np.asarray(all_fwd, dtype=float), f_ghz,
+                             'ODMR per-sweep map — Forward', '_cbar_fwd')
+
+        if len(axes) > 1 and all_rev is not None:
+            self._draw_sweep_map(axes[1], np.asarray(all_rev, dtype=float), f_ghz,
+                                 'ODMR per-sweep map — Reverse', '_cbar_rev')
+
+
+    def _draw_sweep_map(self, ax, data, f_ghz, title, cbar_attr):
+        """Render one (n_sweeps, n_freq) array as a scaled colour image on PlotItem ax."""
+        ax.clear()
+        if data.ndim != 2 or data.size == 0:
+            return
+        n_sweeps, n_freq = data.shape
+
+        # robust colour limits (ignore a few outlier pixels)
+        vmin = float(np.nanpercentile(data, 1))
+        vmax = float(np.nanpercentile(data, 99))
+        if not np.isfinite(vmin):
+            vmin = float(np.nanmin(data))
+        if not np.isfinite(vmax) or vmax <= vmin:
+            vmax = vmin + 1.0
+
+        cmap = self._get_colormap()
+
+        img = pg.ImageItem()
+        # pyqtgraph's default axis order is col-major -> it wants image[x, y].
+        # Our data is [sweep(y), freq(x)], so transpose to [freq, sweep].
+        img.setImage(data.T, autoLevels=False)
+        img.setLevels([vmin, vmax])
+        try:
+            img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
+        except Exception:
+            pass
+
+        # map image pixels -> data coords: x spans frequency, y = sweep index
+        x0, x1 = float(f_ghz[0]), float(f_ghz[-1])
+        width = (x1 - x0) if x1 != x0 else 1.0
+        img.setRect(pg.QtCore.QRectF(x0, 0.0, width, float(n_sweeps)))
+
+        ax.addItem(img)
+        ax.setLabel('bottom', 'Frequency (GHz)')
+        ax.setLabel('left', 'Sweep #  (bottom = first)')
+        ax.setTitle(title)
+        ax.showGrid(x=False, y=False)
+        ax.setXRange(x0, x1, padding=0)
+        ax.setYRange(0.0, float(n_sweeps), padding=0)
+
+        # optional colour bar (best-effort; never let it break the plot)
+        try:
+            cbar = getattr(self, cbar_attr, None)
+            host_id = id(ax)
+            if cbar is None or getattr(self, cbar_attr + '_host', None) != host_id:
+                cbar = pg.ColorBarItem(colorMap=cmap, values=(vmin, vmax))
+                setattr(self, cbar_attr, cbar)
+                setattr(self, cbar_attr + '_host', host_id)
+                cbar.setImageItem(img, insert_in=ax)  # insert into the (fresh) pane
+            else:
+                cbar.setImageItem(img)  # re-link, don't re-insert
+            cbar.setLevels((vmin, vmax))
+        except Exception:
+            pass
+
+
+    def _get_colormap(self):
+        """Perceptually-uniform colormap with graceful fallbacks across pyqtgraph versions."""
+        for getter in (lambda: pg.colormap.get('viridis'),
+                       lambda: pg.colormap.getFromMatplotlib('viridis'),
+                       lambda: pg.colormap.get('CET-L9')):
+            try:
+                cm = getter()
+                if cm is not None:
+                    return cm
+            except Exception:
+                continue
+        return pg.ColorMap([0.0, 0.5, 1.0],
+                           [(68, 1, 84), (33, 145, 140), (253, 231, 37)])
     
     def _update(self, axes_list: List[pg.PlotItem]):
         """Update the plots with new data."""
