@@ -15,6 +15,10 @@ import cv2
 from typing import List, Tuple
 from PyQt5.QtWidgets import QMessageBox, QPushButton
 from PyQt5.QtWidgets import QInputDialog
+from PyQt5.QtWidgets import QApplication, QProgressDialog
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtWidgets import QLabel   # or add to your top imports
 # Assuming the .ui file is converted to design.py
 #To convert positioning_stages_design.ui to .py, paste this into the terminal:
 # pyuic5 -x positioning_stages_design.ui -o positioning_stages_design.py
@@ -146,6 +150,7 @@ class positioning_stages_view(QWidget, Ui_Form):
         self.y_crosshair = None
         self.start_camera_scan.clicked.connect(self._start_camera_scan)
         self.go_to_nv.clicked.connect(self._go_to_nv)
+        self.scan_preview = QLabel(self)
 
     def connect_to_instrument_1(self):
         """This function connects the devices: please make sure that your stage has the function get_position(self, axis)"""
@@ -790,10 +795,10 @@ class positioning_stages_view(QWidget, Ui_Form):
         number_of_z_points = 1
         z_range = 0
         if self.z_scan_checkBox.isChecked():
-            z_min, ok = QInputDialog.getDouble(self, "Z Scan", "Minimum Z (µm):", 0.0)
+            z_min, ok = QInputDialog.getDouble(self, "Z Scan", "Minimum Z (µm):", 30.0)
             if not ok:
                 return
-            z_max, ok = QInputDialog.getDouble(self, "Z Scan", "Maximum Z (µm):", 10.0)
+            z_max, ok = QInputDialog.getDouble(self, "Z Scan", "Maximum Z (µm):", 80.0)
             if not ok:
                 return
             z_step, ok = QInputDialog.getDouble(self, "Z Scan", "Z Step (µm):", 1.0)
@@ -855,23 +860,34 @@ class positioning_stages_view(QWidget, Ui_Form):
         settle_time = 100  # ms
         #estimated_time = (10000 * 2 + settle_time) * number_of_scans
         shorter_axis_steps = shorter_range/ number_of_2D_points
-        focused_z_location = self.get_coords(structure.INITIAL, "wire_edge", "microz")
+        focused_nano_z_location = self.get_coords(structure.INITIAL, "wire_edge", "nanoz")
+        focused_micro_z_location = self.get_coords(structure.INITIAL, "wire_edge", "microz")
         returned = self.error_box("Warning", "Please put filters in the path. Click Ok when ready.", "Camera_Safety")
         image_number = 0
         if returned == True:
             if self.z_scan_checkBox.isChecked():
                 z_pos = z_min
             else:
-                z_pos = focused_z_location
+                z_pos = focused_nano_z_location
+            micro_z_pos = focused_micro_z_location
             shorter_axis_pos = shorter_axis_initial
             longer_axis_pos = longer_axis_initial
             root = MyStruct()
             self.error_box("Starting Scan", "Camera Scan has started", "Scan Status")
+            scan_start = time.monotonic()
+            progress = QProgressDialog("Time remaining: estimating…", "Cancel",
+                                       0, number_of_scans, self)
+            progress.setWindowTitle("Camera Scan")
+            progress.setWindowModality(Qt.WindowModal)  # also blocks re-clicking the scan button
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
             while image_number < number_of_scans:
                 # take data focused_z_location => max; take data min => focused_z_location such as focused_z_location is the z location of the focused laser
                 image_number += 1
-                if (z_pos != self.stage_3.get_position("z")):
-                    self.stage_3.set_position("z", z_pos)
+                if (micro_z_pos != self.stage_3.get_position("z")):
+                    self.stage_3.set_position("z", micro_z_pos)
+                if (z_pos != self.stage_1.get_position("z")):
+                    self.stage_1.set_position("z", z_pos)
                 self.stage_2.set_position(shorter_axis, shorter_axis_pos/ 1000)
                 self.stage_2.set_position(longer_axis, longer_axis_pos / 1000)
                 time.sleep(settle_time/1000)
@@ -883,10 +899,29 @@ class positioning_stages_view(QWidget, Ui_Form):
                 point.micro_x = self.stage_2.get_position("x")
                 point.micro_y = self.stage_2.get_position("y")
                 point.micro_z = self.stage_3.get_position("z")
+                point.nano_z = self.stage_1.get_position("z")
                 point.timestamp = datetime.utcnow().isoformat()
-                while self.frame_ready == False:
-                    time.sleep(10000/1000)
+                """while self.frame_ready == False:
+                    time.sleep(10000/1000)"""
+                capture_timeout_s = 30  # tune above your longest exposure
+                wait_start = time.monotonic()
+                while not self.frame_ready:
+                    QApplication.processEvents()  # lets the capture slot run + repaints
+                    time.sleep(0.02)
+                    if time.monotonic() - wait_start > capture_timeout_s:
+                        break
                 point.camera_image = self.frame
+                # --- progress + time remaining ---
+                elapsed = time.monotonic() - scan_start
+                avg = elapsed / image_number  # image_number already incremented at top
+                remaining = avg * (number_of_scans - image_number)
+                progress.setValue(image_number)
+                progress.setLabelText(
+                    f"Image {image_number}/{number_of_scans}\n"
+                    f"Time remaining: {remaining:0.0f} s")
+                if progress.wasCanceled():
+                    break
+
                 if self.z_scan_checkBox.isChecked():
                     if z_pos < z_max:
                         z_pos = z_pos + z_step
@@ -904,7 +939,7 @@ class positioning_stages_view(QWidget, Ui_Form):
                 swmr=False  # snapshot, not live
             )
             self.error_box("Finished Scanning", "Camera Scan is finished.", "Scan Status")
-
+            progress.close()
         else:
             return
 
@@ -937,6 +972,7 @@ class positioning_stages_view(QWidget, Ui_Form):
                 _scalar(getattr(point, "micro_x", None)),
                 _scalar(getattr(point, "micro_y", None)),
                 _scalar(getattr(point, "micro_z", None)),
+                _scalar(getattr(point, "nano_z", None)),
             ))
 
         if not results:
@@ -950,9 +986,9 @@ class positioning_stages_view(QWidget, Ui_Form):
         choice = self._choose_nv_candidate(top3)
         if choice is None:
             return  # cancelled
-        _peak, _name, x, y, z = choice
+        _peak, _name, x, y, z, zn = choice
 
-        self._go_to_micro_position(x, y, z)
+        self._go_to_nv_position(x, y, z, zn)
         return choice
 
     def _choose_nv_candidate(self, top3):
@@ -965,9 +1001,9 @@ class positioning_stages_view(QWidget, Ui_Form):
         layout.addWidget(QLabel("Select the point to move to:"))
 
         group = QButtonGroup(dlg)
-        for i, (peak, name, x, y, z) in enumerate(top3):
+        for i, (peak, name, x, y, z, zn) in enumerate(top3):
             rb = QRadioButton(
-                f"{name}:   peak={peak:.1f}    x={x:.4f}  y={y:.4f}  z={z:.4f}")
+                f"{name}:   peak={peak:.1f}    x={x:.4f}  y={y:.4f}  z={z:.4f} znano = {zn:.4f}",)
             if i == 0:
                 rb.setChecked(True)  # default to the brightest
             group.addButton(rb, i)
@@ -985,7 +1021,7 @@ class positioning_stages_view(QWidget, Ui_Form):
             return None
         return top3[idx]
 
-    def _go_to_micro_position(self, micro_x, micro_y, micro_z):
+    def _go_to_nv_position(self, micro_x, micro_y, micro_z, nano_z):
         """Drive the XY stage (stage_2) to (micro_x, micro_y), then the Z stage
         (stage_3) to micro_z. Connect a stage first if it isn't already.
         Values are used in the stages' NATIVE units (same units they were saved
@@ -998,6 +1034,13 @@ class positioning_stages_view(QWidget, Ui_Form):
                            "Could not connect the XY stage. Select it in its "
                            "dropdown and try again.")
             return
+        if getattr(self, "stage_1", None) is None:
+            self.connect_to_instrument_1()  # reads comboBox_2 and connects
+        if getattr(self, "stage_1", None) is None:
+            self.error_box("No XYZ stage",
+                           "Could not connect the XYZ stage. Select it in its "
+                           "dropdown and try again.")
+            return
 
         if np.isnan(micro_x) or np.isnan(micro_y):
             self.error_box("Missing XY", "This point has no micro_x / micro_y saved.")
@@ -1007,6 +1050,14 @@ class positioning_stages_view(QWidget, Ui_Form):
                 self.stage_2.set_position("y", float(micro_y))
             except Exception as e:
                 self.error_box("XY move failed", str(e))
+                return
+        if np.isnan(nano_z):
+            self.error_box("Missing XYZ", "This point has no nano_z saved.")
+        else:
+            try:
+                self.stage_1.set_position("z", float(nano_z))
+            except Exception as e:
+                self.error_box("Z move failed", str(e))
                 return
 
         # --- Z: stage_3 ---
@@ -1031,6 +1082,7 @@ class positioning_stages_view(QWidget, Ui_Form):
             self.xlineEdit_2.setText(str(self.stage_2.get_position("x")))
             self.ylineEdit_2.setText(str(self.stage_2.get_position("y")))
             self.zlineEdit_3.setText(str(self.stage_3.get_position("z")))
+            self.zlineEdit_1.setText(str(self.stage_1.get_position("z")))
         except Exception:
             pass
 
@@ -1077,6 +1129,12 @@ class positioning_stages_view(QWidget, Ui_Form):
             return np.array([float(pt.micro_x), float(pt.micro_y)])
         elif coords == "microz":
             return np.array([float(pt.micro_z)])
+        elif coords == "nanoz":
+            return np.array([float(pt.nano_z)])
+        elif coords == "nanox":
+            return np.array([float(pt.nano_x)])
+        elif coords == "nanoy":
+            return np.array([float(pt.nano_y)])
         else:
             raise ValueError(f"Unknown coordinates {coords}")
 

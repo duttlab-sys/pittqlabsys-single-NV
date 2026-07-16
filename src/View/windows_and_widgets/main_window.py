@@ -524,7 +524,17 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     def _get_img(self):
         self.positioning_tab.frame_ready = True
         self.Display_View_widget.widget.hcam.update({'inttime': 10000.0})
-        self.positioning_tab.frame = self.Display_View_widget.widget.get_image()
+        frame = self.Display_View_widget.widget.get_image()
+        self.positioning_tab.frame = frame
+        self.Display_View_widget.widget.show_frame(frame)
+
+        # refresh the z-vs-x / z-vs-y plots from the new image
+        self.Display_View_widget.img_gray = frame
+        self.Display_View_widget.h, self.Display_View_widget.w = frame.shape
+        self.Display_View_widget._apply_crosshair_ranges()
+        self.Display_View_widget._match_plot_sizes()
+        self.Display_View_widget.draw_crosshair(self.Display_View_widget.x_selected, self.Display_View_widget.y_selected)
+        self.Display_View_widget._update_intensity_readout()
 
     def take_frame(self):
         frame = self.Display_View_widget.widget.get_latest_frame()
