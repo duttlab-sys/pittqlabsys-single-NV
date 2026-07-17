@@ -55,6 +55,12 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         Parameter('3D_scan',# using experiment iterator to sweep z-position can give an effective 3D scan as successive images. Useful for finding where NVs are in focal plane
                   [Parameter('enable', False, bool, 'T/F to enable 3D scan'),
                    Parameter('folderpath', str(get_configured_confocal_scans_folder()), str,'folder location to save images at each z-value')]),
+        Parameter('MICROWAVE',
+                  [Parameter('enable', False, bool,
+                             'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
+                   Parameter('frequency', 2.0e9, float, 'MW Frequency'),
+                   Parameter('power', -10.0, float, 'MW Power in dBm'),
+                   ]),
         # !!! If you see horizontial lines in the confocal image, the adwin arrays likely are corrupted. The fix is to reboot the adwin. You will nuke all
         # other process, variables, and arrays in the adwin. This parameter is added to make that easy to do in the GUI.
         Parameter('reboot_adwin', False, bool,'Will reboot adwin when experiment is executed. Useful is data looks fishy'),
@@ -81,6 +87,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         #get instances of devices
         self.nd = self.devices['nanodrive']['instance']
         self.adw = self.devices['adwin']['instance']
+        self.sg384 = self.devices['sg384']['instance']
 
     def setup_scan(self):
         '''
@@ -126,6 +133,17 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         """
         if self.settings['reboot_adwin'] == True:
             self.adw.reboot_adwin()
+        if self.settings['MICROWAVE']['enable'] == True:
+            if not self.sg384.is_connected:
+                self.sg384.connect()
+            # Set parameters
+            frequency = self.settings['MICROWAVE']['frequency']
+            power = self.settings['MICROWAVE']['power']
+            # Set power
+            self.sg384.set_power(power)
+            # Set center frequency
+            self.sg384.set_frequency(frequency)
+            self.sg384._send('ENBR 1')
         self.setup_scan()
         sleep(0.1)
 
@@ -236,7 +254,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
             interation_num = interation_num + len(y_array)
             self.progress = 100. * (interation_num + 1) / total_interations
             self.updateProgress.emit(self.progress)
-
+        self.sg384._send('ENBR 0')
         # tracker to only save test image once
         self.data_collected = True
 

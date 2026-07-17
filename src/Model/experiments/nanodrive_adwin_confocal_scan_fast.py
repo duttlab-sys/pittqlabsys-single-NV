@@ -70,6 +70,11 @@ class NanodriveAdwinConfocalScanFast(Experiment):
                   Parameter('z_min', 45.0, float, 'start z-position in microns for the 3D scan'),
                   Parameter('z_max', 55.0, float, 'end z-position in microns for the 3D scan'),
                   Parameter('z_step', 1.0, float, 'z step size in microns for the 3D scan')]),
+        Parameter('MICROWAVE',
+                  [Parameter('enable', False, bool, 'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
+                   Parameter('frequency', 2.0e9, float, 'MW Frequency'),
+                   Parameter('power', -10.0, float, 'MW Power in dBm'),
+                   ]),
         #!!! If you see horizontial lines in the confocal image, the adwin arrays likely are corrupted. The fix is to reboot the adwin. You will nuke all
         #other process, variables, and arrays in the adwin. This parameter is added to make that easy to do in the GUI.
         Parameter('reboot_adwin',False,bool,'Will reboot adwin when experiment is executed. Useful is data looks fishy'),
@@ -107,6 +112,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         #get instances of devices
         self.nd = self.devices['nanodrive']['instance']
         self.adw = self.devices['adwin']['instance']
+        self.sg384 = self.devices['sg384']['instance']
         ###
 
         # testing aom with worst case scenario: longest pulse durations and shortest waiting time:
@@ -383,6 +389,17 @@ class NanodriveAdwinConfocalScanFast(Experiment):
 
         if self.settings['reboot_adwin'] == True:
             self.adw.reboot_adwin()
+        if self.settings['MICROWAVE']['enable'] == True:
+            if not self.sg384.is_connected:
+                self.sg384.connect()
+            # Set parameters
+            frequency = self.settings['MICROWAVE']['frequency']
+            power = self.settings['MICROWAVE']['power']
+            # Set power
+            self.sg384.set_power(power)
+            # Set center frequency
+            self.sg384.set_frequency(frequency)
+            self.sg384._send('ENBR 1')
         self.setup_scan()
         sleep(0.1)
         # Override scan corners from GUI point-selection if enabled
@@ -612,7 +629,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
             self.raw_counts_all.append(np.array(raw_count_data))
             self.count_rate_all.append(np.array(count_rate_data))
             self.z_values.append(z)
-
+        self.sg384._send('ENBR 0')
         # ONE end time and ONE save for the whole run -> image_1, image_2, ... in a single file.
         # skipped on abort so a partial run is not written.
         self.e_t = datetime.datetime.now()
