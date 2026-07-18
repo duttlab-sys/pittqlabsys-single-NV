@@ -254,7 +254,8 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
             interation_num = interation_num + len(y_array)
             self.progress = 100. * (interation_num + 1) / total_interations
             self.updateProgress.emit(self.progress)
-        self.sg384._send('ENBR 0')
+        if self.settings['MICROWAVE']['enable'] == True:
+            self.sg384._send('ENBR 0')
         # tracker to only save test image once
         self.data_collected = True
 

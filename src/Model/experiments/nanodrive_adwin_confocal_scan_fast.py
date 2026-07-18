@@ -629,7 +629,8 @@ class NanodriveAdwinConfocalScanFast(Experiment):
             self.raw_counts_all.append(np.array(raw_count_data))
             self.count_rate_all.append(np.array(count_rate_data))
             self.z_values.append(z)
-        self.sg384._send('ENBR 0')
+        if self.settings['MICROWAVE']['enable'] == True:
+            self.sg384._send('ENBR 0')
         # ONE end time and ONE save for the whole run -> image_1, image_2, ... in a single file.
         # skipped on abort so a partial run is not written.
         self.e_t = datetime.datetime.now()
