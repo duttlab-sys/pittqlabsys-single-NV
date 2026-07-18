@@ -112,7 +112,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         #get instances of devices
         self.nd = self.devices['nanodrive']['instance']
         self.adw = self.devices['adwin']['instance']
-        self.sg384 = self.devices['sg384']['instance']
+        self.sg384 = self.devices.get('sg384', {}).get('instance')
         ###
 
         # testing aom with worst case scenario: longest pulse durations and shortest waiting time:

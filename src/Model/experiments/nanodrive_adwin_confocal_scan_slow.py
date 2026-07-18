@@ -87,7 +87,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         #get instances of devices
         self.nd = self.devices['nanodrive']['instance']
         self.adw = self.devices['adwin']['instance']
-        self.sg384 = self.devices['sg384']['instance']
+        self.sg384 = self.devices.get('sg384', {}).get('instance')
 
     def setup_scan(self):
         '''
