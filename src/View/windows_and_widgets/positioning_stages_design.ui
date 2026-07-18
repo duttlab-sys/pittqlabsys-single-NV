@@ -686,7 +686,7 @@
     <property name="geometry">
      <rect>
       <x>140</x>
-      <y>550</y>
+      <y>540</y>
       <width>121</width>
       <height>23</height>
      </rect>
@@ -699,7 +699,7 @@
     <property name="geometry">
      <rect>
       <x>410</x>
-      <y>420</y>
+      <y>480</y>
       <width>111</width>
       <height>22</height>
      </rect>
@@ -719,7 +719,7 @@
     <property name="geometry">
      <rect>
       <x>10</x>
-      <y>520</y>
+      <y>510</y>
       <width>111</width>
       <height>20</height>
      </rect>
@@ -732,7 +732,7 @@
     <property name="geometry">
      <rect>
       <x>290</x>
-      <y>520</y>
+      <y>510</y>
       <width>101</width>
       <height>20</height>
      </rect>
@@ -745,7 +745,7 @@
     <property name="geometry">
      <rect>
       <x>270</x>
-      <y>550</y>
+      <y>540</y>
       <width>131</width>
       <height>23</height>
      </rect>
@@ -778,7 +778,7 @@
     <property name="geometry">
      <rect>
       <x>140</x>
-      <y>520</y>
+      <y>510</y>
       <width>121</width>
       <height>22</height>
      </rect>
@@ -817,9 +817,9 @@
    <widget class="QComboBox" name="display_option">
     <property name="geometry">
      <rect>
-      <x>80</x>
+      <x>60</x>
       <y>420</y>
-      <width>81</width>
+      <width>111</width>
       <height>22</height>
      </rect>
     </property>
@@ -838,7 +838,7 @@
     <property name="geometry">
      <rect>
       <x>410</x>
-      <y>550</y>
+      <y>540</y>
       <width>111</width>
       <height>23</height>
      </rect>
@@ -851,7 +851,7 @@
     <property name="geometry">
      <rect>
       <x>290</x>
-      <y>420</y>
+      <y>480</y>
       <width>111</width>
       <height>16</height>
      </rect>
@@ -864,7 +864,7 @@
     <property name="geometry">
      <rect>
       <x>410</x>
-      <y>520</y>
+      <y>510</y>
       <width>111</width>
       <height>22</height>
      </rect>
@@ -884,7 +884,7 @@
     <property name="geometry">
      <rect>
       <x>410</x>
-      <y>450</y>
+      <y>420</y>
       <width>111</width>
       <height>23</height>
      </rect>
@@ -896,9 +896,9 @@
    <widget class="QComboBox" name="color_scale_option">
     <property name="geometry">
      <rect>
-      <x>270</x>
+      <x>140</x>
       <y>450</y>
-      <width>131</width>
+      <width>121</width>
       <height>22</height>
      </rect>
     </property>
@@ -931,7 +931,7 @@
    <widget class="QLabel" name="label_12">
     <property name="geometry">
      <rect>
-      <x>180</x>
+      <x>10</x>
       <y>450</y>
       <width>81</width>
       <height>16</height>
@@ -957,9 +957,9 @@
    <widget class="QPushButton" name="Get_Image_Button">
     <property name="geometry">
      <rect>
-      <x>10</x>
+      <x>410</x>
       <y>450</y>
-      <width>151</width>
+      <width>111</width>
       <height>23</height>
      </rect>
     </property>
@@ -971,7 +971,7 @@
     <property name="geometry">
      <rect>
       <x>10</x>
-      <y>490</y>
+      <y>480</y>
       <width>70</width>
       <height>17</height>
      </rect>
@@ -984,7 +984,7 @@
     <property name="geometry">
      <rect>
       <x>140</x>
-      <y>490</y>
+      <y>480</y>
       <width>121</width>
       <height>23</height>
      </rect>
@@ -996,14 +996,27 @@
    <widget class="QPushButton" name="go_to_nv">
     <property name="geometry">
      <rect>
-      <x>270</x>
-      <y>490</y>
+      <x>0</x>
+      <y>540</y>
       <width>131</width>
       <height>23</height>
      </rect>
     </property>
     <property name="text">
      <string>Go to NV</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="ConnectToDisplayButton">
+    <property name="geometry">
+     <rect>
+      <x>270</x>
+      <y>420</y>
+      <width>121</width>
+      <height>23</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Connect to Display</string>
     </property>
    </widget>
   </widget>
