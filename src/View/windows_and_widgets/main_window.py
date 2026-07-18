@@ -521,9 +521,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.positioning_tab.data_saving_path = self.data_saving_path
         self.positioning_tab.x_crosshair, self.positioning_tab.y_crosshair = self.Display_View_widget._get_crosshair_px()
 
-    def _get_img(self):
+    def _get_img(self, inttime, gain):
         self.positioning_tab.frame_ready = True
-        self.Display_View_widget.widget.hcam.update({'inttime': 10000.0})
+        self.Display_View_widget.widget.hcam.update({'inttime': float(inttime), 'gain': float(gain)})
         frame = self.Display_View_widget.widget.get_image()
         self.positioning_tab.frame = frame
         self.Display_View_widget.widget.show_frame(frame)
@@ -535,6 +535,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.Display_View_widget._match_plot_sizes()
         self.Display_View_widget.draw_crosshair(self.Display_View_widget.x_selected, self.Display_View_widget.y_selected)
         self.Display_View_widget._update_intensity_readout()
+        self.Display_View_widget.inttime_edit.setText(str(inttime))
+        self.Display_View_widget.gain_edit.setText(str(gain))
 
     def take_frame(self):
         frame = self.Display_View_widget.widget.get_latest_frame()

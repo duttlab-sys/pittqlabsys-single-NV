@@ -60,11 +60,22 @@ class positioning_stages_view(QWidget, Ui_Form):
     snapshot_mode_changed = pyqtSignal(int)
     snapButtonclicked = pyqtSignal(int)
     save_or_find_nv_button_clicked = pyqtSignal(int)
-    get_img = pyqtSignal(int)
+    get_img = pyqtSignal(float, float)   # (integration_time_us, gain)
     take_img_signal = pyqtSignal(int)
     server_off_button_clicked = pyqtSignal(int)
     color_scale_changed = pyqtSignal(str)
     Get_Image_Button_Clicked = pyqtSignal(int)
+
+    # --- AutoTune config: MUST stay in sync with Display_View. Roper only. ---
+    AUTOTUNE_TARGET_MIN = 15000
+    AUTOTUNE_TARGET_MAX = 39000
+    AUTOTUNE_SATURATION = 40000
+    ROPER_NOGAIN_SEQUENCE = [10, 50, 100, 150, 200, 300, 500]  # inttime (us)
+    ROPER_GAIN_SEQUENCE = [(10, 1), (50, 1), (100, 1), (100, 100),
+                           (100, 500), (100, 1000), (100, 1500),
+                           (100, 2000), (100, 2500), (100, 3000), (150, 3000),
+                           (200, 3000), (300, 3000), (400, 3000), (500, 3000)]
+
     def __init__(self, parent = None):
         super().__init__(parent)
         self.setupUi(self)
@@ -791,7 +802,233 @@ class positioning_stages_view(QWidget, Ui_Form):
         else:
             return "USAC_MAGSAC"
 
+    def _choose_scan_type(self):
+        """Laser vs white-light. Returns 'laser', 'white_light', or None."""
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Scan Type")
+        msg.setText("Which light source is this scan?")
+        msg.setInformativeText("Laser -> stored as 'camera_image'.\n"
+                               "White light -> stored as 'white_light_camera_image'.")
+        msg.setStandardButtons(QMessageBox.Cancel)
+        btn_laser = QPushButton("Laser")
+        btn_white = QPushButton("White light")
+        msg.addButton(btn_laser, QMessageBox.AcceptRole)
+        msg.addButton(btn_white, QMessageBox.AcceptRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == btn_laser:
+            return "laser"
+        if clicked == btn_white:
+            return "white_light"
+        return None
+
+    def _choose_new_or_append(self):
+        """New scan file vs append into an existing one. Returns 'new', 'append', or None."""
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Scan File")
+        msg.setText("Start a new scan file, or add this scan to an existing one?")
+        msg.setInformativeText("Appending stores this scan's images under the SAME "
+                               "points (same coordinates) as the existing scan.")
+        msg.setStandardButtons(QMessageBox.Cancel)
+        btn_new = QPushButton("New scan file")
+        btn_append = QPushButton("Append to existing")
+        msg.addButton(btn_new, QMessageBox.AcceptRole)
+        msg.addButton(btn_append, QMessageBox.AcceptRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == btn_new:
+            return "new"
+        if clicked == btn_append:
+            return "append"
+        return None
+
+    def _append_camera_scan(self, edges_path, image_attr):
+        """Add a second-modality image (e.g. white light) to an EXISTING scan file,
+        under the SAME points/coordinates as the original scan. Positions are
+        replayed from the coords already saved in the file. The scan file must have
+        been created with the SAME wire-edges file (verified against the stored path)."""
+        scan_full_path = self.open_file_dialog(self.data_saving_path)
+        if not scan_full_path:
+            return
+        self.data_saving_path = os.path.dirname(scan_full_path)
+
+        structure = load_data(scan_full_path)
+
+        # --- verify the wire-edges file matches the one stored in the scan ---
+        meta = getattr(structure, "scan_meta", None)
+        stored_edges = getattr(meta, "wire_edges_path", None) if meta is not None else None
+        if stored_edges is None:
+            self.error_box(
+                "No stored wire-edges path",
+                "This scan file has no wire-edges path saved, so it can't be safely "
+                "appended to. Re-create it as a new scan (which now stores the path).")
+            return
+        if os.path.normcase(os.path.abspath(stored_edges)) != \
+                os.path.normcase(os.path.abspath(edges_path)):
+            self.error_box(
+                "Wire-edges file mismatch",
+                f"This scan was created with:\n{stored_edges}\n\n"
+                f"but you selected:\n{edges_path}\n\n"
+                "Select the same wire-edges file and try again.")
+            return
+
+        # --- existing points in numeric order: image_1, image_2, ... image_10 ---
+        def _img_index(nm):
+            try:
+                return int(nm.split("_")[1])
+            except (IndexError, ValueError):
+                return 1 << 30
+
+        image_names = sorted((n for n in vars(structure) if n.startswith("image_")),
+                             key=_img_index)
+        if not image_names:
+            self.error_box("No scan points", "This file has no image_N points to append to.")
+            return
+
+        # optional safety: warn if this modality already exists on the points
+        if getattr(getattr(structure, image_names[0]), image_attr, None) is not None:
+            if not self.confirm_overwrite(f"{image_attr} (all points)"):
+                return
+
+        def _scalar(v):
+            if v is None:
+                return float("nan")
+            a = np.asarray(v).ravel()
+            return float(a[0]) if a.size else float("nan")
+
+        if self.error_box("Warning", "Please put filters in the path. Click Ok when ready.",
+                          "Camera_Safety") != True:
+            return
+        at = self._setup_scan_autotune()
+        if at is None:
+            return
+        autotune_on, at_mode, at_seq, at_idx, fixed_it, fixed_ga = at
+
+        settle_time = 100  # ms
+        capture_timeout_s = 30  # tune above your longest exposure
+        number_of_scans = len(image_names)
+        # connect the stages append drives, BEFORE the progress window exists
+        if getattr(self, "stage_2", None) is None:
+            self.connect_to_instrument_2()
+        if getattr(self, "stage_1", None) is None:
+            self.connect_to_instrument_1()
+        if getattr(self, "stage_3", None) is None:
+            self.connect_to_instrument_3()
+        if (getattr(self, "stage_1", None) is None or
+                getattr(self, "stage_2", None) is None or
+                getattr(self, "stage_3", None) is None):
+            self.error_box("Stages not connected",
+                           "Connect stage_1 (nano z), stage_2 (xy) and stage_3 "
+                           "(micro z) before appending.")
+            return
+        move_errors = []
+
+        self.error_box("Starting Scan", "Append scan has started", "Scan Status")
+        scan_start = time.monotonic()
+        progress = QProgressDialog("Time remaining: estimating…", "Cancel",
+                                   0, number_of_scans, self)
+        progress.setWindowTitle("Append Scan")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        done = 0
+        for name in image_names:
+            point = getattr(structure, name)
+            micro_x = _scalar(getattr(point, "micro_x", None))
+            micro_y = _scalar(getattr(point, "micro_y", None))
+            micro_z = _scalar(getattr(point, "micro_z", None))
+            nano_z = _scalar(getattr(point, "nano_z", None))
+
+            # drive each stage in NATIVE units. Record failures but DON'T abort and
+            # DON'T pop a modal box here (that box gets trapped behind the progress
+            # window; closing that window to dismiss it cancels the whole append —
+            # which is why you were only getting one image).
+            try:
+                if not np.isnan(micro_x):
+                    self.stage_2.set_position("x", float(micro_x))
+                if not np.isnan(micro_y):
+                    self.stage_2.set_position("y", float(micro_y))
+            except Exception as e:
+                move_errors.append(f"{name}: XY -> {e}")
+            try:
+                if not np.isnan(nano_z):
+                    self.stage_1.set_position("z", float(nano_z))
+            except Exception as e:
+                move_errors.append(f"{name}: nano_z -> {e}")
+            try:
+                if not np.isnan(micro_z):
+                    self.stage_3.set_position("z", float(micro_z))
+            except Exception as e:
+                move_errors.append(f"{name}: micro_z -> {e}")
+            try:  # best-effort position readback into the line-edits
+                self.xlineEdit_2.setText(str(self.stage_2.get_position("x")))
+                self.ylineEdit_2.setText(str(self.stage_2.get_position("y")))
+                self.zlineEdit_3.setText(str(self.stage_3.get_position("z")))
+                self.zlineEdit_1.setText(str(self.stage_1.get_position("z")))
+            except Exception:
+                pass
+            time.sleep(settle_time / 1000)
+
+            # request a frame and wait (same bounded-wait pattern as the main scan)
+            # capture (autotune re-tunes exposure per point; index carries forward)
+            if autotune_on:
+                frame, at_idx, _it, _ga = self._autotune_capture(at_mode, at_seq, at_idx,
+                                                                 capture_timeout_s)
+            else:
+                frame = self._capture_frame(fixed_it, fixed_ga, capture_timeout_s)
+
+            # store the new image UNDER THE SAME point -> same coords as the original
+            setattr(point, image_attr, frame)
+            setattr(point, f"{image_attr}_timestamp", datetime.utcnow().isoformat())
+            if hasattr(self, "show_scan_frame"):
+                self.show_scan_frame(frame)
+
+            done += 1
+            elapsed = time.monotonic() - scan_start
+            remaining = (elapsed / done) * (number_of_scans - done)
+            progress.setValue(done)
+            progress.setLabelText(f"Image {done}/{number_of_scans}\n"
+                                  f"Time remaining: {remaining:0.0f} s")
+            if progress.wasCanceled():
+                break
+
+        # re-save the WHOLE structure so the new field sits alongside existing data
+        # under each point (we loaded it first, so nothing is lost)
+        save_data(filename=scan_full_path, obj=structure, mode="w", swmr=False)
+        progress.close()
+        if move_errors:
+            preview = "\n".join(move_errors[:10])
+            more = "" if len(move_errors) <= 10 else f"\n…and {len(move_errors) - 10} more."
+            self.error_box(
+                "Some stage moves reported errors",
+                "Every point was still captured, but these moves raised errors, so "
+                "those images may not be at their recorded positions:\n\n" + preview + more)
+        self.error_box("Finished Scanning", "Append scan is finished.", "Scan Status")
+
     def _start_camera_scan(self):
+        # --- choose light source; decides which attribute the image is stored under ---
+        scan_type = self._choose_scan_type()  # "laser" | "white_light" | None
+        if scan_type is None:
+            return
+        image_attr = "camera_image" if scan_type == "laser" else "white_light_camera_image"
+
+        # --- new scan file, or append into an existing scan? ---
+        scan_mode = self._choose_new_or_append()  # "new" | "append" | None
+        if scan_mode is None:
+            return
+
+        # --- edges file needed for BOTH paths (append uses it only to verify it
+        #     matches the edges path stored in the scan) ---
+        edges_path = self.open_file_dialog(self.data_saving_path)
+        if not edges_path:
+            return
+
+        if scan_mode == "append":
+            self._append_camera_scan(edges_path, image_attr)
+            return
         number_of_z_points = 1
         z_range = 0
         if self.z_scan_checkBox.isChecked():
@@ -813,9 +1050,6 @@ class positioning_stages_view(QWidget, Ui_Form):
                 QMessageBox.warning(self, "Invalid Step", "Please select a valid Z step.")
                 return
         # Continue with the scan...
-        edges_path = self.open_file_dialog(self.data_saving_path)
-        if not edges_path:
-            return
         scan_directory, scan_filename = self.open_directory_dialog(self.data_saving_path)
         if scan_filename is None:
             return
@@ -835,8 +1069,10 @@ class positioning_stages_view(QWidget, Ui_Form):
         initialy = initial_coords[1]*1000 # conex is in mm so we multiply by 1000 to go to microns
         finalx = final_coords[0]*1000 # conex is in mm so we multiply by 1000 to go to microns
         finaly = final_coords[1]*1000 # conex is in mm so we multiply by 1000 to go to microns
-        x_range = (finalx - initialx)
-        y_range = (finaly - initialy)
+        x_span = finalx - initialx
+        y_span = finaly - initialy
+        x_range = abs(x_span)
+        y_range = abs(y_span)
 
         if x_range > y_range:
             longer_range = x_range
@@ -845,6 +1081,8 @@ class positioning_stages_view(QWidget, Ui_Form):
             shorter_axis = "y"
             shorter_axis_initial = initialy
             longer_axis_initial = initialx
+            longer_span = x_span
+            shorter_span = y_span
         else:
             longer_range = y_range
             shorter_range = x_range
@@ -852,19 +1090,26 @@ class positioning_stages_view(QWidget, Ui_Form):
             shorter_axis = "x"
             shorter_axis_initial = initialx
             longer_axis_initial = initialy
-        longer_axis_steps = 90 # 90 microns is the biggest scan range using the nanodrive
-        number_of_2D_points = int(longer_range / longer_axis_steps)
-        if number_of_2D_points  == 0:
+            longer_span = y_span
+            shorter_span = x_span
+        longer_step_mag = 90  # 90 microns is the biggest scan range using the nanodrive
+        number_of_2D_points = int(longer_range / longer_step_mag)
+        if number_of_2D_points < 1:  # was `== 0`; `< 1` also guards negatives
             number_of_2D_points = 1
         number_of_scans = number_of_z_points * number_of_2D_points
         settle_time = 100  # ms
-        #estimated_time = (10000 * 2 + settle_time) * number_of_scans
-        shorter_axis_steps = shorter_range/ number_of_2D_points
-        focused_nano_z_location = self.get_coords(structure.INITIAL, "wire_edge", "nanoz")
-        focused_micro_z_location = self.get_coords(structure.INITIAL, "wire_edge", "microz")
+        # signed steps so the scan walks INITIAL -> FINAL in either direction
+        longer_axis_steps = longer_step_mag if longer_span >= 0 else -longer_step_mag
+        shorter_axis_steps = shorter_span / number_of_2D_points
+        focused_nano_z_location = float(self.get_coords(structure.INITIAL, "wire_edge", "nanoz")[0])
+        focused_micro_z_location = float(self.get_coords(structure.INITIAL, "wire_edge", "microz")[0])
         returned = self.error_box("Warning", "Please put filters in the path. Click Ok when ready.", "Camera_Safety")
         image_number = 0
         if returned == True:
+            at = self._setup_scan_autotune()
+            if at is None:
+                return
+            autotune_on, at_mode, at_seq, at_idx, fixed_it, fixed_ga = at
             if self.z_scan_checkBox.isChecked():
                 z_pos = z_min
             else:
@@ -873,6 +1118,23 @@ class positioning_stages_view(QWidget, Ui_Form):
             shorter_axis_pos = shorter_axis_initial
             longer_axis_pos = longer_axis_initial
             root = MyStruct()
+            root.scan_meta = MyStruct()
+            root.scan_meta.wire_edges_path = os.path.abspath(edges_path)
+            # connect the stages append drives, BEFORE the progress window exists
+            if getattr(self, "stage_2", None) is None:
+                self.connect_to_instrument_2()
+            if getattr(self, "stage_1", None) is None:
+                self.connect_to_instrument_1()
+            if getattr(self, "stage_3", None) is None:
+                self.connect_to_instrument_3()
+            if (getattr(self, "stage_1", None) is None or
+                    getattr(self, "stage_2", None) is None or
+                    getattr(self, "stage_3", None) is None):
+                self.error_box("Stages not connected",
+                               "Connect stage_1 (nano z), stage_2 (xy) and stage_3 "
+                               "(micro z) before appending.")
+                return
+            move_errors = []
             self.error_box("Starting Scan", "Camera Scan has started", "Scan Status")
             scan_start = time.monotonic()
             progress = QProgressDialog("Time remaining: estimating…", "Cancel",
@@ -887,12 +1149,10 @@ class positioning_stages_view(QWidget, Ui_Form):
                 if (micro_z_pos != self.stage_3.get_position("z")):
                     self.stage_3.set_position("z", micro_z_pos)
                 if (z_pos != self.stage_1.get_position("z")):
-                    self.stage_1.set_position("z", z_pos)
+                    self.stage_1.set_position("z", int(z_pos))
                 self.stage_2.set_position(shorter_axis, shorter_axis_pos/ 1000)
                 self.stage_2.set_position(longer_axis, longer_axis_pos / 1000)
                 time.sleep(settle_time/1000)
-                self.frame_ready = False
-                self.get_img.emit(1)
                 point_status = f"image_{image_number}"
                 setattr(root, point_status, MyStruct())
                 point = getattr(root, point_status)
@@ -901,16 +1161,12 @@ class positioning_stages_view(QWidget, Ui_Form):
                 point.micro_z = self.stage_3.get_position("z")
                 point.nano_z = self.stage_1.get_position("z")
                 point.timestamp = datetime.utcnow().isoformat()
-                """while self.frame_ready == False:
-                    time.sleep(10000/1000)"""
-                capture_timeout_s = 30  # tune above your longest exposure
-                wait_start = time.monotonic()
-                while not self.frame_ready:
-                    QApplication.processEvents()  # lets the capture slot run + repaints
-                    time.sleep(0.02)
-                    if time.monotonic() - wait_start > capture_timeout_s:
-                        break
-                point.camera_image = self.frame
+                # capture (autotune re-tunes exposure per point; index carries forward)
+                if autotune_on:
+                    frame, at_idx, _it, _ga = self._autotune_capture(at_mode, at_seq, at_idx)
+                else:
+                    frame = self._capture_frame(fixed_it, fixed_ga)
+                setattr(point, image_attr, frame)
                 # --- progress + time remaining ---
                 elapsed = time.monotonic() - scan_start
                 avg = elapsed / image_number  # image_number already incremented at top
@@ -942,6 +1198,110 @@ class positioning_stages_view(QWidget, Ui_Form):
             progress.close()
         else:
             return
+
+    def _resolve_setting(self, mode, setting):
+        """One autotune-sequence entry -> (inttime, gain) floats.
+        'nogain' uses unity gain (1.0), since get_img always sets both."""
+        if mode == "gain":
+            inttime, gain = setting
+            return float(inttime), float(gain)
+        return float(setting), 1.0
+
+    def _capture_frame(self, inttime, gain, capture_timeout_s=30):
+        """Ask main_window for one frame at (inttime, gain) via get_img, then wait
+        for it to set self.frame_ready / self.frame. Returns the frame (or None)."""
+        self.frame_ready = False
+        self.get_img.emit(float(inttime), float(gain))
+        wait_start = time.monotonic()
+        while not self.frame_ready:
+            QApplication.processEvents()
+            time.sleep(0.02)
+            if time.monotonic() - wait_start > capture_timeout_s:
+                break
+        return self.frame
+
+    def _autotune_capture(self, mode, seq, index, capture_timeout_s=30):
+        """Capture at the current point, adjusting exposure from seq[index] until the
+        brightest pixel lands in the target window (same logic as Display_View, but
+        capture goes through get_img). Returns (frame, new_index, inttime, gain).
+        Pass new_index back in next time so the search starts warm."""
+        idx = index
+        frame = None
+        it = ga = None
+        for _ in range(2 * len(seq)):
+            it, ga = self._resolve_setting(mode, seq[idx])
+            frame = self._capture_frame(it, ga, capture_timeout_s)
+            if frame is None:
+                break
+            max_pixel = float(np.max(frame))
+            if max_pixel >= self.AUTOTUNE_SATURATION or max_pixel > self.AUTOTUNE_TARGET_MAX:
+                if idx > 0:
+                    idx -= 1
+                    continue
+                break
+            elif max_pixel < self.AUTOTUNE_TARGET_MIN:
+                if idx < len(seq) - 1:
+                    idx += 1
+                    continue
+                break
+            else:
+                break
+        return frame, idx, it, ga
+
+    def _setup_scan_autotune(self):
+        """Ask whether to autotune during the scan. Returns None if cancelled, else:
+          (True,  mode, seq, start_index, None, None)   # autotune on
+          (False, None, None, None,       it,   ga)     # fixed exposure
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("AutoTune")
+        box.setText("AutoTune the exposure during the scan?")
+        yes_btn = box.addButton("Yes", QMessageBox.AcceptRole)
+        no_btn = box.addButton("No", QMessageBox.AcceptRole)
+        cancel_btn = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel_btn or clicked is None:
+            return None
+
+        if clicked is no_btn:
+            # fixed exposure: ask once, reuse for every point
+            it, ok = QInputDialog.getInt(self, "Exposure", "Integration time (us):",
+                                         100, 1, 10_000_000, 1)
+            if not ok:
+                return None
+            ga, ok = QInputDialog.getInt(self, "Exposure", "Gain (1 = no gain):",
+                                         1, 1, 1_000_000, 1)
+            if not ok:
+                return None
+            return (False, None, None, None, it, ga)
+
+        # yes -> gain / no gain
+        box2 = QMessageBox(self)
+        box2.setWindowTitle("AutoTune")
+        box2.setText("Choose AutoTune mode:")
+        gain_btn = box2.addButton("Gain", QMessageBox.AcceptRole)
+        nogain_btn = box2.addButton("No gain", QMessageBox.AcceptRole)
+        cancel_btn2 = box2.addButton("Cancel", QMessageBox.RejectRole)
+        box2.exec()
+        clicked2 = box2.clickedButton()
+        if clicked2 is cancel_btn2 or clicked2 is None:
+            return None
+
+        if clicked2 is gain_btn:
+            mode = "gain"
+            seq = self.ROPER_GAIN_SEQUENCE
+            labels = [f"{i}: inttime={it} us, gain={g}" for i, (it, g) in enumerate(seq)]
+        else:
+            mode = "nogain"
+            seq = self.ROPER_NOGAIN_SEQUENCE
+            labels = [f"{i}: inttime={it} us" for i, it in enumerate(seq)]
+
+        label, ok = QInputDialog.getItem(self, "AutoTune start",
+                                         "Select the starting point:", labels, 0, False)
+        if not ok:
+            return None
+        return (True, mode, seq, labels.index(label), None, None)
 
     def _go_to_nv(self):
         path = self.open_file_dialog(self.data_saving_path)
