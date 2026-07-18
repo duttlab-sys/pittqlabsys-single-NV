@@ -25,14 +25,7 @@ What it does
 * Image tab: colormaps, percentile contrast clip, ROI crop/profiles, and a movie
   player (frame slider + play/pause + mean/max/sum projections) for stacks.
 
-How to run
-----------
-Put this file wherever we like and run:
-
-    python nv_data_gui.py                 # opens a file picker
-    python nv_data_gui.py path/to/file.h5 # opens that file directly
-
-Needs: numpy, scipy, matplotlib, h5py, tkinter — all already in our env.
+Needs: numpy, scipy, matplotlib, h5py, tkinter
 plot_pulsed_hdf5.py and significance_test.py are optional; keep them next to
 this file (or on PYTHONPATH) to enable the specialised pulsed workflow.
 
@@ -321,6 +314,69 @@ def find_image_stacks(tree):
             seen.add(s["source"])
             out.append(s)
     return out
+
+
+# =============================================================================
+# Camera scan with light-source modalities: sibling image_N groups, each holding
+# a 'camera_image' (laser) and/or 'white_light_camera_image' (white light).
+# =============================================================================
+_CAM_MODALITIES = [("laser", "camera_image"),
+                   ("white_light", "white_light_camera_image")]
+_CAM_LABEL = {"laser": "laser", "white_light": "white light"}
+
+
+def find_camera_scan(tree):
+    """Detect a camera scan stored as sibling image_N groups, each holding a
+    'camera_image' (laser) and/or a 'white_light_camera_image' (white light).
+    Returns {'modalities': {label: frames (N,H,W)}, 'present': [labels...]} or
+    None if the tree does not match this layout."""
+    if not isinstance(tree, dict):
+        return None
+    subgroups = [(k, v) for k, v in tree.items()
+                 if isinstance(v, dict) and _NUMBERED.match(k)]
+    if not subgroups:
+        return None
+    subgroups.sort(key=lambda kv: int(_NUMBERED.match(kv[0]).group(2)))
+
+    def _point_meta(sub):
+        # every field on the point that isn't a 2-D image (coords, timestamps…)
+        return {k: v for k, v in sub.items()
+                if not (isinstance(v, np.ndarray) and np.squeeze(v).ndim >= 2)}
+
+    out, meta = {}, {}
+    for label, attr in _CAM_MODALITIES:
+        pairs = []
+        for _, sub in subgroups:
+            v = sub.get(attr)
+            if isinstance(v, np.ndarray) and np.squeeze(v).ndim == 2:
+                pairs.append((np.squeeze(v), _point_meta(sub)))
+        if pairs:
+            from collections import Counter
+            shp = Counter(f.shape for f, _ in pairs).most_common(1)[0][0]
+            cohort = [(f, m) for f, m in pairs if f.shape == shp]
+            if cohort:
+                out[label] = np.stack([f for f, _ in cohort], axis=0)
+                meta[label] = [m for _, m in cohort]
+    if not out:
+        return None
+    present = [lab for lab, _ in _CAM_MODALITIES if lab in out]
+    return {"modalities": out, "meta": meta, "present": present}
+
+
+def format_point_meta(d):
+    """One-line-ish readable summary of a scan point's coordinates + metadata."""
+    if not d:
+        return ""
+    order = ["micro_x", "micro_y", "micro_z", "nano_z", "timestamp"]
+    keys = [k for k in order if k in d] + [k for k in d if k not in order]
+    parts = []
+    for k in keys:
+        v = d[k]
+        if isinstance(v, np.ndarray):
+            v = np.squeeze(v)
+            v = v.item() if v.size == 1 else v
+        parts.append(f"{k} = {v:.4g}" if isinstance(v, float) else f"{k} = {v}")
+    return "     ".join(parts)
 
 
 # =============================================================================
@@ -1272,6 +1328,7 @@ def main(argv=None):
             self.filepath = None
             self.item_values = {}          # treeview item id -> value
             self.stacks = []               # detected image stacks
+            self.camera_scan = None        # {modalities, present} for laser/white-light scans
 
             # current plot state
             self.view_kind = None          # '1d' | 'image' | 'stack' | 'sequence' | None
@@ -1467,6 +1524,11 @@ def main(argv=None):
             self.equal_var = tk.BooleanVar(value=True)
             ttk.Checkbutton(row, text="equal aspect", variable=self.equal_var,
                             command=self.redraw_image).pack(side="left")
+            ttk.Label(row, text="modality:").pack(side="left", padx=(12, 2))
+            self.modality_combo = ttk.Combobox(row, state="disabled", width=11, values=[])
+            self.modality_combo.pack(side="left")
+            self.modality_combo.bind("<<ComboboxSelected>>",
+                                     lambda e: self.on_modality_change())
 
             row2 = ttk.Frame(f); row2.pack(fill="x", pady=(8, 0))
             ttk.Label(row2, text="ROI:").pack(side="left")
@@ -1503,6 +1565,10 @@ def main(argv=None):
             self.proj_combo.current(0)
             self.proj_combo.pack(side="left")
             self.proj_combo.bind("<<ComboboxSelected>>", lambda e: self.redraw_image())
+            self.meta_lbl = ttk.Label(f, text="", foreground="#036",
+                                      font=("TkFixedFont", 9), wraplength=900,
+                                      justify="left")
+            self.meta_lbl.pack(anchor="w", pady=(8, 0))
 
         def _build_tab_sequence(self, nb):
             f = ttk.Frame(nb, padding=8)
@@ -1552,6 +1618,8 @@ def main(argv=None):
             self.filepath = path
             self.file_lbl.configure(text=os.path.basename(path))
             self.stacks = find_image_stacks(self.tree_data)
+            self.camera_scan = find_camera_scan(self.tree_data)
+            self._update_modality_combo()
             self._populate_tree()
             self._auto_view()
             self._set_status("loaded")
@@ -1770,6 +1838,10 @@ def main(argv=None):
 
         # -------------------------------------------------- auto first view --
         def _auto_view(self):
+            if self.camera_scan:                 # laser / white-light camera scan
+                self.show_camera_scan()
+                self.nb.select(3)
+                return
             info = detect_default_view(self.tree_data)
             mode = info["mode"]
             if mode == "pulsed":
@@ -2262,9 +2334,50 @@ def main(argv=None):
             self.nb.select(3)
             self.redraw_image()
 
+        # ------------------------------------------- camera light-source mode --
+        def _update_modality_combo(self):
+            """Populate + gray the laser/white-light dropdown for the current file.
+            Enabled only when both modalities are present; otherwise parked on the
+            one that exists and disabled."""
+            cs = self.camera_scan
+            if not cs:
+                self.modality_combo.configure(values=[], state="disabled")
+                self.modality_combo.set("")
+                return
+            display = [_CAM_LABEL[p] for p in cs["present"]]
+            self.modality_combo.configure(values=display)
+            self.modality_combo.set(display[0])
+            self.modality_combo.configure(
+                state="readonly" if len(cs["present"]) > 1 else "disabled")
+
+        def show_camera_scan(self, modality=None):
+            cs = self.camera_scan
+            if not cs:
+                return
+            if modality is None:
+                modality = cs["present"][0]        # default: laser if present
+            frames = cs["modalities"][modality]
+            attr = dict(_CAM_MODALITIES)[modality]
+            # keep the dropdown in sync with what is shown
+            try:
+                self.modality_combo.set(_CAM_LABEL[modality])
+            except Exception:
+                pass
+            self._pending_meta = cs.get("meta", {}).get(modality)
+            self.show_stack(frames, title=f"camera scan — {_CAM_LABEL[modality]} "
+                                          f"({attr}), {frames.shape[0]} frames")
+
+        def on_modality_change(self):
+            disp = self.modality_combo.get().lower()
+            modality = "white_light" if "white" in disp else "laser"
+            if self.camera_scan and modality in self.camera_scan["modalities"]:
+                self.show_camera_scan(modality)
+
         def show_stack(self, frames, title=""):
             self._stop_play()
             self.view_kind = "stack"
+            self.cur_frame_meta = getattr(self, "_pending_meta", None)
+            self._pending_meta = None
             self.cur_frames = np.asarray(frames, float)
             self.frame_idx = 0
             self.sel_box = None
@@ -2306,6 +2419,12 @@ def main(argv=None):
             if self.view_kind == "stack" and self.proj_combo.get() == "frame":
                 ttl += f"   frame {self.frame_idx+1}/{self.cur_frames.shape[0]}"
                 self.frame_lbl.configure(text=f"{self.frame_idx+1}/{self.cur_frames.shape[0]}")
+            meta_list = getattr(self, "cur_frame_meta", None)
+            if (self.view_kind == "stack" and self.proj_combo.get() == "frame"
+                    and meta_list and 0 <= self.frame_idx < len(meta_list)):
+                self.meta_lbl.configure(text=format_point_meta(meta_list[self.frame_idx]))
+            else:
+                self.meta_lbl.configure(text="")
             self.ax.set_title(ttl, fontsize=10)
             self.ax.set_xlabel("x (pixels)"); self.ax.set_ylabel("y (pixels)")
             self.rect = _make_rect(self.ax, self._on_rect)
