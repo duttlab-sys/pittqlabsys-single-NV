@@ -19,6 +19,7 @@ from src.core.helper_functions import get_configured_confocal_scans_folder
 from src.core.adwin_helpers import get_adwin_binary_path
 from time import sleep
 import pyqtgraph as pg
+from src.Controller import SG384Generator
 
 
 
@@ -87,7 +88,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         #get instances of devices
         self.nd = self.devices['nanodrive']['instance']
         self.adw = self.devices['adwin']['instance']
-        self.sg384 = self.devices.get('sg384', {}).get('instance')
+        self.sg384 = SG384Generator()
 
     def setup_scan(self):
         '''

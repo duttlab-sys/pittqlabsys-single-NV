@@ -28,6 +28,7 @@ srcpath = os.path.realpath(r'C:\Users\Duttlab\Downloads\PythonExamples\Examples\
 sys.path.append(srcpath)
 from teproteus import TEProteusAdmin as TepAdmin
 from tevisainst import TEVisaInst
+from src.Controller import SG384Generator
 import numpy as np
 import datetime
 from src.core.struct_hdf5 import MyStruct   # same import the ODMR experiment uses
@@ -112,7 +113,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         #get instances of devices
         self.nd = self.devices['nanodrive']['instance']
         self.adw = self.devices['adwin']['instance']
-        self.sg384 = self.devices.get('sg384', {}).get('instance')
+        self.sg384 = SG384Generator()
         ###
 
         # testing aom with worst case scenario: longest pulse durations and shortest waiting time:
