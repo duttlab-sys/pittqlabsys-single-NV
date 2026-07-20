@@ -98,7 +98,7 @@ class ProteusDriver:
             self.chan_list, self.segm_list = self.get_channels(self.model_name, self.sampling_rate/self.interpol)
             self.num_of_channels = len(self.chan_list)
             print(f'Number of channels: {self.num_of_channels} interpol {self.interpol} dac mode {self.dac_mode} granul {self.granul}')
-            #self.calculate_wfms()
+            self.delete_all_segment()
         except Exception as e:
             self.logger.error(f'Proteus connection failed: {e}')
             raise
@@ -234,7 +234,7 @@ class ProteusDriver:
         """
         Apply the sampling configuration to the instrument
         """
-        self.send_command(f':FREQ:RAST {sampling_rate}')
+        self.inst.send_scpi_cmd(f':FREQ:RAST {sampling_rate}')
         """# Set DAC resolution first
         if dac_mode == 16:
             self.send_command(':TRAC:FORM U16')
@@ -685,7 +685,7 @@ class ProteusDriver:
             raise ValueError(f"Invalid voltage: {offset}")
         if not (-0.5 <= offset <= 0.5):
             raise ValueError(f"Invalid voltage: {offset}")
-        self.send_command(f':VOLT:OFFS {offset}')
+        self.inst.send_scpi_cmd(f':VOLT:OFFS {offset}')
 
     def get_voltage_offset(self):
         return self.send_command(f':VOLT:OFFS?', query=True)
@@ -1246,7 +1246,7 @@ class ProteusDriver:
         only."""
         if channel_number not in self.chan_list:
             raise ValueError(f"Invalid channel number: {channel_number}")
-        self.send_command(f':INST: CHAN {channel_number}')
+        self.send_command(f':INST:CHAN {channel_number}')
 
     def get_channel(self):
         return self.send_command(':INST:CHAN?', query=True)
@@ -1258,7 +1258,7 @@ class ProteusDriver:
         defined delay can be added). """
         if state not in [0,1]:
             raise ValueError(f"Invalid state: {state}")
-        self.send_command(f':INIT:CONT {state}')
+        self.inst.send_scpi_cmd(f':INIT:CONT {state}')
 
     def get_continuous_run_state(self):
         return self.send_command(':INIT:CONT?', query=True)
@@ -1965,7 +1965,7 @@ class ProteusDriver:
     def set_task_table_length(self, length):
         if length > 64000 or length < 0:
             raise ValueError(f"Invalid length: {length}")
-        self.send_command(f':TASK:COMP:LENG {int(length)}')
+        self.inst.send_scpi_cmd(f':TASK:COMP:LENG {int(length)}')
 
     def get_task_table_length(self):
         return self.send_command(f':TASK:COMP:LENG?', query=True)
@@ -2204,7 +2204,7 @@ class ProteusDriver:
             raise ValueError(f"Invalid offset: {offset}")
         if offset < 1 or offset > 64000:
             raise ValueError(f"Invalid offset: {offset}")"""
-        self.send_command(":TASK:COMP:WRIT")
+        self.send_command(":TASK:COMP:WRITE")
 
     def read_composer_array_from_task_table(self, offset):
         """Read the composer's array from the task-table of the selected channel at the specified offset (no
@@ -2771,7 +2771,7 @@ class ProteusDriver:
             raise ValueError("Invalid arguments")
         if segment_number<1 or segment_number>64000:
             raise ValueError("Invalid arguments")
-        self.send_command(f":TRAC:DEF {segment_number}, {segment_length}")
+        self.inst.send_scpi_cmd(f":TRAC:DEF {segment_number}, {segment_length}")
 
     def get_trace_definition(self):
         segment_number, size = self.send_command(":TRAC:DEF?")
@@ -2812,7 +2812,7 @@ class ProteusDriver:
             raise ValueError("Invalid arguments")
         if segment<1 or segment>64000:
             raise ValueError("Invalid arguments")
-        self.send_command(f":TRAC:SEL {segment}")
+        self.inst.send_scpi_cmd(f":TRAC:SEL {segment}")
 
     def get_selected_segment(self):
         return self.send_command(f":TRAC:SEL?", query = True)
@@ -3220,6 +3220,58 @@ class ProteusDevice(Device):
             self.logger.error(f"Reconnection failed: {e}")
             self._is_connected = False
             return False
+    def set_channel_voltage_high(self, channel):
+        # AWG channel
+        self.driver.inst.send_scpi_cmd(':INST:CHAN {0}'.format(channel))
+        self.driver.inst.send_scpi_cmd(':VOLT MAX')
+        sampleRateDAC = 1.25E9
+        self.driver.apply_sampling_configuration(sampleRateDAC)
+        self.driver.set_continuous_run(0)
+        # scale to 16 bits
+        max_dac = 65535  # Max Dac
+        half_dac = max_dac / 2  # DC Level
+        data_type = np.uint16  # DAC data type
+
+        segnum = 1
+        amp = 1  # 0.3
+        # must be a multiple of 64 (corresponds to 300 ns)
+        segLen = 64000
+        dacWaveDC = amp * np.ones(segLen)
+        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
+        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
+        self.driver.define_trace(segnum, len(dacWaveDC))  # memory location and length
+        self.driver.select_segment(segnum)
+        self.driver.inst.timeout = 30000  # increase
+        self.driver.inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
+        self.driver.inst.timeout = 10000  # return to normal
+        # Create and download a second Segment
+        segnum = 2
+        amp = 1
+        # must be a multiple of 64 (corresponds to 500 ns)
+        segLen = 64000
+        dacWaveDC = amp * np.ones(segLen)
+        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
+        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
+        self.driver.define_trace(segnum, len(dacWaveDC))  # memory location and length
+        self.driver.select_segment(segnum)
+        self.driver.inst.timeout = 30000  # increase
+        self.driver.inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
+        self.driver.inst.timeout = 10000  # return to normal
+        self.driver.set_voltage_offset(0.46)
+        # Create a Task Table
+        self.driver.set_task_table_length(4)
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:SEL 1')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:TYPE:STAR')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:SEGM 1')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:NEXT1 2')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:SEL 2')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:TYPE:SEQ')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:SEGM 2')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:NEXT1 1')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:SEQ 1')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:WRITE')
+        self.driver.inst.send_scpi_cmd(':SOUR:FUNC:MODE TASK')
+        self.driver.inst.send_scpi_cmd(':OUTP ON')
 
 if __name__ == "__main__":
     dev = ProteusDriver('192.168.2.4')
