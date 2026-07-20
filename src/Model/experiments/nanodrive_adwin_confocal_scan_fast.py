@@ -13,22 +13,11 @@ movements to achieve accurate positioning while maintaining high scan rates.
 import numpy as np
 from pyqtgraph.exporters import ImageExporter
 from pathlib import Path
-
-
 from src.core import Parameter, Experiment
 from src.core.helper_functions import get_configured_confocal_scans_folder
 from src.core.adwin_helpers import get_adwin_binary_path
 from time import sleep
 import pyqtgraph as pg
-import os
-import sys
-import struct
-import matplotlib.pyplot as plt
-srcpath = os.path.realpath(r'C:\Users\Duttlab\Downloads\PythonExamples\Examples\SourceFiles')
-sys.path.append(srcpath)
-from teproteus import TEProteusAdmin as TepAdmin
-from tevisainst import TEVisaInst
-from src.Controller import SG384Generator
 import numpy as np
 import datetime
 from src.core.struct_hdf5 import MyStruct   # same import the ODMR experiment uses
@@ -98,7 +87,9 @@ class NanodriveAdwinConfocalScanFast(Experiment):
     #_DEVICES = {'nanodrive': MCLNanoDrive(settings={'serial':2849}), 'adwin':AdwinGoldDevice()}  # Removed - devices now passed via constructor
     _DEVICES = {
         'nanodrive': 'nanodrive',
-        'adwin': 'adwin'
+        'adwin': 'adwin',
+        'sg384': 'sg384',
+        'proteus': 'proteus'
     }
     _EXPERIMENTS = {}
 
@@ -113,197 +104,8 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         #get instances of devices
         self.nd = self.devices['nanodrive']['instance']
         self.adw = self.devices['adwin']['instance']
-        self.sg384 = SG384Generator()
-        ###
-
-        # testing aom with worst case scenario: longest pulse durations and shortest waiting time:
-        # from scc papers, longest shelving is 300 ns, longest ionization is 500 ns, short readout: 3ms, and short initialization 1 us
-        # Connect to instrument(PXI)
-        sid = 3  # PXI slot of AWT on chassis
-        admin = TepAdmin()  # required to control PXI module
-        inst = admin.open_instrument(slot_id=sid)
-        resp = inst.send_scpi_query("*IDN?")  # Get the instrument's *IDN
-        print('connected to: ' + resp)  # Print *IDN
-
-        # initialize DAC
-        inst.send_scpi_cmd('*CLS; *RST')
-
-        # AWG channel
-        ch = 3  # everything after relates to CH 3
-        cmd = ':INST:CHAN {0}'.format(ch)
-        inst.send_scpi_cmd(cmd)
-        cmd = ':VOLT MAX'
-        rc = inst.send_scpi_cmd(cmd)
-        # cmd = ':VOLT {0}'.format(1)
-        # inst.send_scpi_cmd(cmd)
-
-        sampleRateDAC = 1.25E9
-        cmd = ':FREQ:RAST {0}'.format(sampleRateDAC)
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:DEL:ALL'  # Clear CH 4 Memory
-        inst.send_scpi_cmd(cmd)
-        cmd = ':INIT:CONT OFF'  # play waveform continuously
-        inst.send_scpi_cmd(cmd)
-
-        # scale to 16 bits
-        max_dac = 65535  # Max Dac
-        half_dac = max_dac / 2  # DC Level
-        data_type = np.uint16  # DAC data type
-
-        segnum = 1
-        amp = 1  # 0.3
-        # must be a multiple of 64 (corresponds to 300 ns)
-        segLen = 64000
-        dacWaveDC = amp * np.ones(segLen)
-        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
-        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
-        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:SEL {0}'.format(segnum)
-        inst.send_scpi_cmd(cmd)
-
-        inst.timeout = 30000  # increase
-        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
-        inst.timeout = 10000  # return to normal
-
-        # Create and download a second Segment
-        segnum = 2
-        amp = 1
-        # must be a multiple of 64 (corresponds to 500 ns)
-        segLen = 64000
-        dacWaveDC = amp * np.ones(segLen)
-        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
-        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
-        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:SEL {0}'.format(segnum)
-        inst.send_scpi_cmd(cmd)
-
-        inst.timeout = 30000  # increase
-        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
-        inst.timeout = 10000  # return to normal
-
-        cmd = ':VOLT:OFFS 0.46'
-        rc = inst.send_scpi_cmd(cmd)
-        print(f"offset: {inst.send_scpi_query(":VOLT:OFFS?")}")
-        # Create a Task Table
-        cmd = ':TASK:COMP:LENG 4'  # set task table length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEL 1'  # set task 1
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:TYPE:STAR'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEGM 1'
-        inst.send_scpi_cmd(cmd)  # shelving pulse
-        cmd = ':TASK:COMP:NEXT1 2'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEL 2'  # set task 2
-        inst.send_scpi_cmd(cmd)
-        cmd = f':TASK:COMP:TYPE:SEQ'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEGM 2'
-        inst.send_scpi_cmd(cmd)  # ionization pulse
-        cmd = ':TASK:COMP:NEXT1 1'
-        inst.send_scpi_cmd(cmd)
-        cmd = f':TASK:COMP:SEQ {1}'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:WRITE'  # write to FPGA
-        inst.send_scpi_cmd(cmd)
-        cmd = ':SOUR:FUNC:MODE TASK'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':OUTP ON'
-        rc = inst.send_scpi_cmd(cmd)
-
-        ###
-        # AWG channel
-        ch = 4  # everything after relates to CH 4
-        cmd = ':INST:CHAN {0}'.format(ch)
-        inst.send_scpi_cmd(cmd)
-        cmd = ':VOLT 1'
-        rc = inst.send_scpi_cmd(cmd)
-        # cmd = ':VOLT {0}'.format(1)
-        # inst.send_scpi_cmd(cmd)
-
-        sampleRateDAC = 1.25E9
-        cmd = ':FREQ:RAST {0}'.format(sampleRateDAC)
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:DEL:ALL'  # Clear CH 4 Memory
-        inst.send_scpi_cmd(cmd)
-        cmd = ':INIT:CONT OFF'  # play waveform continuously
-        inst.send_scpi_cmd(cmd)
-
-        # scale to 16 bits
-        max_dac = 65535  # Max Dac
-        half_dac = max_dac / 2  # DC Level
-        data_type = np.uint16  # DAC data type
-
-        segnum = 1
-        amp = 1  # 0.3
-        # must be a multiple of 64 (corresponds to 300 ns)
-        segLen = 64000
-        dacWaveDC = amp * np.ones(segLen)
-        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
-        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
-        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:SEL {0}'.format(segnum)
-        inst.send_scpi_cmd(cmd)
-
-        inst.timeout = 30000  # increase
-        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
-        inst.timeout = 10000  # return to normal
-
-        # Create and download a second Segment
-        segnum = 2
-        amp = 1
-        # must be a multiple of 64 (corresponds to 500 ns)
-        segLen = 64000
-        dacWaveDC = amp * np.ones(segLen)
-        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
-        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
-        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:SEL {0}'.format(segnum)
-        inst.send_scpi_cmd(cmd)
-
-        inst.timeout = 30000  # increase
-        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
-        inst.timeout = 10000  # return to normal
-
-        cmd = ':VOLT:OFFS 0.46'
-        rc = inst.send_scpi_cmd(cmd)
-        print(f"offset: {inst.send_scpi_query(":VOLT:OFFS?")}")
-        # Create a Task Table
-        cmd = ':TASK:COMP:LENG 4'  # set task table length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEL 1'  # set task 1
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:TYPE:STAR'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEGM 1'
-        inst.send_scpi_cmd(cmd)  # shelving pulse
-        cmd = ':TASK:COMP:NEXT1 2'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEL 2'  # set task 2
-        inst.send_scpi_cmd(cmd)
-        cmd = f':TASK:COMP:TYPE:SEQ'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEGM 2'
-        inst.send_scpi_cmd(cmd)  # ionization pulse
-        cmd = ':TASK:COMP:NEXT1 1'
-        inst.send_scpi_cmd(cmd)
-        cmd = f':TASK:COMP:SEQ {1}'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:WRITE'  # write to FPGA
-        inst.send_scpi_cmd(cmd)
-        cmd = ':SOUR:FUNC:MODE TASK'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':OUTP ON'
-        rc = inst.send_scpi_cmd(cmd)
-
-        inst.close_instrument()
-        admin.close_inst_admin()
-        ###
+        self.sg384 = self.devices['sg384']['instance']
+        self.proteus = self.devices['proteus']['instance']
 
     def save_hdf5(self):
         """this function defines its custom data and metadata to be saved and then calls the
@@ -401,6 +203,8 @@ class NanodriveAdwinConfocalScanFast(Experiment):
             # Set center frequency
             self.sg384.set_frequency(frequency)
             self.sg384._send('ENBR 1')
+            self.proteus.set_channel_voltage_high(1)
+        self.proteus.set_channel_voltage_high(4)
         self.setup_scan()
         sleep(0.1)
         # Override scan corners from GUI point-selection if enabled
@@ -630,6 +434,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
             self.raw_counts_all.append(np.array(raw_count_data))
             self.count_rate_all.append(np.array(count_rate_data))
             self.z_values.append(z)
+        self.proteus.driver.off()
         if self.settings['MICROWAVE']['enable'] == True:
             self.sg384._send('ENBR 0')
         # ONE end time and ONE save for the whole run -> image_1, image_2, ... in a single file.

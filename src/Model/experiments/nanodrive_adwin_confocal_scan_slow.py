@@ -19,10 +19,6 @@ from src.core.helper_functions import get_configured_confocal_scans_folder
 from src.core.adwin_helpers import get_adwin_binary_path
 from time import sleep
 import pyqtgraph as pg
-from src.Controller import SG384Generator
-
-
-
 
 class NanodriveAdwinConfocalScanSlow(Experiment):
     '''
@@ -73,7 +69,9 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
     #_DEVICES = {'nanodrive': MCLNanoDrive(settings={'serial':2849}), 'adwin':AdwinGoldDevice()}  # Removed - devices now passed via constructor
     _DEVICES = {
         'nanodrive': 'nanodrive',
-        'adwin': 'adwin'
+        'adwin': 'adwin',
+        'proteus': 'proteus',
+        'sg384': 'sg384'
     }
     _EXPERIMENTS = {}
 
@@ -88,7 +86,8 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         #get instances of devices
         self.nd = self.devices['nanodrive']['instance']
         self.adw = self.devices['adwin']['instance']
-        self.sg384 = SG384Generator()
+        self.sg384 = self.devices['sg384']['instance']
+        self.proteus = self.devices['proteus']['instance']
 
     def setup_scan(self):
         '''
@@ -145,6 +144,8 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
             # Set center frequency
             self.sg384.set_frequency(frequency)
             self.sg384._send('ENBR 1')
+            self.proteus.set_channel_voltage_high(1)
+        self.proteus.set_channel_voltage_high(4)
         self.setup_scan()
         sleep(0.1)
 
@@ -255,6 +256,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
             interation_num = interation_num + len(y_array)
             self.progress = 100. * (interation_num + 1) / total_interations
             self.updateProgress.emit(self.progress)
+        self.proteus.driver.off()
         if self.settings['MICROWAVE']['enable'] == True:
             self.sg384._send('ENBR 0')
         # tracker to only save test image once

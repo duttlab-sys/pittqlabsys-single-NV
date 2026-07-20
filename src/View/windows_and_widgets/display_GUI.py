@@ -346,10 +346,6 @@ class Display_View(QWidget):
             try:
                 self.widget = Amscope_Camera_View()
                 self.verticalLayout.addWidget(self.widget)
-                if self.widget is not None:
-                    QMessageBox.information(self, 'Success', f'Connected to: {self.display_choice}')
-                else:
-                    QMessageBox.critical(self, 'Error', f'Could not connect to: {self.display_choice}')
             except Exception as e:
                 QMessageBox.critical(self, 'Error', str(e))
         elif self.display_choice == 'CASCADE CCD':
@@ -357,10 +353,6 @@ class Display_View(QWidget):
             try:
                 self.widget = ROPER_CASCADE_CCD_View()
                 self.verticalLayout.addWidget(self.widget)
-                if self.widget is not None:
-                    QMessageBox.information(self, 'Success', f'Connected to: {self.display_choice}')
-                else:
-                    QMessageBox.critical(self, 'Error', f'Could not connect to: {self.display_choice}')
             except Exception as e:
                 QMessageBox.critical(self, 'Error', str(e))
         else:
@@ -511,7 +503,12 @@ class Display_View(QWidget):
                 except Exception:
                     pass
         else:
+            if self.widget is None:
+                return
             self.widget.start_live_view()
+            # if the hardware didn't actually open, stop here (no crash, no sliders/plots)
+            if getattr(self.widget, 'hcam', None) is None:
+                return
             # pick up the real sensor size from the camera view and size everything to it
             if getattr(self.widget, 'w', 0) and getattr(self.widget, 'h', 0):
                 self.w, self.h = self.widget.w, self.widget.h
@@ -534,6 +531,8 @@ class Display_View(QWidget):
                 QMessageBox.warning(self, 'Warning', f'Unexpected error: {e}')
 
     def build_sliders(self):
+        if self.widget is None or getattr(self.widget, "hcam", None) is None:
+            return
         params = [
             "exposure gain", "exposure time", "brightness", "saturation",
             "contrast", "Gamma", "Temp", "Tint", "Hue"]

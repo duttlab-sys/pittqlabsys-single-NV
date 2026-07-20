@@ -236,6 +236,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.positioning_tab.display_choice_changed.connect(self.update_display_choice)
         self.positioning_tab.color_scale_changed.connect(self.update_color_scale)
         self.positioning_tab.Get_Image_Button_Clicked.connect(self.get_image_snapshot)
+        self.positioning_tab.connect_to_display_clicked.connect(self.on_connect_to_display_clicked)
         self.positioning_tab.snapshot_mode_changed.connect(self.update_snapshot_mode)
         if hasattr(self, "Display_View_widget") and self.Display_View_widget is not None:
             self.Display_View_widget.update_get_img.connect(self.update_get_image)
@@ -730,19 +731,16 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         """
         try:
             current_tab = str(self.tabWidget.tabText(self.tabWidget.currentIndex()))
-            if current_tab == "Positioning":
-                self.load_display_widget()
 
-            else:
-                if hasattr(self, "Display_View_widget") and self.Display_View_widget is not None:
-                    self.latest_display_frame = self.Display_View_widget.widget.get_latest_frame()
-                    self.Display_View_widget.close()
-                    self.Display_View_widget.setParent(None)
-                    self.Display_View_widget.deleteLater()
-                    self.Display_View_widget = None
+            if hasattr(self, "Display_View_widget") and self.Display_View_widget is not None:
+                self.latest_display_frame = self.Display_View_widget.widget.get_latest_frame()
+                self.Display_View_widget.close()
+                self.Display_View_widget.setParent(None)
+                self.Display_View_widget.deleteLater()
+                self.Display_View_widget = None
 
-                    # Show original contents again
-                    self.restore_layout_contents()
+                # Show original contents again
+                self.restore_layout_contents()
 
             # Rest of your existing code...
             if self.current_experiment is None:
@@ -771,11 +769,20 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.display_choice = new_display_choice
         self.reload_display_widget()
 
+    def on_connect_to_display_clicked(self):
+        # Load the chosen camera view ONLY when the user asks for it.
+        # If a camera view is already loaded, leave it in place.
+        if getattr(self, "Display_View_widget", None) is not None:
+            return
+        self.load_display_widget()
+
     def update_color_scale(self, new_color_scale_choice):
-        self.Display_View_widget.update_color_scale_option(new_color_scale_choice)
+        if getattr(self, "Display_View_widget", None) is not None:
+            self.Display_View_widget.update_color_scale_option(new_color_scale_choice)
 
     def get_image_snapshot(self):
-        self.Display_View_widget.get_image_snapshot()
+        if getattr(self, "Display_View_widget", None) is not None:
+            self.Display_View_widget.get_image_snapshot()
 
     def update_get_image(self, enabled):
         self.positioning_tab.Update_Get_Image_Button(enabled)
@@ -793,8 +800,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def reload_display_widget(self):
         print("reload_display_widget called, snapshot or live:", self.snapshot_or_live)
-        #if hasattr(self, 'Display_View_widget'):
-        self.Display_View_widget.update_choices(self.display_choice, self.snapshot_or_live)
+        # only forward changes if the camera view is actually loaded
+        if getattr(self, "Display_View_widget", None) is not None:
+            self.Display_View_widget.update_choices(self.display_choice, self.snapshot_or_live)
 
     def remove_and_store_layout_contents(self, layout):
         self._stored_layout_items = []
@@ -828,23 +836,48 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             text = self.positioning_tab.snapshot_live_comboBox.currentText()
             self.snapshot_or_live = 0 if text.strip().lower() == "snapshot" else 1
             print(f"snapshot_or_live: {self.snapshot_or_live}")
-            # Hide original layout contents
-            self.remove_and_store_layout_contents(self.verticalLayout_2)
 
-            # Create and add display view widget
-            self.Display_View_widget = Display_View(self.display_choice, self.snapshot_or_live)
+            # Build the camera view first WITHOUT touching the shared plot widget.
+            display_widget = Display_View(self.display_choice, self.snapshot_or_live)
+
+            # In snapshot mode the hardware isn't opened during construction, so try now.
+            cam = getattr(display_widget, "widget", None)
+            if cam is not None and self.snapshot_or_live == 0 and getattr(cam, "hcam", None) is None:
+                try:
+                    cam._init_camera()
+                except Exception:
+                    pass
+
+            # Did the hardware actually connect? If not, keep the plotting widget.
+            connected = cam is not None and getattr(cam, "hcam", None) is not None
+            if not connected:
+                try:
+                    display_widget.close()
+                except Exception:
+                    pass
+                display_widget.setParent(None)
+                display_widget.deleteLater()
+                QMessageBox.warning(
+                    self, "Camera not connected",
+                    f"Could not connect to {self.display_choice}. Keeping the plotting view.")
+                return
+
+            # Connected: NOW swap the shared plot widget out for the camera view.
+            self.remove_and_store_layout_contents(self.verticalLayout_2)
+            self.Display_View_widget = display_widget
+
             # re-apply the colormap the user had selected; a brand-new Roper view
             # otherwise defaults back to Grey on every tab switch
             self.Display_View_widget.update_color_scale_option(
                 self.positioning_tab.color_scale_option.currentText())
             if self.first_time_positioning == False:
                 if self.snapshot_or_live == 0:
-                    self.Display_View_widget.widget._init_camera()
-                    buf = self.latest_display_frame
-                    if buf.ndim == 2:
-                        self.Display_View_widget.img_gray = buf
-                    else:
-                        self.Display_View_widget.img_gray = np.dot(buf[..., :3], [0.2989, 0.5870, 0.1140])
+                    buf = getattr(self, "latest_display_frame", None)
+                    if buf is not None:
+                        if buf.ndim == 2:
+                            self.Display_View_widget.img_gray = buf
+                        else:
+                            self.Display_View_widget.img_gray = np.dot(buf[..., :3], [0.2989, 0.5870, 0.1140])
             self.Display_View_widget.x_crosshair.connect(self.update_x_crosshair)
             self.Display_View_widget.y_crosshair.connect(self.update_y_crosshair)
             self.Display_View_widget.setMinimumHeight(500)

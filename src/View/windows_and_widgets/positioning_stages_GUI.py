@@ -65,6 +65,7 @@ class positioning_stages_view(QWidget, Ui_Form):
     server_off_button_clicked = pyqtSignal(int)
     color_scale_changed = pyqtSignal(str)
     Get_Image_Button_Clicked = pyqtSignal(int)
+    connect_to_display_clicked = pyqtSignal(int)
 
     # --- AutoTune config: MUST stay in sync with Display_View. Roper only. ---
     AUTOTUNE_TARGET_MIN = 15000
@@ -154,6 +155,7 @@ class positioning_stages_view(QWidget, Ui_Form):
         self.color_scale_option.currentTextChanged.connect(self.on_color_scale_changed)
         self.snapshot_live_comboBox.currentTextChanged.connect(self.on_snapshot_or_live_changed)
         self.Get_Image_Button.clicked.connect(self.get_image_snapshot)
+        self.ConnectToDisplayButton.clicked.connect(self.on_connect_to_display_clicked)
         self.data_saving_path = None
         self.data_reader = None
         self.frame = None
@@ -443,6 +445,9 @@ class positioning_stages_view(QWidget, Ui_Form):
 
     def get_image_snapshot(self):
         self.Get_Image_Button_Clicked.emit(1)
+
+    def on_connect_to_display_clicked(self):
+        self.connect_to_display_clicked.emit(1)
 
     def Update_Get_Image_Button(self, enabled):
         self.Get_Image_Button.setEnabled(enabled)

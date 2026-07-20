@@ -12,25 +12,13 @@ import datetime
 import numpy as np
 import pyqtgraph as pg
 from scipy.optimize import curve_fit
-from scipy.signal import savgol_filter
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any
 import time
 from scipy.signal import savgol_filter, find_peaks   # add find_peaks
 from PyQt5.QtCore import Qt
 from src.core.experiment import Experiment
 from src.core.parameter import Parameter
 from src.core.struct_hdf5 import MyStruct, save_data, StructArray
-from src.Controller.sg384 import SG384Generator
-from src.Controller.adwin_gold import AdwinGoldDevice
-from src.Controller.nanodrive import MCLNanoDrive
-from src.core.adwin_helpers import setup_adwin_for_odmr, read_adwin_odmr_data
-import sys
-import os
-srcpath = os.path.realpath(r'C:\Users\Duttlab\Downloads\PythonExamples\Examples\SourceFiles')
-sys.path.append(srcpath)
-from teproteus import TEProteusAdmin as TepAdmin
-from tevisainst import TEVisaInst
-
 
 class ODMRSweepContinuousExperiment(Experiment):
     """
@@ -98,7 +86,8 @@ class ODMRSweepContinuousExperiment(Experiment):
     
     _DEVICES = {
         'microwave': 'sg384',
-        'adwin': 'adwin'
+        'adwin': 'adwin',
+        'proteus': 'proteus'
         # 'nanodrive': 'nanodrive'  # Optional - not needed for ODMR sweeps
     }
     
@@ -136,192 +125,7 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.microwave = self.devices.get('microwave', {}).get('instance')
         self.adwin = self.devices.get('adwin', {}).get('instance')
         self.nanodrive = self.devices.get('nanodrive', {}).get('instance')
-        ###
-        # Connect to instrument(PXI)
-        sid = 3  # PXI slot of AWT on chassis
-        admin = TepAdmin()  # required to control PXI module
-        inst = admin.open_instrument(slot_id=sid)
-        resp = inst.send_scpi_query("*IDN?")  # Get the instrument's *IDN
-        print('connected to: ' + resp)  # Print *IDN
-
-        # initialize DAC
-        inst.send_scpi_cmd('*CLS; *RST')
-
-        # AWG channel
-        ch = 4  # everything after relates to CH 4
-        cmd = ':INST:CHAN {0}'.format(ch)
-        inst.send_scpi_cmd(cmd)
-        cmd = ':VOLT MAX'
-        rc = inst.send_scpi_cmd(cmd)
-        # cmd = ':VOLT {0}'.format(1)
-        # inst.send_scpi_cmd(cmd)
-
-        sampleRateDAC = 1.25E9
-        cmd = ':FREQ:RAST {0}'.format(sampleRateDAC)
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:DEL:ALL'  # Clear CH 4 Memory
-        inst.send_scpi_cmd(cmd)
-        cmd = ':INIT:CONT OFF'  # play waveform continuously
-        inst.send_scpi_cmd(cmd)
-
-        # scale to 16 bits
-        max_dac = 65535  # Max Dac
-        half_dac = max_dac / 2  # DC Level
-        data_type = np.uint16  # DAC data type
-
-        segnum = 1
-        amp = 1  # 0.3
-        # must be a multiple of 64 (corresponds to 300 ns)
-        segLen = 64000
-        dacWaveDC = amp * np.ones(segLen)
-        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
-        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
-        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:SEL {0}'.format(segnum)
-        inst.send_scpi_cmd(cmd)
-
-        inst.timeout = 30000  # increase
-        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
-        inst.timeout = 10000  # return to normal
-
-        # Create and download a second Segment
-        segnum = 2
-        amp = 1
-        # must be a multiple of 64 (corresponds to 500 ns)
-        segLen = 64000
-        dacWaveDC = amp * np.ones(segLen)
-        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
-        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
-        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:SEL {0}'.format(segnum)
-        inst.send_scpi_cmd(cmd)
-
-        inst.timeout = 30000  # increase
-        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
-        inst.timeout = 10000  # return to normal
-
-        cmd = ':VOLT:OFFS 0.46'
-        rc = inst.send_scpi_cmd(cmd)
-        print(f"offset: {inst.send_scpi_query(":VOLT:OFFS?")}")
-        # Create a Task Table
-        cmd = ':TASK:COMP:LENG 4'  # set task table length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEL 1'  # set task 1
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:TYPE:STAR'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEGM 1'
-        inst.send_scpi_cmd(cmd)  # shelving pulse
-        cmd = ':TASK:COMP:NEXT1 2'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEL 2'  # set task 2
-        inst.send_scpi_cmd(cmd)
-        cmd = f':TASK:COMP:TYPE:SEQ'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEGM 2'
-        inst.send_scpi_cmd(cmd)  # ionization pulse
-        cmd = ':TASK:COMP:NEXT1 1'
-        inst.send_scpi_cmd(cmd)
-        cmd = f':TASK:COMP:SEQ {1}'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:WRITE'  # write to FPGA
-        inst.send_scpi_cmd(cmd)
-        cmd = ':SOUR:FUNC:MODE TASK'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':OUTP ON'
-        rc = inst.send_scpi_cmd(cmd)
-
-        ###
-        # AWG channel
-        ch = 1 # everything after relates to CH 4
-        cmd = ':INST:CHAN {0}'.format(ch)
-        inst.send_scpi_cmd(cmd)
-        cmd = 1.0
-        rc = inst.send_scpi_cmd(cmd)
-        # cmd = ':VOLT {0}'.format(1)
-        # inst.send_scpi_cmd(cmd)
-
-        sampleRateDAC = 1.25E9
-        cmd = ':FREQ:RAST {0}'.format(sampleRateDAC)
-        inst.send_scpi_cmd(cmd)
-        cmd = ':INIT:CONT OFF'  # play waveform continuously
-        inst.send_scpi_cmd(cmd)
-
-        # scale to 16 bits
-        max_dac = 65535  # Max Dac
-        half_dac = max_dac / 2  # DC Level
-        data_type = np.uint16  # DAC data type
-
-        segnum = 1
-        amp = 1  # 0.3
-        # must be a multiple of 64 (corresponds to 300 ns)
-        segLen = 64000
-        dacWaveDC = amp * np.ones(segLen)
-        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
-        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
-        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:SEL {0}'.format(segnum)
-        inst.send_scpi_cmd(cmd)
-
-        inst.timeout = 30000  # increase
-        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
-        inst.timeout = 10000  # return to normal
-
-        # Create and download a second Segment
-        segnum = 2
-        amp = 1
-        # must be a multiple of 64 (corresponds to 500 ns)
-        segLen = 64000
-        dacWaveDC = amp * np.ones(segLen)
-        dacWaveDC = np.clip(dacWaveDC, -1.0, 1.0)
-        dacWaveDC = ((dacWaveDC + 1.0) * half_dac).astype(data_type)
-        cmd = ':TRAC:DEF {0}, {1}'.format(segnum, len(dacWaveDC))  # memory location and length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TRAC:SEL {0}'.format(segnum)
-        inst.send_scpi_cmd(cmd)
-
-        inst.timeout = 30000  # increase
-        inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
-        inst.timeout = 10000  # return to normal
-
-        cmd = ':VOLT:OFFS 0.46'
-        rc = inst.send_scpi_cmd(cmd)
-        print(f"offset: {inst.send_scpi_query(":VOLT:OFFS?")}")
-        # Create a Task Table
-        cmd = ':TASK:COMP:LENG 4'  # set task table length
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEL 1'  # set task 1
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:TYPE:STAR'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEGM 1'
-        inst.send_scpi_cmd(cmd)  # shelving pulse
-        cmd = ':TASK:COMP:NEXT1 2'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEL 2'  # set task 2
-        inst.send_scpi_cmd(cmd)
-        cmd = f':TASK:COMP:TYPE:SEQ'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:SEGM 2'
-        inst.send_scpi_cmd(cmd)  # ionization pulse
-        cmd = ':TASK:COMP:NEXT1 1'
-        inst.send_scpi_cmd(cmd)
-        cmd = f':TASK:COMP:SEQ {1}'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':TASK:COMP:WRITE'  # write to FPGA
-        inst.send_scpi_cmd(cmd)
-        cmd = ':SOUR:FUNC:MODE TASK'
-        inst.send_scpi_cmd(cmd)
-        cmd = ':OUTP ON'
-        rc = inst.send_scpi_cmd(cmd)
-        ###
-
-        inst.close_instrument()
-        admin.close_inst_admin()
-        ###
+        self.proteus = self.devices['proteus']['instance']
         
         if not self.microwave:
             raise ValueError("SG384 microwave generator is required")
@@ -661,7 +465,8 @@ class ODMRSweepContinuousExperiment(Experiment):
         """Main experiment function."""
         try:
             self.log("Starting ODMR Phase Continuous Sweep Experiment")
-            
+            self.proteus.set_channel_voltage_high(1)
+            self.proteus.set_channel_voltage_high(4)
             # Setup experiment and devices first
             self.setup()
             
@@ -674,7 +479,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             self._run_sweep_averages()
             end_time = datetime.datetime.now()
             self.e_t = end_time.strftime("%m_%d_%Y_%H:%M:%S")
-            
+            self.proteus.driver.off()
             # Analyze the data
             self._analyze_data()
             

@@ -21,8 +21,6 @@ from src.core.adwin_helpers import get_adwin_binary_path
 from time import sleep
 import pyqtgraph as pg
 import keyboard
-from src.Controller import SG384Generator
-
 
 
 class NanodriveAdwinConfocalPoint(Experiment):
@@ -107,7 +105,9 @@ class NanodriveAdwinConfocalPoint(Experiment):
     #_DEVICES = {'nanodrive': MCLNanoDrive(settings={'serial':2849}), 'adwin':AdwinGoldDevice()}  # Removed - devices now passed via constructor
     _DEVICES = {
         'nanodrive': 'nanodrive',
-        'adwin': 'adwin'
+        'adwin': 'adwin',
+        'sg384': 'sg384',
+        'proteus': 'proteus'
     }
     _EXPERIMENTS = {}
 
@@ -122,7 +122,8 @@ class NanodriveAdwinConfocalPoint(Experiment):
         #get instances of devices
         self.nd = self.devices['nanodrive']['instance']
         self.adw = self.devices['adwin']['instance']
-        self.sg384 = SG384Generator()
+        self.sg384 = self.devices['sg384']['instance']
+        self.proteus = self.devices['proteus']['instance']
 
 
     def setup(self):
@@ -166,6 +167,8 @@ class NanodriveAdwinConfocalPoint(Experiment):
             # Set center frequency
             self.sg384.set_frequency(frequency)
             self.sg384._send('ENBR 1')
+            self.proteus.set_channel_voltage_high(1)
+        self.proteus.set_channel_voltage_high(4)
         # set to zero initially for smoother plotting
         count_rate_data = [0] * self.settings['graph_params']['length_data']
         raw_counts_data = [0] * self.settings['graph_params']['length_data']
@@ -715,7 +718,7 @@ class NanodriveAdwinConfocalPoint(Experiment):
 
                 self.progress = 50   #this is a infinite loop till stop button is hit; progress & updateProgress is only here to update plot
                 self.updateProgress.emit(self.progress)     #calling updateProgress.emit triggers _plot
-
+        self.proteus.driver.off()
         if self.settings['MICROWAVE']['enable'] == True:
             self.sg384._send('ENBR 0')
         self.adw.update({'process_1': {'running': False}})
