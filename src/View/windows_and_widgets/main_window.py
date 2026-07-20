@@ -1327,8 +1327,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             gui_logger.debug("Start button re-enabled")
             for exp in self.experiments.values():
                 if hasattr(exp, 'proteus'):
-                    exp.proteus.driver._close()
-                    print("PROTEUS closed")
+                    exp.proteus.driver.off()
+                    print("PROTEUS off")
 
         def skip_button():
             """
