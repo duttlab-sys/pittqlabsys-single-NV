@@ -69,6 +69,8 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('power', 1.0, float, 'Laser power in mW', units='mW'),
             Parameter('wavelength', 532.0, float, 'Laser wavelength in nm', units='nm')
         ]),
+        Parameter('Filter Wheel OD', 0,
+                  [0, 0.5, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('magnetic_field', [
             Parameter('enabled', False, bool, 'Enable magnetic field'),
             Parameter('strength', 0.0, float, 'Magnetic field strength in Gauss', units='G'),
@@ -87,7 +89,8 @@ class ODMRSweepContinuousExperiment(Experiment):
     _DEVICES = {
         'microwave': 'sg384',
         'adwin': 'adwin',
-        'proteus': 'proteus'
+        'proteus': 'proteus',
+        'filter_wheel': 'filter_wheel'
         # 'nanodrive': 'nanodrive'  # Optional - not needed for ODMR sweeps
     }
     
@@ -126,6 +129,7 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.adwin = self.devices.get('adwin', {}).get('instance')
         self.nanodrive = self.devices.get('nanodrive', {}).get('instance')
         self.proteus = self.devices['proteus']['instance']
+        self.filter_wheel = self.devices['filter_wheel']['instance']
         
         if not self.microwave:
             raise ValueError("SG384 microwave generator is required")
@@ -464,6 +468,7 @@ class ODMRSweepContinuousExperiment(Experiment):
     def _function(self):
         """Main experiment function."""
         try:
+            self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
             self.log("Starting ODMR Phase Continuous Sweep Experiment")
             self.proteus.set_channel_voltage_high(1)
             self.proteus.set_channel_voltage_high(4)

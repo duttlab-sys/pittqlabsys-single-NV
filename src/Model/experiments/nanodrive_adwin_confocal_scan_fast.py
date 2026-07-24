@@ -54,6 +54,8 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         Parameter('resolution', 1.0, [2.0,1.0,0.5,0.25,0.1,0.05,0.025,0.001], 'Resolution of each pixel in microns. Limited to give '),
         Parameter('time_per_pt', 2.0, [2.0,5.0], 'Time in ms at each point to get counts; same as load_rate for nanodrive. Wroking values 2 or 5 ms'),
         Parameter('ending_behavior', 'return_to_origin', ['return_to_inital_pos', 'return_to_origin', 'leave_at_corner'],'Nanodrive position after scan'),
+        Parameter('Filter Wheel OD', 0,
+                  [0, 0.5, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('3D_scan',
                   [Parameter('enable', False, bool, 'T/F to enable 3D scan'),
                   Parameter('folderpath', '', str, 'folder location to save images at each z-value'),
@@ -89,7 +91,8 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         'nanodrive': 'nanodrive',
         'adwin': 'adwin',
         'sg384': 'sg384',
-        'proteus': 'proteus'
+        'proteus': 'proteus',
+        'filter_wheel': 'filter_wheel'
     }
     _EXPERIMENTS = {}
 
@@ -106,6 +109,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         self.adw = self.devices['adwin']['instance']
         self.sg384 = self.devices['sg384']['instance']
         self.proteus = self.devices['proteus']['instance']
+        self.filter_wheel = self.devices['filter_wheel']['instance']
 
     def save_hdf5(self):
         """this function defines its custom data and metadata to be saved and then calls the
@@ -192,6 +196,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
 
         if self.settings['reboot_adwin'] == True:
             self.adw.reboot_adwin()
+        self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
         if self.settings['MICROWAVE']['enable'] == True:
             if not self.sg384.is_connected:
                 self.sg384.connect()

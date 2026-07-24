@@ -49,6 +49,8 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         Parameter('time_per_pt', 5.0, float, 'Time in ms at each point to get counts'),
         Parameter('settle_time',0.2,float,'Time in seconds to allow NanoDrive to settle to correct position'),
         Parameter('ending_behavior', 'return_to_origin', ['return_to_inital_pos', 'return_to_origin', 'leave_at_corner'],'Nanodrive position after scan'),
+        Parameter('Filter Wheel OD', 0,
+                  [0, 0.5, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('3D_scan',# using experiment iterator to sweep z-position can give an effective 3D scan as successive images. Useful for finding where NVs are in focal plane
                   [Parameter('enable', False, bool, 'T/F to enable 3D scan'),
                    Parameter('folderpath', str(get_configured_confocal_scans_folder()), str,'folder location to save images at each z-value')]),
@@ -71,7 +73,8 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         'nanodrive': 'nanodrive',
         'adwin': 'adwin',
         'proteus': 'proteus',
-        'sg384': 'sg384'
+        'sg384': 'sg384',
+        'filter_wheel': 'filter_wheel'
     }
     _EXPERIMENTS = {}
 
@@ -88,6 +91,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         self.adw = self.devices['adwin']['instance']
         self.sg384 = self.devices['sg384']['instance']
         self.proteus = self.devices['proteus']['instance']
+        self.filter_wheel = self.devices['filter_wheel']['instance']
 
     def setup_scan(self):
         '''
@@ -133,6 +137,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         """
         if self.settings['reboot_adwin'] == True:
             self.adw.reboot_adwin()
+        self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
         if self.settings['MICROWAVE']['enable'] == True:
             if not self.sg384.is_connected:
                 self.sg384.connect()

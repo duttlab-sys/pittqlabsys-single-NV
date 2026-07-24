@@ -81,6 +81,8 @@ class NanodriveAdwinConfocalPoint(Experiment):
                    Parameter('y',0.0,float,'y-coordinate in microns'),
                    Parameter('z',0.0,float,'z-coordinate in microns')
                    ]),
+        Parameter('Filter Wheel OD', 0,
+                  [0, 0.5, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('MICROWAVE',
                   [Parameter('enable', False, bool,
                              'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
@@ -107,7 +109,8 @@ class NanodriveAdwinConfocalPoint(Experiment):
         'nanodrive': 'nanodrive',
         'adwin': 'adwin',
         'sg384': 'sg384',
-        'proteus': 'proteus'
+        'proteus': 'proteus',
+        'filter_wheel': 'filter_wheel'
     }
     _EXPERIMENTS = {}
 
@@ -124,6 +127,7 @@ class NanodriveAdwinConfocalPoint(Experiment):
         self.adw = self.devices['adwin']['instance']
         self.sg384 = self.devices['sg384']['instance']
         self.proteus = self.devices['proteus']['instance']
+        self.filter_wheel = self.devices['filter_wheel']['instance']
 
 
     def setup(self):
@@ -153,6 +157,7 @@ class NanodriveAdwinConfocalPoint(Experiment):
         will be overwritten in the __init__
         """
         self.setup()
+        self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
 
         self.data['counts'] = None
         self.data['raw_counts'] = None
@@ -192,7 +197,6 @@ class NanodriveAdwinConfocalPoint(Experiment):
         original_x = self.nd.read_probes('x_pos')
         original_y = self.nd.read_probes('y_pos')
         original_z = self.nd.read_probes('z_pos')
-        print(f'nanodrive at x = {original_x}, y = {original_y}, z = {original_z}')
 
         sleep(0.1)  # time for stage to move and adwin process to initilize
 
@@ -267,31 +271,24 @@ class NanodriveAdwinConfocalPoint(Experiment):
                     if keyboard.is_pressed(x_neg_key):
                         self.nd.update({'x_pos': self.nd.read_probes('x_pos') - x_step})
                         sleep(settle_time)
-                        print(f"x is decreased to {self.nd.read_probes('x_pos')}")
                     if keyboard.is_pressed(x_pos_key):
                         self.nd.update({'x_pos': self.nd.read_probes('x_pos') + x_step})
                         sleep(settle_time)
-                        print(f"x is increased to {self.nd.read_probes('x_pos')}")
                     if keyboard.is_pressed(y_neg_key):
                         self.nd.update({'y_pos': self.nd.read_probes('y_pos') - y_step})
                         sleep(settle_time)
-                        print(f"y is decreased to {self.nd.read_probes('y_pos')}")
                     if keyboard.is_pressed(y_pos_key):
                         self.nd.update({'y_pos': self.nd.read_probes('y_pos') + y_step})
                         sleep(settle_time)
-                        print(f"y is increased to {self.nd.read_probes('y_pos')}")
                     if keyboard.is_pressed(z_neg_key):
                         self.nd.update({'z_pos': self.nd.read_probes('z_pos') - z_step})
                         sleep(settle_time)
-                        print(f"z is decreased to {self.nd.read_probes('z_pos')}")
                     if keyboard.is_pressed(z_pos_key):
                         self.nd.update({'z_pos': self.nd.read_probes('z_pos') + z_step})
                         sleep(settle_time)
-                        print(f"z is increased to {self.nd.read_probes('z_pos')}")
                     if keyboard.is_pressed(return_to_start_key):
                         self.nd.update({'x_pos': original_x, 'y_pos': original_y, 'z_pos': original_z})
                         sleep(10 * settle_time)
-                        print(f"return_to_start_key is pressed. Moved to x = {self.nd.read_probes('x_pos')}, y = {self.nd.read_probes('y_pos')}, z = {self.nd.read_probes('z_pos')}")
 
                 # Plot solution to make sure that the code and theory match
                 # Play with parameters: step size and settle time
@@ -305,8 +302,6 @@ class NanodriveAdwinConfocalPoint(Experiment):
                 # This also ensures that we are getting counts from the same nanodiamond that we started measuring)
                 if automated_optimization_on:
                     current_counts = (self.adw.read_probes('int_var', id=1) * 1e3) / self.settings['count_time']
-                    print('current counts:', current_counts)
-                    print('cutoff counts:', (min_reoptimize_ratio * highest_counts))
                     if Continuous_optimization_on or (
                             ((self.adw.read_probes('int_var', id=1) * 1e3) / self.settings['count_time']) < (
                             min_reoptimize_ratio * highest_counts)):
