@@ -82,6 +82,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         Parameter('MAX_POINT_CALLBACK_FUNCTION', [95.0, 95.0], list, 'max x and y positions to select'),
         Parameter('save', False, bool, 'T/F to save each confocal image to an hdf5 file'),
         Parameter('filename', "nanodriveadwinconfocalscanfast", str, 'filename to save each confocal image to an hdf5 file'),
+        Parameter('sample', ""),
 
     ]
 
