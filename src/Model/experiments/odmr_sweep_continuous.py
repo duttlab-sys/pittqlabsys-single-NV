@@ -54,6 +54,8 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('stop', 3.0e9, float, 'Stop frequency in Hz', units='Hz')
         ]),
         Parameter('microwave', [
+            Parameter('enable', True, bool,
+                      'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
             Parameter('power', -10.0, float, 'Microwave power in dBm', units='dBm'),
             Parameter('step_freq', 1e6, float, 'Frequency step size in Hz', units='Hz'),
             Parameter('sweep_function', 'Triangle', str, 'sweep function')
@@ -83,7 +85,9 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('background_subtraction', True, bool, 'Subtract background')
         ]),
         Parameter('2D_Plot', False, bool, 'Plot every individual sweep as a 2D map (no averaging) instead of the averaged 1D spectrum'),
-        Parameter('filename', "ODMR_Sweep_Continuous", str, "file name to be saved")
+        Parameter('filename', "ODMR_Sweep_Continuous", str, "file name to be saved"),
+        Parameter('sample', "", str, "Sample name to be saved with the data"),
+        Parameter('Magnet ON', False),
     ]
     
     _DEVICES = {
@@ -222,7 +226,8 @@ class ODMRSweepContinuousExperiment(Experiment):
         # Enable modulation
         self.microwave.enable_modulation()
         # Enable output
-        self.microwave.enable_output()
+        if self.settings['MICROWAVE']['enable'] == True:
+            self.microwave.enable_output()
 
         
 
