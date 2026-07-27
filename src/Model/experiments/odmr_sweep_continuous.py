@@ -226,7 +226,7 @@ class ODMRSweepContinuousExperiment(Experiment):
         # Enable modulation
         self.microwave.enable_modulation()
         # Enable output
-        if self.settings['MICROWAVE']['enable'] == True:
+        if self.settings['microwave']['enable'] == True:
             self.microwave.enable_output()
 
         
