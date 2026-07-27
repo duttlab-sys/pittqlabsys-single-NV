@@ -19,6 +19,8 @@ from src.core.helper_functions import get_configured_confocal_scans_folder
 from src.core.adwin_helpers import get_adwin_binary_path
 from time import sleep
 import pyqtgraph as pg
+import datetime
+from src.core.struct_hdf5 import MyStruct
 
 class NanodriveAdwinConfocalScanSlow(Experiment):
     '''
@@ -51,9 +53,14 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         Parameter('ending_behavior', 'return_to_origin', ['return_to_inital_pos', 'return_to_origin', 'leave_at_corner'],'Nanodrive position after scan'),
         Parameter('Filter Wheel OD', 0,
                   [0, 0.5, 2, 3, 4], 'Filter Wheel OD'),
-        Parameter('3D_scan',# using experiment iterator to sweep z-position can give an effective 3D scan as successive images. Useful for finding where NVs are in focal plane
+        Parameter('3D_scan',
+                  # steps z from z_min to z_max (inclusive) and takes a full x-y raster at each z. Useful for finding where NVs are in the focal plane
                   [Parameter('enable', False, bool, 'T/F to enable 3D scan'),
-                   Parameter('folderpath', str(get_configured_confocal_scans_folder()), str,'folder location to save images at each z-value')]),
+                   Parameter('folderpath', str(get_configured_confocal_scans_folder()), str,
+                             'folder location to save images at each z-value'),
+                   Parameter('z_min', 45.0, float, 'start z-position in microns for the 3D scan'),
+                   Parameter('z_max', 55.0, float, 'end z-position in microns for the 3D scan'),
+                   Parameter('z_step', 1.0, float, 'z step size in microns for the 3D scan')]),
         Parameter('MICROWAVE',
                   [Parameter('enable', False, bool,
                              'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
@@ -64,8 +71,12 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         # other process, variables, and arrays in the adwin. This parameter is added to make that easy to do in the GUI.
         Parameter('reboot_adwin', False, bool,'Will reboot adwin when experiment is executed. Useful is data looks fishy'),
         # clocks currently not implemented
-        Parameter('laser_clock', 'Pixel', ['Pixel','Line','Frame','Aux'], 'Nanodrive clock used for turning laser on and off'),
-        Parameter('sample', ""),
+        Parameter('laser_clock', 'Pixel', ['Pixel', 'Line', 'Frame', 'Aux'],
+                  'Nanodrive clock used for turning laser on and off'),
+        Parameter('save', False, bool, 'T/F to save each confocal image to an hdf5 file'),
+        Parameter('filename', "nanodriveadwinconfocalscanslow", str,
+                  'filename to save each confocal image to an hdf5 file'),
+        Parameter('sample', "", str, "Sample Name to be saved with data"),
     ]
 
     #For actual experiment use LP100 [MCL_NanoDrive({'serial':2849})]. For testing using HS3 ['serial':2850]
@@ -93,6 +104,42 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         self.sg384 = self.devices['sg384']['instance']
         self.proteus = self.devices['proteus']['instance']
         self.filter_wheel = self.devices['filter_wheel']['instance']
+
+    def save_hdf5(self):
+        """this function defines its custom data and metadata to be saved and then calls the
+        save_hdf_data function that is in the parent Experiment class, which adds the external
+        devices in case you ever check the Get Basic Data checkbox in the GUI
+
+        ONE hdf5 file is written per run of _function. Each z-slice is stored as its own
+        confocal image (image_1, image_2, ...). If the 3D scan is disabled there is just
+        image_1. The companion arrays (raw images, positions, counts) are saved stacked
+        along the z-axis (axis 0 = slice index, ordered like image_1..image_N), and
+        z_values holds the z-position of each image."""
+        structure_to_save = MyStruct()
+
+        # one confocal (count) image per z-slice -> image_1, image_2, ...
+        data_dict = {}
+        for n, count_img in enumerate(self.count_img_all, start=1):
+            data_dict[f'image_{n}'] = count_img.T
+
+        # companion data, stacked along z so it stays aligned with image_1..image_N
+        data_dict['z_values'] = np.array(self.z_values)
+        data_dict['raw_img'] = np.array([img.T for img in self.raw_img_all])
+        data_dict['x_pos'] = np.array(self.x_pos_all)
+        data_dict['y_pos'] = np.array(self.y_pos_all)
+        data_dict['raw_counts'] = np.array(self.raw_counts_all)
+        data_dict['count_rate'] = np.array(self.count_rate_all)
+
+        # settings/z stay OUT of self.data (see _function) so the base Experiment.save_data()
+        # pandas call does not choke on a nested dict. Metadata lives in meta instead.
+        structure_to_save.data = MyStruct(**data_dict)
+        structure_to_save.meta = MyStruct(
+            settings=self.settings,
+            end_time=self.e_t,
+            start_time=self.s_t
+        )
+        structure_to_save.devices = self.devices
+        self.save_hdf_data(structure_to_save)
 
     def setup_scan(self):
         '''
@@ -135,7 +182,17 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         """
         This is the actual function that will be executed. It uses only information that is provided in the settings property
         will be overwritten in the __init__
+
+        3D scan: when 3D_scan.enable is True the nanodrive z is stepped from z_min to
+        z_max (inclusive) in z_step increments and a full x-y raster is taken at every z.
+        Each z-slice becomes image_1, image_2, ... inside ONE hdf5 file written at the end
+        of the run. When 3D_scan is disabled a single image is taken at the current z and
+        z is NOT moved (so a manually-set focus is not disturbed).
         """
+        # resolve the 3D scan folder at runtime so the path is correct on this machine
+        if not self.settings['3D_scan']['folderpath']:
+            self.settings['3D_scan']['folderpath'] = str(get_configured_confocal_scans_folder())
+
         if self.settings['reboot_adwin'] == True:
             self.adw.reboot_adwin()
         self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
@@ -160,124 +217,179 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         y_min = self.settings['point_a']['y']
         y_max = self.settings['point_b']['y']
         step = self.settings['resolution']
-        #array form point_a x,y to point_b x,y with step of resolution
-        x_array = np.arange(x_min, x_max+step, step)
+        # array from point_a x,y to point_b x,y with step of resolution
+        x_array = np.arange(x_min, x_max + step, step)
         y_array = np.arange(y_min, y_max + step, step)
         reversed_y_array = y_array[::-1]
 
         self.x_inital = self.nd.read_probes('x_pos')
         self.y_inital = self.nd.read_probes('y_pos')
         self.z_inital = self.nd.read_probes('z_pos')
-        self.settings['z_pos'] = self.z_inital
 
-        #makes sure data is getting recorded. If still equal none after running experiment data is not being stored or not measured
-        self.data['x_pos'] = None
-        self.data['y_pos'] = None
-        self.data['raw_counts'] = None
-        self.data['counts'] = None
-        self.data['count_img'] = None
-        #local lists to store data and append to global self.data lists
-        x_data = []
-        y_data = []
-        raw_counts_data = []
-        count_rate_data = []
+        # ---------------------------------------------------------------------
+        # Build the z-sweep array.
+        #   * 3D scan ENABLED : step z from z_min -> z_max (inclusive) and run a
+        #     full x-y raster at every z. z IS moved.
+        #   * 3D scan DISABLED: original behaviour -> a single image at the
+        #     current z. z is NOT moved (so a manually-set focus is not disturbed).
+        # ---------------------------------------------------------------------
+        if self.settings['3D_scan']['enable']:
+            z_min = self.settings['3D_scan']['z_min']
+            z_max = self.settings['3D_scan']['z_max']
+            z_step = self.settings['3D_scan']['z_step']
+            z_array = np.arange(z_min, z_max + z_step, z_step)
+        else:
+            self.settings['z_pos'] = self.z_inital
+            z_array = np.array([self.z_inital])
+        # ---------------------------------------------------------------------
 
         Nx = len(x_array)
         Ny = len(y_array)
-        self.data['count_img'] = np.zeros((Nx, Ny))
 
-        interation_num = 0 #number to track progress
-        total_interations = ((x_max - x_min)/step + 1)*((y_max - y_min)/step + 1)       #plus 1 because in total_iterations range is inclusive ie. [0,10]
-        #print('total_interations=',total_interations)
+        # progress tracking now spans the WHOLE 3D scan (all z-slices)
+        interation_num = 0  # number to track progress
+        total_interations = len(z_array) * ((x_max - x_min) / step + 1) * ((y_max - y_min) / step + 1)  # plus 1 because range is inclusive ie. [0,10]
 
-        #formula to set adwin to count for correct time frame. The event section is run every delay*3.3ns so the counter increments for that time then is read and clear
-        #time_per_pt is in millisecond and the adwin delay time is delay_value*3.3ns
-        adwin_delay = round((self.settings['time_per_pt']*1e6) / (3.3))
-        #print('adwin delay: ',adwin_delay)  606061 for 2ms and 606061*3.3 ns ~= 2 ms
-
+        # formula to set adwin to count for correct time frame. The event section is run every delay*3.3ns so the counter increments for that time then is read and clear
+        # time_per_pt is in millisecond and the adwin delay time is delay_value*3.3ns
+        adwin_delay = round((self.settings['time_per_pt'] * 1e6) / (3.3))
         self.adw.update({'process_1': {'delay': adwin_delay, 'running': True}})
-        # print(adwin_delay * 3.3 * 1e-9)
-        # set inital x and y and set nanodrive stage to that position
-        self.nd.update({'x_pos': x_min, 'y_pos': y_min})
-        sleep(0.1)  # time for stage to move and adwin process to initilize
 
-        forward = True #used to rasterize more efficently going forward then back
-        for i, x in enumerate(x_array):
-            if self._abort:  # halts loop (and experiment) if stop button is pressed
-                break #need to put break in x for loop which takes some time to stop but if stopped in y loop array sizes may mismatch and require a GUI restart
-            x = float(x)
-            img_row = []  #used for tracking image rows and adding to count_img; list not saved
-            self.nd.update({'x_pos':x})
+        # collect every finished z-slice so they can all go into ONE hdf5 file at the end of the run.
+        # reset here so re-running _function starts a fresh file (no accumulation across runs)
+        self.count_img_all = []
+        self.raw_img_all = []
+        self.x_pos_all = []
+        self.y_pos_all = []
+        self.raw_counts_all = []
+        self.count_rate_all = []
+        self.z_values = []
 
-            if forward == True:
-                for y in y_array:
-                    y = float(y)
-                    print(x,y)
-                    self.nd.update({'y_pos':y})
-                    sleep(self.settings['settle_time'])
+        # single start time for the whole run (one file per run)
+        self.s_t = datetime.datetime.now()
 
-                    x_pos = self.nd.read_probes('x_pos')
-                    x_data.append(x_pos)
-                    self.data['x_pos'] = x_data  # adds x postion to data
-                    y_pos = self.nd.read_probes('y_pos')
-                    y_data.append(y_pos)
-                    self.data['y_pos'] = y_data  # adds y postion to data
+        # ================= outer loop over z-slices =================
+        for z_index, z in enumerate(z_array):
+            if self._abort == True:
+                break
+            z = float(z)
 
-                    raw_counts = self.adw.read_probes('int_var',id=1)   #raw number of counter triggers
-                    count_rate = raw_counts*1e3 / self.settings['time_per_pt'] # in units of counts/second
+            # move to this z-slice (only for a real 3D scan)
+            if self.settings['3D_scan']['enable']:
+                self.settings['z_pos'] = z
+                self.nd.update({'z_pos': z})
+                sleep(0.1)  # let the z stage settle / refocus
 
-                    img_row.append(count_rate)
-                    raw_counts_data.append(raw_counts)
-                    count_rate_data.append(count_rate)
-                    self.data['raw_counts'] = raw_counts_data
-                    self.data['counts'] = count_rate_data
+            # makes sure data is getting recorded. If still equal none after running experiment data is not being stored or not measured
+            self.data['x_pos'] = None
+            self.data['y_pos'] = None
+            self.data['raw_counts'] = None
+            self.data['counts'] = None
+            self.data['count_img'] = None
+            # local lists to store data and append to global self.data lists
+            x_data = []
+            y_data = []
+            raw_counts_data = []
+            count_rate_data = []
 
-            else:
-                for y in reversed_y_array:
-                    y = float(y)
-                    print(x,y)
-                    self.nd.update({'y_pos':y})
-                    sleep(self.settings['settle_time'])
+            self.data['count_img'] = np.zeros((Nx, Ny))
 
-                    x_pos = self.nd.read_probes('x_pos')
-                    x_data.append(x_pos)
-                    self.data['x_pos'] = x_data  # adds x postion to data
-                    y_pos = self.nd.read_probes('y_pos')
-                    y_data.append(y_pos)
-                    self.data['y_pos'] = y_data  # adds y postion to data
+            # set inital x and y and set nanodrive stage to that position
+            self.nd.update({'x_pos': x_min, 'y_pos': y_min})
+            sleep(0.1)  # time for stage to move and adwin process to initilize
 
-                    raw_counts = self.adw.read_probes('int_var', id=1)  # raw number of counter triggers
-                    count_rate = raw_counts*1e3 / self.settings['time_per_pt'] # in units of counts/second
+            forward = True  # used to rasterize more efficently going forward then back
+            for i, x in enumerate(x_array):
+                if self._abort:  # halts loop (and experiment) if stop button is pressed
+                    break  # need to put break in x for loop which takes some time to stop but if stopped in y loop array sizes may mismatch and require a GUI restart
+                x = float(x)
+                img_row = []  # used for tracking image rows and adding to count_img; list not saved
+                self.nd.update({'x_pos': x})
 
-                    img_row.append(count_rate)
-                    raw_counts_data.append(raw_counts)
-                    count_rate_data.append(count_rate)
-                    self.data['raw_counts'] = raw_counts_data
-                    self.data['counts'] = count_rate_data
-                img_row.reverse() #reversed since going from y_max --> y_min
+                if forward == True:
+                    for y in y_array:
+                        y = float(y)
+                        self.nd.update({'y_pos': y})
+                        sleep(self.settings['settle_time'])
 
-            self.data['count_img'][i, :] = img_row
-            forward = not forward
+                        x_pos = self.nd.read_probes('x_pos')
+                        x_data.append(x_pos)
+                        self.data['x_pos'] = x_data  # adds x postion to data
+                        y_pos = self.nd.read_probes('y_pos')
+                        y_data.append(y_pos)
+                        self.data['y_pos'] = y_data  # adds y postion to data
 
-            interation_num = interation_num + len(y_array)
-            self.progress = 100. * (interation_num + 1) / total_interations
-            self.updateProgress.emit(self.progress)
+                        raw_counts = self.adw.read_probes('int_var', id=1)  # raw number of counter triggers
+                        count_rate = raw_counts * 1e3 / self.settings['time_per_pt']  # in units of counts/second
+
+                        img_row.append(count_rate)
+                        raw_counts_data.append(raw_counts)
+                        count_rate_data.append(count_rate)
+                        self.data['raw_counts'] = raw_counts_data
+                        self.data['counts'] = count_rate_data
+
+                else:
+                    for y in reversed_y_array:
+                        y = float(y)
+                        self.nd.update({'y_pos': y})
+                        sleep(self.settings['settle_time'])
+
+                        x_pos = self.nd.read_probes('x_pos')
+                        x_data.append(x_pos)
+                        self.data['x_pos'] = x_data  # adds x postion to data
+                        y_pos = self.nd.read_probes('y_pos')
+                        y_data.append(y_pos)
+                        self.data['y_pos'] = y_data  # adds y postion to data
+
+                        raw_counts = self.adw.read_probes('int_var', id=1)  # raw number of counter triggers
+                        count_rate = raw_counts * 1e3 / self.settings['time_per_pt']  # in units of counts/second
+
+                        img_row.append(count_rate)
+                        raw_counts_data.append(raw_counts)
+                        count_rate_data.append(count_rate)
+                        self.data['raw_counts'] = raw_counts_data
+                        self.data['counts'] = count_rate_data
+                    img_row.reverse()  # reversed since going from y_max --> y_min
+
+                self.data['count_img'][i, :] = img_row
+                forward = not forward
+
+                interation_num = interation_num + len(y_array)
+                self.progress = 100. * (interation_num + 1) / total_interations
+                self.updateProgress.emit(self.progress)
+
+            # finalise this slice's data (this drives the live plot for the current slice)
+            self.data['x_pos'] = x_data
+            self.data['y_pos'] = y_data
+            self.data['raw_counts'] = raw_counts_data
+            self.data['counts'] = count_rate_data
+
+            # tracker so _plot exports this z-slice's image
+            self.data_collected = True
+
+            # stash this finished slice; it becomes image_N in the single file written at the end.
+            # copy the image so reusing self.data for the next slice can't mutate what we stored.
+            # the slow scan has no separate 'raw' (uncropped) image, so raw_img == count_img here.
+            self.count_img_all.append(self.data['count_img'].copy())
+            self.raw_img_all.append(self.data['count_img'].copy())
+            self.x_pos_all.append(np.array(x_data))
+            self.y_pos_all.append(np.array(y_data))
+            self.raw_counts_all.append(np.array(raw_counts_data))
+            self.count_rate_all.append(np.array(count_rate_data))
+            self.z_values.append(z)
+
         self.proteus.driver.off()
         if self.settings['MICROWAVE']['enable'] == True:
             self.sg384._send('ENBR 0')
-        # tracker to only save test image once
-        self.data_collected = True
 
-        print('Data collected')
-        self.data['x_pos'] = x_data
-        self.data['y_pos'] = y_data
-        self.data['raw_counts'] = raw_counts_data
-        self.data['counts'] = count_rate_data
+        self.adw.update({'process_1': {'running': False}})
 
-        #print('Position Data: ', '\n', self.data['x_pos'], '\n', self.data['y_pos'], '\n', 'Max x: ',np.max(self.data['x_pos']), 'Max y: ', np.max(self.data['y_pos']))
-        #print('All data: ',self.data)
+        # ONE end time and ONE save for the whole run -> image_1, image_2, ... in a single file.
+        # skipped on abort so a partial run is not written.
+        self.e_t = datetime.datetime.now()
+        if self.settings['save'] and not self._abort:
+            self.save_hdf5()
 
-        self.adw.update({'process_2': {'running': False}})
         self.after_scan()
 
     def _plot(self, axes_list, data=None):
@@ -332,7 +444,6 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
                     self.colorbar.setLevels(levels)
 
                     if self.settings['3D_scan']['enable'] and self.data_collected:
-                        print('z =', self.z_inital, 'max counts =', levels[1])
                         axes_list[0].setTitle(f"Confocal Scan with z = {self.z_inital:.2f}")
                         scene = axes_list[0].scene()
                         exporter = ImageExporter(scene)
@@ -343,7 +454,6 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
                             folder_path.mkdir(parents=True, exist_ok=True)  # Create directory if it doesn't exist
                             filename = folder_path / f'confocal_scan_z_{self.z_inital:.2f}.png'
                             exporter.export(str(filename))
-                            print(f"Saved 3D scan image to: {filename}")
                         except Exception as e:
                             print(f"Warning: Failed to save 3D scan image: {e}")
                             print(f"Attempted to save to: {folder_path}")
