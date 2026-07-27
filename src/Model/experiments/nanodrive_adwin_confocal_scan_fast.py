@@ -93,7 +93,8 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         'adwin': 'adwin',
         'sg384': 'sg384',
         'proteus': 'proteus',
-        'filter_wheel': 'filter_wheel'
+        'filter_wheel': 'filter_wheel',
+        'microdrive': 'microdrive',
     }
     _EXPERIMENTS = {}
 
@@ -111,6 +112,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         self.sg384 = self.devices['sg384']['instance']
         self.proteus = self.devices['proteus']['instance']
         self.filter_wheel = self.devices['filter_wheel']['instance']
+        self.microdrive = self.devices['microdrive']['instance']
 
     def save_hdf5(self):
         """this function defines its custom data and metadata to be saved and then calls the
@@ -136,6 +138,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         data_dict['y_pos'] = np.array(self.y_pos_all)
         data_dict['raw_counts'] = np.array(self.raw_counts_all)
         data_dict['count_rate'] = np.array(self.count_rate_all)
+        data_dict['micro_xy'] = [self.micro_x, self.micro_y]
 
         # settings/z stay OUT of self.data (see _function) so the base Experiment.save_data()
         # pandas call does not choke on a nested dict. Metadata lives in meta instead.
@@ -446,6 +449,8 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         # skipped on abort so a partial run is not written.
         self.e_t = datetime.datetime.now()
         if self.settings['save'] and not self._abort:
+            self.micro_x = self.microdrive.get_position("x")
+            self.micro_y = self.microdrive.get_position("y")
             self.save_hdf5()
 
         self.after_scan()
