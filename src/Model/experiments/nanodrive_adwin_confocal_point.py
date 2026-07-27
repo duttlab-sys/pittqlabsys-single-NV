@@ -101,7 +101,7 @@ class NanodriveAdwinConfocalPoint(Experiment):
                    ]),
         # clocks currently not implemented
         Parameter('laser_clock', 'Pixel', ['Pixel', 'Line', 'Frame', 'Aux'],'Nanodrive clocked used for turning laser on and off'),
-        Parameter('sample', ""),
+        Parameter('sample', "", str, "Sample Name to be saved with data"),
     ]
 
     #For actual experiment use LP100 [MCL_NanoDrive({'serial':2849})]. For testing cautiously using HS3 ['serial':2850]
