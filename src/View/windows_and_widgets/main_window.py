@@ -399,19 +399,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         gui_logger.debug("About to call setup_trees()")
         setup_trees()
         gui_logger.debug("setup_trees() completed, about to call connect_controls()")
-        
         # Install NumberClampDelegate for column 1 (Value column) on both trees
-        print("installing NumberClampDelegate")
         from src.View.windows_and_widgets.widgets import NumberClampDelegate
-        
         self.settings_delegate = NumberClampDelegate(self.tree_settings)
         self.tree_settings.setItemDelegateForColumn(1, self.settings_delegate)
         self.settings_delegate.validation_result_signal.connect(self._handle_delegate_validation_result)
-        print("settings_delegate done")
         self.experiments_delegate = NumberClampDelegate(self.tree_experiments)
         self.tree_experiments.setItemDelegateForColumn(1, self.experiments_delegate)
         self.experiments_delegate.validation_result_signal.connect(self._handle_delegate_validation_result)
-        print("experiments_delegate done")
         gui_logger.debug("Installed NumberClampDelegate for column 1 on both trees and connected validation signals")
         
         connect_controls()
@@ -541,7 +536,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def take_frame(self):
         frame = self.Display_View_widget.widget.get_latest_frame()
-        print(f"frame is {frame}")
         self.positioning_tab.frame = frame
 
     def take_cam_snapshot(self):
@@ -765,7 +759,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             traceback.print_exc()
 
     def update_display_choice(self, new_display_choice):
-        print(f"update_display_choice called: {new_display_choice}")
         self.display_choice = new_display_choice
         self.reload_display_widget()
 
@@ -788,7 +781,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.positioning_tab.Update_Get_Image_Button(enabled)
 
     def update_snapshot_mode(self, mode):
-        print("update_snapshot_mode called", mode)
         self.snapshot_or_live = mode
         self.reload_display_widget()
 
@@ -799,7 +791,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.positioning_tab.y_crosshair = self.Display_View_widget.y_selected
 
     def reload_display_widget(self):
-        print("reload_display_widget called, snapshot or live:", self.snapshot_or_live)
         # only forward changes if the camera view is actually loaded
         if getattr(self, "Display_View_widget", None) is not None:
             self.Display_View_widget.update_choices(self.display_choice, self.snapshot_or_live)
@@ -831,11 +822,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.verticalLayout_2.addItem(item)
 
     def load_display_widget(self):
-        print("Loading Display_View_widget...")
         try:
             text = self.positioning_tab.snapshot_live_comboBox.currentText()
             self.snapshot_or_live = 0 if text.strip().lower() == "snapshot" else 1
-            print(f"snapshot_or_live: {self.snapshot_or_live}")
 
             # Build the camera view first WITHOUT touching the shared plot widget.
             display_widget = Display_View(self.display_choice, self.snapshot_or_live)
@@ -1248,11 +1237,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 experiment, path_to_experiment, experiment_item = item.get_experiment()
                 if self.getbasicdatacheckBox.isChecked():
                     checked_devices = []
-                    print("The checkbox is CHECKED.")
                     for device_name, device_obj in self.devices.items():
-                        print(device_name)
                         if device_obj.settings['get_data'] == True:
-                            print(f"device {device_name}'s data is included")
                             checked_devices.append(device_obj)
                         else:
                             print(f"device {device_name}'s data is NOT included")
@@ -1851,10 +1837,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             changed_col: the column that changed (if called from signal)
         """
         # Prevent recursion
-        print(f"inside update_parameters")
-        print(f"treeWidget.item() {treeWidget}")
-        print(f"changed_item.name {changed_item.name}")
-        print(f"changed_col {changed_col}")
         if getattr(self, "_updating_parameters", False) or getattr(self, "_programmatic_update", False):
             return
 
@@ -1873,8 +1855,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             return
 
         item = changed_item
-        print(f"changed_item: {changed_item} changed_col {changed_col} treeWidget {treeWidget} device, path_to_device = item.get_device() {item.get_device()}")
-        
         self._updating_parameters = True
         try:
             # Check if this item is already being processed for clamping
@@ -2299,9 +2279,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         This provides visual feedback, logging, and GUI history updates."""
 
         gui_logger.debug(f"Received delegate validation result for {item.name}: {result}")
-        print(f"item.name: {item.name} param_name {param_name} result {result}")
         device, path_to_device = item.get_device()
-        print(f"device: {device}, path_to_device {path_to_device}")
         device.update({param_name: result['actual_value']})
 
         # Update the item's display text if the actual value is different
@@ -2336,7 +2314,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     tree_widget = tree
                     gui_logger.debug(f"MAIN WINDOW: Found item {item.name} in tree {tree.objectName()}")
                     break
-            print(f"tree_widget {tree_widget}")
 
             if tree_widget:
                 # Find the index for the value column (column 1)
@@ -2376,7 +2353,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             is_error: Whether this is an error message
         """
         # Log the message
-        print(f"_show_parameter_notification message {message} is_error: {is_error}")
         if is_error:
             gui_logger.error(f"Parameter notification (ERROR): {message}")
         else:
