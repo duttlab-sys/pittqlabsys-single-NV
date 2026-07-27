@@ -20,7 +20,7 @@ from time import sleep
 import pyqtgraph as pg
 import numpy as np
 import datetime
-from src.core.struct_hdf5 import MyStruct   # same import the ODMR experiment uses
+from src.core.struct_hdf5 import MyStruct
 
 class NanodriveAdwinConfocalScanFast(Experiment):
     '''
@@ -82,7 +82,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         Parameter('MAX_POINT_CALLBACK_FUNCTION', [95.0, 95.0], list, 'max x and y positions to select'),
         Parameter('save', False, bool, 'T/F to save each confocal image to an hdf5 file'),
         Parameter('filename', "nanodriveadwinconfocalscanfast", str, 'filename to save each confocal image to an hdf5 file'),
-        Parameter('sample', ""),
+        Parameter('sample', "", str, "Sample Name to be saved with data"),
 
     ]
 
@@ -127,11 +127,11 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         # one confocal (count) image per z-slice -> image_1, image_2, ...
         data_dict = {}
         for n, count_img in enumerate(self.count_img_all, start=1):
-            data_dict[f'image_{n}'] = count_img
+            data_dict[f'image_{n}'] = count_img.T
 
         # companion data, stacked along z so it stays aligned with image_1..image_N
         data_dict['z_values'] = np.array(self.z_values)
-        data_dict['raw_img'] = np.array(self.raw_img_all)
+        data_dict['raw_img'] = np.array([img.T for img in self.raw_img_all])
         data_dict['x_pos'] = np.array(self.x_pos_all)
         data_dict['y_pos'] = np.array(self.y_pos_all)
         data_dict['raw_counts'] = np.array(self.raw_counts_all)
@@ -230,7 +230,6 @@ class NanodriveAdwinConfocalScanFast(Experiment):
 
         step = self.settings['resolution']
         num_points = (y_max - y_min) / step + 1
-        print('num_points', num_points)
         if num_points < 91:
             new_step = self.correct_step(step)
             self.log(
@@ -449,8 +448,6 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         if self.settings['save'] and not self._abort:
             self.save_hdf5()
 
-        print('Data collected')
-
         self.after_scan()
 
     def _plot(self, axes_list, data=None):
@@ -507,7 +504,6 @@ class NanodriveAdwinConfocalScanFast(Experiment):
                     self.colorbar.setLevels(levels)
 
                     if self.settings['3D_scan']['enable'] and self.data_collected:
-                        print('z =', self.z_inital, 'max counts =', levels[1])
                         axes_list[0].setTitle(f"Confocal Scan with z = {self.z_inital:.2f}")
                         scene = axes_list[0].scene()
                         exporter = ImageExporter(scene)
