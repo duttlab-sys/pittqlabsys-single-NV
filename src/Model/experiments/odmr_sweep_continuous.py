@@ -54,7 +54,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('stop', 3.0e9, float, 'Stop frequency in Hz', units='Hz')
         ]),
         Parameter('microwave', [
-            Parameter('enable', True, bool,
+            Parameter('enable', False, [True, False],
                       'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
             Parameter('power', -10.0, float, 'Microwave power in dBm', units='dBm'),
             Parameter('step_freq', 1e6, float, 'Frequency step size in Hz', units='Hz'),
@@ -71,8 +71,10 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('power', 1.0, float, 'Laser power in mW', units='mW'),
             Parameter('wavelength', 532.0, float, 'Laser wavelength in nm', units='nm')
         ]),
+        Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+                  "Laser Control"),
         Parameter('Filter Wheel OD', 0,
-                  [0, 0.5, 2, 3, 4], 'Filter Wheel OD'),
+                  [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('magnetic_field', [
             Parameter('enabled', False, bool, 'Enable magnetic field'),
             Parameter('strength', 0.0, float, 'Magnetic field strength in Gauss', units='G'),
@@ -129,14 +131,15 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.fit_quality = None
         
         # Setup devices
-        self.microwave = self.devices.get('microwave', {}).get('instance')
+        if self.settings['microwave']['enable'] == True:
+            self.microwave = self.devices.get('microwave', {}).get('instance')
+            if not self.microwave:
+                raise ValueError("SG384 microwave generator is required")
         self.adwin = self.devices.get('adwin', {}).get('instance')
         self.nanodrive = self.devices.get('nanodrive', {}).get('instance')
         self.proteus = self.devices['proteus']['instance']
         self.filter_wheel = self.devices['filter_wheel']['instance']
-        
-        if not self.microwave:
-            raise ValueError("SG384 microwave generator is required")
+
         if not self.adwin:
             raise ValueError("Adwin device is required")
     
@@ -162,11 +165,12 @@ class ODMRSweepContinuousExperiment(Experiment):
     
     def _setup_microwave_sweep(self):
         """Setup the SG384 for external DAC-controlled frequency sweep."""
-        if not self.microwave.is_connected:
-            self.microwave.connect()
+        if self.settings['microwave']['enable'] == True:
+            if not self.microwave.is_connected:
+                self.microwave.connect()
         
-        # Set power
-        self.microwave.set_power(self.settings['microwave']['power'])
+            # Set power
+            self.microwave.set_power(self.settings['microwave']['power'])
         
         # Configure sweep parameters using calculated values
         start_freq = self.settings['frequency_range']['start']
@@ -176,57 +180,58 @@ class ODMRSweepContinuousExperiment(Experiment):
         
         # Validate sweep parameters using SG384 validation
         try:
-            self.microwave.validate_sweep_parameters(center_freq, deviation)
+            if self.settings['microwave']['enable'] == True:
+                self.microwave.validate_sweep_parameters(center_freq, deviation)
             self.log(f"✅ Sweep parameters validated: {center_freq/1e9:.3f} GHz ± {deviation/1e6:.1f} MHz")
         except ValueError as e:
             self.log(f"❌ Sweep parameter validation failed: {e}")
             raise ValueError(f"Invalid sweep parameters: {e}")
+        if self.settings['microwave']['enable'] == True:
+            # Set center frequency
+            self.microwave.set_frequency(center_freq)
+
+            # Set sweep deviation (for FM input scaling)
+            self.microwave.set_sweep_deviation(deviation)
         
-        # Set center frequency
-        self.microwave.set_frequency(center_freq)
-        
-        # Set sweep deviation (for FM input scaling)
-        self.microwave.set_sweep_deviation(deviation)
-        
-        # CRITICAL: Disable internal sweep - let ADwin DAC control frequency via FM input
-        self.microwave.set_modulation_type('Freq sweep')  # Use FM input, not internal sweep
-        self.microwave.set_modulation_function("External")  # Don't enable internal modulation
-        self.microwave.set_sweep_function('External')     # SFNC 5
-        # set external mod input coupling = DC  (front panel, or add COUP to driver)
+            # CRITICAL: Disable internal sweep - let ADwin DAC control frequency via FM input
+            self.microwave.set_modulation_type('Freq sweep')  # Use FM input, not internal sweep
+            self.microwave.set_modulation_function("External")  # Don't enable internal modulation
+            self.microwave.set_sweep_function('External')     # SFNC 5
+            # set external mod input coupling = DC  (front panel, or add COUP to driver)
         try:
-            modfunc = self.microwave.read_probes('modulation_function')
-            modtype = self.microwave.read_probes("modulation_type")
-            sweepfunc = self.microwave.read_probes("sweep_function")
-            print(f"Modulation function: {modfunc}")
-            print(f"Modulation type: {modtype}")
-            print(f"Sweep function: {sweepfunc}")
-            coupling = self.microwave._query("COUP?")
-            if coupling == 0:
-                print("Coupling is AC")
-            else:
-                print("Coupling is DC")
-            if modtype == "Freq sweep":
-                print("Frequency sweep mode")
-                print(f"SG384 setup for phase continuous sweep")
-                self.log(
-                    f"SG384 setup for phase continuous sweep")
-            else:
-                print("Unknown or Incorrect modulation type Sweep mode")
-                raise IOError(f"Unknown or Incorrect modulation type: {modtype}")
-            if modfunc == "External":
-                print(f"SG384 setup for external DAC control:{center_freq/1e9:.3f} GHz ± {deviation/1e6:.1f} MHz")
-                self.log(
-                    f"Microwave setup for external DAC control: {center_freq / 1e9:.3f} GHz ± {deviation / 1e6:.1f} MHz")
-                self.log(f"✅ SG384 internal sweep DISABLED - ADwin DAC will control frequency via FM input")
-            else:
-                raise IOError(f"Unknown or Incorrect modulation function : {modfunc}")
+            if self.settings['microwave']['enable'] == True:
+                modfunc = self.microwave.read_probes('modulation_function')
+                modtype = self.microwave.read_probes("modulation_type")
+                sweepfunc = self.microwave.read_probes("sweep_function")
+                print(f"Modulation function: {modfunc}")
+                print(f"Modulation type: {modtype}")
+                print(f"Sweep function: {sweepfunc}")
+                coupling = self.microwave._query("COUP?")
+                if coupling == 0:
+                    print("Coupling is AC")
+                else:
+                    print("Coupling is DC")
+                if modtype == "Freq sweep":
+                    print("Frequency sweep mode")
+                    print(f"SG384 setup for phase continuous sweep")
+                    self.log(
+                        f"SG384 setup for phase continuous sweep")
+                else:
+                    print("Unknown or Incorrect modulation type Sweep mode")
+                    raise IOError(f"Unknown or Incorrect modulation type: {modtype}")
+                if modfunc == "External":
+                    print(f"SG384 setup for external DAC control:{center_freq/1e9:.3f} GHz ± {deviation/1e6:.1f} MHz")
+                    self.log(
+                        f"Microwave setup for external DAC control: {center_freq / 1e9:.3f} GHz ± {deviation / 1e6:.1f} MHz")
+                    self.log(f"✅ SG384 internal sweep DISABLED - ADwin DAC will control frequency via FM input")
+                else:
+                    raise IOError(f"Unknown or Incorrect modulation function : {modfunc}")
         except Exception as e:
             print("Issue with modulation function or type:",e)
-
-        # Enable modulation
-        self.microwave.enable_modulation()
-        # Enable output
         if self.settings['microwave']['enable'] == True:
+            # Enable modulation
+            self.microwave.enable_modulation()
+            # Enable output
             self.microwave.enable_output()
 
         
@@ -464,9 +469,10 @@ class ODMRSweepContinuousExperiment(Experiment):
             self.adwin.clear_process(1)
         
         # Disable microwave sweep and output
-        if self.microwave and self.microwave.is_connected:
-            self.microwave.disable_modulation()
-            self.microwave.disable_output()
+        if self.settings['microwave']['enable'] == True:
+            if self.microwave and self.microwave.is_connected:
+                self.microwave.disable_modulation()
+                self.microwave.disable_output()
         
         self.log("ODMR Phase Continuous Sweep Experiment cleanup complete")
     
@@ -475,8 +481,8 @@ class ODMRSweepContinuousExperiment(Experiment):
         try:
             self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
             self.log("Starting ODMR Phase Continuous Sweep Experiment")
-            self.proteus.set_channel_voltage_high(1)
-            self.proteus.set_channel_voltage_high(4)
+            self.proteus.set_channel_voltage_high(1, "MAX")
+            self.proteus.set_channel_voltage_high(4, self.settings["Laser Control"])
             # Setup experiment and devices first
             self.setup()
             

@@ -55,7 +55,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         Parameter('time_per_pt', 2.0, [2.0,5.0], 'Time in ms at each point to get counts; same as load_rate for nanodrive. Wroking values 2 or 5 ms'),
         Parameter('ending_behavior', 'return_to_origin', ['return_to_inital_pos', 'return_to_origin', 'leave_at_corner'],'Nanodrive position after scan'),
         Parameter('Filter Wheel OD', 0,
-                  [0, 0.5, 2, 3, 4], 'Filter Wheel OD'),
+                  [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('3D_scan',
                   [Parameter('enable', False, bool, 'T/F to enable 3D scan'),
                   Parameter('folderpath', '', str, 'folder location to save images at each z-value'),
@@ -67,6 +67,8 @@ class NanodriveAdwinConfocalScanFast(Experiment):
                    Parameter('frequency', 2.0e9, float, 'MW Frequency'),
                    Parameter('power', -10.0, float, 'MW Power in dBm'),
                    ]),
+        Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+                  "Laser Control"),
         #!!! If you see horizontial lines in the confocal image, the adwin arrays likely are corrupted. The fix is to reboot the adwin. You will nuke all
         #other process, variables, and arrays in the adwin. This parameter is added to make that easy to do in the GUI.
         Parameter('reboot_adwin',False,bool,'Will reboot adwin when experiment is executed. Useful is data looks fishy'),
@@ -212,8 +214,8 @@ class NanodriveAdwinConfocalScanFast(Experiment):
             # Set center frequency
             self.sg384.set_frequency(frequency)
             self.sg384._send('ENBR 1')
-            self.proteus.set_channel_voltage_high(1)
-        self.proteus.set_channel_voltage_high(4)
+            self.proteus.set_channel_voltage_high(1, "MAX")
+        self.proteus.set_channel_voltage_high(4, self.settings["Laser Control"])
         self.setup_scan()
         sleep(0.1)
         # Override scan corners from GUI point-selection if enabled

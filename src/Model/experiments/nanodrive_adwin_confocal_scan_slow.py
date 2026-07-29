@@ -52,7 +52,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         Parameter('settle_time',0.2,float,'Time in seconds to allow NanoDrive to settle to correct position'),
         Parameter('ending_behavior', 'return_to_origin', ['return_to_inital_pos', 'return_to_origin', 'leave_at_corner'],'Nanodrive position after scan'),
         Parameter('Filter Wheel OD', 0,
-                  [0, 0.5, 2, 3, 4], 'Filter Wheel OD'),
+                  [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('3D_scan',
                   # steps z from z_min to z_max (inclusive) and takes a full x-y raster at each z. Useful for finding where NVs are in the focal plane
                   [Parameter('enable', False, bool, 'T/F to enable 3D scan'),
@@ -67,6 +67,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
                    Parameter('frequency', 2.0e9, float, 'MW Frequency'),
                    Parameter('power', -10.0, float, 'MW Power in dBm'),
                    ]),
+        Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], "Laser Control"),
         # !!! If you see horizontial lines in the confocal image, the adwin arrays likely are corrupted. The fix is to reboot the adwin. You will nuke all
         # other process, variables, and arrays in the adwin. This parameter is added to make that easy to do in the GUI.
         Parameter('reboot_adwin', False, bool,'Will reboot adwin when experiment is executed. Useful is data looks fishy'),
@@ -210,8 +211,8 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
             # Set center frequency
             self.sg384.set_frequency(frequency)
             self.sg384._send('ENBR 1')
-            self.proteus.set_channel_voltage_high(1)
-        self.proteus.set_channel_voltage_high(4)
+            self.proteus.set_channel_voltage_high(1, "MAX")
+        self.proteus.set_channel_voltage_high(4, self.settings["Laser Control"])
         self.setup_scan()
         sleep(0.1)
 
