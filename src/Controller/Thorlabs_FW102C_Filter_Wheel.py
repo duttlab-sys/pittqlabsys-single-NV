@@ -5,8 +5,7 @@ from src.core import Device, Parameter
 port = "COM18"  # Change this to your specific COM port
 _server_port = 5001
 # OD <-> filter-wheel position map
-# OD [0, 0.5, 2.0, 3.0, 4.0]  ->  positions [2, 3, 4, 5, 1]
-_OD_TO_POS = {0: 2, 0.5: 3, 2.0: 4, 3.0: 5, 4.0: 1}
+_OD_TO_POS = {0: 2, 0.5: 3, 1.0: 4, 2.0: 5, 3.0: 6, 4.0: 1}
 _POS_TO_OD = {pos: od for od, pos in _OD_TO_POS.items()}
 
 class Thorlabs_FW102C(Device):
@@ -14,8 +13,8 @@ class Thorlabs_FW102C(Device):
         Parameter('get_data', True, [False, True], 'choose whether you need to get data from this device or not'),
         Parameter('connection_type', 'RS232', ['RS232'], 'type of connection to open to controller'),
         Parameter('port', port, ["COM18"],'COM port on which to connect'),
-        Parameter('OD', 4.0, [0 ,0.5, 2.0, 3.0, 4.0],'Filter_OD'),
-        Parameter('position', 1, [1,2,3,4,5],'Filter_position'),
+        Parameter('OD', 4.0, [0, 1.0, 0.5, 2.0, 3.0, 4.0],'Filter_OD'),
+        Parameter('position', 1, [1,2,3,4,5,6],'Filter_position'),
         Parameter('server_port', _server_port, int, 'server_port'),
     ])
 
