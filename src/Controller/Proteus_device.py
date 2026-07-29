@@ -2974,7 +2974,7 @@ class ProteusDriver:
             self.inst.send_scpi_cmd(cmd)
             cmd = ':INIT:CONT OFF'  # play waveform continuously
             self.inst.send_scpi_cmd(cmd)
-
+            self.set_voltage_offset(0.0)
             cmd = ':OUTP OFF'
             self.inst.send_scpi_cmd(cmd)
 
@@ -3220,10 +3220,18 @@ class ProteusDevice(Device):
             self.logger.error(f"Reconnection failed: {e}")
             self._is_connected = False
             return False
-    def set_channel_voltage_high(self, channel):
+    def set_channel_voltage_high(self, channel, level):
+        _level_to_volt = {0: 0, 0.1: 0.2, 0.2: 0.4, 0.3: 0.6, 0.4: 0.8, 0.5: 1.0, 0.6: 1.2, 0.7: 1.2, 0.8: 1.2, "MAX": 1.2}
+        _level_to_offs = {0: 0, 0.1: -0.02, 0.2: -0.02, 0.3: -0.02, 0.4: -0.02, 0.5: -0.02, 0.6: -0.02, 0.7: 0.08, 0.8: 0.46, "MAX": 0.46}
+        if level not in _level_to_volt and level != "MAX":
+            raise ValueError(f"Invalid level {level}; valid values are {sorted(_level_to_volt)}")
+        if level == 0:
+            self.driver.set_voltage_offset(0.0)
+            self.driver.inst.send_scpi_cmd(':OUTP OFF')
+            return
         # AWG channel
         self.driver.inst.send_scpi_cmd(':INST:CHAN {0}'.format(channel))
-        self.driver.inst.send_scpi_cmd(':VOLT MAX')
+        self.driver.inst.send_scpi_cmd(f':VOLT {_level_to_volt[level]}')
         sampleRateDAC = 1.25E9
         self.driver.apply_sampling_configuration(sampleRateDAC)
         self.driver.set_continuous_run(0)
@@ -3257,7 +3265,7 @@ class ProteusDevice(Device):
         self.driver.inst.timeout = 30000  # increase
         self.driver.inst.write_binary_data('*OPC?; :TRAC:DATA', dacWaveDC)  # write, and wait while *OPC completes
         self.driver.inst.timeout = 10000  # return to normal
-        self.driver.set_voltage_offset(0.46)
+        self.driver.set_voltage_offset(_level_to_offs[level])
         # Create a Task Table
         self.driver.set_task_table_length(4)
         self.driver.inst.send_scpi_cmd(':TASK:COMP:SEL 1')
@@ -3274,7 +3282,7 @@ class ProteusDevice(Device):
         self.driver.inst.send_scpi_cmd(':OUTP ON')
 
 if __name__ == "__main__":
-    dev = ProteusDriver('192.168.2.4')
+    #dev = ProteusDriver('192.168.2.4')
     BASEBAND_FREQ = 1 / (128e-9)  # 7,812,500 Hz  (64on + 64off)
     FG_AMP = 0.55
     FG_OFFSET = 0.37
@@ -3285,11 +3293,13 @@ if __name__ == "__main__":
     # Verify on scope: should read −0.50 V to +0.50 V
     #dev.set_function_generator(1, 'SQU', 1000000)
     #dev.set_function_generator(4, 'SIN')
-    dev.set_function_generator(1, 'SIN', BASEBAND_FREQ, FG_AMP_SET, 0.0, FG_OFFSET_SET)
-    dev.set_function_generator(2, 'SIN', BASEBAND_FREQ, FG_AMP_SET, 90.0, FG_OFFSET_SET)
+    #dev.set_function_generator(1, 'SIN', BASEBAND_FREQ, FG_AMP_SET, 0.0, FG_OFFSET_SET)
+    #dev.set_function_generator(2, 'SIN', BASEBAND_FREQ, FG_AMP_SET, 90.0, FG_OFFSET_SET)
     #dev.set_function_generator(3, 'SIN', 7000000, 0.55, 0.0, 0.37)
     #dev.set_function_generator(2, 'SIN')
     #dev.set_ch1_marker1_voltage(-0.5, 0.5)
     #time.sleep(10)
-    dev._close()
+    dev = ProteusDevice('192.168.2.4')
+    dev.set_channel_voltage_high(0, 0)
+    #dev._close()
 

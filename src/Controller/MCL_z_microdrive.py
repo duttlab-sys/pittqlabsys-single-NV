@@ -1192,7 +1192,7 @@ class MCLZMicroDrive(Device):
 if __name__ == '__main__':
     import time
     md = MCLZMicroDrive()
-    #md.move(1, 25000)
+    md.move(1, 1)
     #md.set_position('z', 25000)
     #time.sleep(120)
     #print(f"position: {md.get_position()}")

@@ -141,12 +141,10 @@ class MCLNanoDrive(Device):
             update({'axis':'x', 'num_datapoints':len(waveform), 'load_waveform':waveform}) for running a waveform
             update({'Pixel':{'mode':'low','pulse':True}}) for setting pixel clock to low and triggering a pulse
         '''
-        # print('triggering nd update with: ',settings)
         super(MCLNanoDrive, self).update(settings)  # updates settings as per entered with method
 
         if self._settings_initialized:
             for key, value in settings.items():  # goes through inputed settings to see what commands to send ot update parameters
-                # print('nd updating: ',key,'to: ',value)
                 if key == 'serial':
                     self.close()
                     self._initilize_handle()  # changes handle under control
@@ -375,7 +373,6 @@ class MCLNanoDrive(Device):
             axis = self._axis_to_internal(key)
             self.DLL.MCL_SingleReadN.restype = c_double
             value = self._check_error(self.DLL.MCL_SingleReadN(axis, self.handle))
-            print(value)
         elif key == 'get_data':
             return self.settings['get_data']
 
@@ -471,7 +468,6 @@ class MCLNanoDrive(Device):
         Returns:
             float: Current position in micrometers
         """
-        print(axis)
         if axis not in ['x', 'y', 'z']:
             raise ValueError(f"Invalid axis: {axis}. Must be 'x', 'y', or 'z'")
         return self.read_probes(f'{axis}_pos')
