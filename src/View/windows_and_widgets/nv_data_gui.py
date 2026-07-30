@@ -380,6 +380,387 @@ def format_point_meta(d):
 
 
 # =============================================================================
+# Averaged vs non-averaged pulsed data + Poisson / empirical error statistics
+# =============================================================================
+def find_field(tree, name):
+    """First leaf whose final path component equals `name` (any type)."""
+    for path, v in flatten_tree(tree):
+        if path.split("/")[-1] == name:
+            return v
+    return None
+
+
+def find_averaging(tree):
+    """Detect averaged pulsed data that also stored the individual runs.
+    New files save signal_counts/reference_counts/total_counts = the AVERAGE and
+    signal_1..signal_N / reference_1.. / total_1.. = the individual acquisitions.
+    Returns {'navg', 'runs': {ch: [arrays]}, 'avg': {ch: array}} or None (old
+    single-acquisition files, treated as averaging = 1)."""
+    flat = {}
+    for path, v in flatten_tree(tree):
+        if isinstance(v, np.ndarray):
+            flat[path.split("/")[-1]] = np.squeeze(v).astype(float)
+    channels = ("signal", "reference", "total")
+    runs = {}
+    for ch in channels:
+        idx = [(int(m.group(1)), nm) for nm in flat
+               if (m := re.fullmatch(rf"{ch}_(\d+)", nm))]
+        idx.sort()
+        if idx:
+            runs[ch] = [flat[nm] for _, nm in idx]
+    if "signal" not in runs:
+        return None
+    avg = {}
+    for ch in channels:
+        a = flat.get(f"{ch}_counts", flat.get(f"{ch}_avg"))
+        if a is not None:
+            avg[ch] = a
+    return {"navg": len(runs["signal"]), "runs": runs, "avg": avg}
+
+
+def poisson_error(y):
+    """Shot-noise (Poisson) 1-sigma error for a counts array: sqrt(N)."""
+    return np.sqrt(np.abs(np.asarray(y, float)))
+
+
+def stack_runs(runs):
+    """List of 1-D run arrays -> (navg, n) array trimmed to the common length."""
+    n = min(len(r) for r in runs)
+    return np.array([np.asarray(r, float)[:n] for r in runs])
+
+
+def error_on_mean(runs):
+    """Per-point empirical standard error of the mean across runs."""
+    a = stack_runs(runs)
+    navg = a.shape[0]
+    if navg < 2:
+        return poisson_error(a[0])
+    return np.std(a, axis=0, ddof=1) / np.sqrt(navg)
+
+
+def error_stats(y, runs=None):
+    """Poisson stats for counts array y; if the individual `runs` are supplied,
+    also the empirical error-on-mean and its ratio to the Poisson expectation
+    (ratio ~1 => the data scales as Poissonian shot noise)."""
+    y = np.asarray(y, float)
+    yy = y[np.isfinite(y)]
+    m = float(np.mean(yy)) if yy.size else float("nan")
+    out = {"mean": m, "poisson_sigma": float(np.sqrt(abs(m))),
+           "rel_poisson": float(np.sqrt(abs(m)) / abs(m)) if m else float("nan")}
+    if runs and len(runs) >= 2:
+        a = stack_runs(runs)
+        navg = a.shape[0]
+        emp = np.std(a, axis=0, ddof=1) / np.sqrt(navg)      # error on the mean
+        mean_curve = np.mean(a, axis=0)
+        pois = np.sqrt(np.abs(mean_curve) / navg)            # Poisson expectation
+        good = np.isfinite(emp) & np.isfinite(pois) & (pois > 0)
+        mm = float(np.median(mean_curve[np.isfinite(mean_curve)])) if mean_curve.size else float("nan")
+        out.update(navg=navg,
+                   emp_sigma_mean=float(np.median(emp[good])) if good.any() else float("nan"),
+                   poisson_sigma_mean=float(np.median(pois[good])) if good.any() else float("nan"),
+                   ratio_emp_poisson=float(np.median(emp[good] / pois[good])) if good.any() else float("nan"),
+                   rel_emp_mean=float(np.median(emp[good]) / abs(mm)) if (good.any() and mm) else float("nan"))
+    return out
+
+
+def quantity_error(q, sig, ref, sig_err, ref_err):
+    """Propagated 1-sigma error for the pulsed quantity `q` given per-point
+    signal/reference values and their errors."""
+    sig = np.asarray(sig, float); ref = np.asarray(ref, float)
+    se = np.asarray(sig_err, float); re_ = np.asarray(ref_err, float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if q == "signal":
+            return se
+        if q == "reference":
+            return re_
+        if q == "S-R":
+            return np.sqrt(se ** 2 + re_ ** 2)
+        if q == "(S-R)/R":
+            return np.sqrt((se / ref) ** 2 + (sig * re_ / ref ** 2) ** 2)
+        r = sig / ref
+        return np.abs(r) * np.sqrt((se / sig) ** 2 + (re_ / ref) ** 2)
+
+
+# =============================================================================
+# MultiHarp timing sub-test: photon-arrival histogram + rise-time / FWHM
+# =============================================================================
+def find_multiharp(tree):
+    """Detect a MultiHarp timing file (has hist_counts + hist_edges_ns). Returns
+    {'centers','counts','meta'} where meta carries the stored stats, or None."""
+    _, hc = get_by_name(tree, "hist_counts", want=("1d",))
+    _, he = get_by_name(tree, "hist_edges_ns", want=("1d",))
+    if hc is None or he is None:
+        return None
+    hc = np.squeeze(hc).astype(float)
+    he = np.squeeze(he).astype(float)
+    if he.size == hc.size + 1:
+        centers = 0.5 * (he[:-1] + he[1:])
+    elif he.size == hc.size:
+        centers = he
+    else:
+        centers = np.arange(hc.size, dtype=float)
+    meta = {}
+    for key in ("rise_time_ns", "fwhm_ns", "onset_ns", "plateau_counts",
+                "mean_ns", "median_ns", "std_ns", "drift_pp_ns", "window_ns",
+                "hist_bin_ns", "base_resolution_ps", "start_label", "stop_label",
+                "case", "timestamp"):
+        v = find_field(tree, key)
+        if v is not None:
+            meta[key] = v
+    return {"centers": centers, "counts": hc, "meta": meta}
+
+
+def rise_time(centers, counts, lo_frac=0.10, hi_frac=0.90, low=0.0, high=None):
+    """Leading-edge rise time between lo_frac and hi_frac of the level range.
+    Auto (low=0, high=None): high = median of the top 30% of the window and the
+    crossings are frac*high -- identical to the MultiHarp acquisition code.
+    Manual: pass low = avg of a baseline region and high = avg of a plateau
+    region to measure the rise between two user-picked levels. Crossings are
+    linearly interpolated on the first rising edge."""
+    t = np.asarray(centers, float)
+    c = np.asarray(counts, float)
+    n = c.size
+    nan = float("nan")
+    if n < 3 or not np.isfinite(c).any() or np.nanmax(c) <= 0:
+        return {"t_lo": nan, "t_hi": nan, "rise": nan, "low": low, "high": high,
+                "lo_frac": lo_frac, "hi_frac": hi_frac}
+    if high is None:
+        high = float(np.median(c[int(0.7 * n):])) if n >= 4 else float(np.nanmax(c))
+        if high <= 0:
+            high = float(np.nanmax(c))
+
+    def cross(frac):
+        thr = low + frac * (high - low)
+        for i in range(1, n):
+            if c[i - 1] < thr <= c[i]:
+                c0, c1 = c[i - 1], c[i]
+                t0, t1 = t[i - 1], t[i]
+                return t1 if c1 == c0 else t0 + (thr - c0) * (t1 - t0) / (c1 - c0)
+        return nan
+
+    t_lo, t_hi = cross(lo_frac), cross(hi_frac)
+    rise = (t_hi - t_lo) if (np.isfinite(t_lo) and np.isfinite(t_hi)) else nan
+    return {"t_lo": t_lo, "t_hi": t_hi, "rise": rise, "low": float(low),
+            "high": float(high), "lo_frac": lo_frac, "hi_frac": hi_frac}
+
+
+def fwhm_from_hist(centers, counts, baseline=None, peak=None):
+    """Full width at half maximum. Auto: half = max/2 (matches the acquisition
+    code). Manual: pass baseline + peak levels and the half level is taken
+    midway between them."""
+    t = np.asarray(centers, float)
+    c = np.asarray(counts, float)
+    nan = float("nan")
+    if c.size == 0 or np.nanmax(c) <= 0:
+        return {"fwhm": nan, "t0": nan, "t1": nan, "half": nan}
+    base = 0.0 if baseline is None else float(baseline)
+    pk = float(np.nanmax(c)) if peak is None else float(peak)
+    half = base + 0.5 * (pk - base)
+    above = np.where(c >= half)[0]
+    if above.size < 2:
+        return {"fwhm": nan, "t0": nan, "t1": nan, "half": half}
+    return {"fwhm": float(t[above[-1]] - t[above[0]]),
+            "t0": float(t[above[0]]), "t1": float(t[above[-1]]), "half": half}
+
+
+# =============================================================================
+# Confocal raster-scan geometry: physical x/y axes (microns), z-slice
+# coordinates and orientation, from the nanodrive scan metadata.
+# =============================================================================
+def find_node(tree, *names):
+    """Value stored at the first key matching any of `names`, whether it is a
+    leaf, a list (numeric-keyed group, e.g. point_a = [x, y]), or a dict.
+    Unlike find_field this does NOT require the value to be a leaf, so 2-element
+    positions saved as groups are still found."""
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in names:
+                    return v
+                r = walk(v)
+                if r is not None:
+                    return r
+        elif isinstance(node, list):
+            for it in node:
+                r = walk(it)
+                if r is not None:
+                    return r
+        return None
+    return walk(tree)
+
+
+def _as_num_vec(v):
+    """Best-effort numeric 1-D vector from a value that may be an array, a list,
+    a dict ({'value': ...} or {'x':.., 'y':..}), or a string like '[55, 90]'."""
+    if v is None:
+        return None
+    if isinstance(v, dict):
+        for key in ("value", "val", "data"):
+            if key in v:
+                return _as_num_vec(v[key])
+        if "x" in v and "y" in v:
+            try:
+                return np.array([float(v["x"]), float(v["y"])], float)
+            except Exception:
+                return None
+        return None
+    if isinstance(v, (list, tuple)):
+        try:
+            return np.array([float(z) for z in v], float)
+        except Exception:
+            return None
+    if isinstance(v, str):
+        nums = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", v)
+        return np.array([float(x) for x in nums], float) if nums else None
+    try:
+        a = np.atleast_1d(np.squeeze(np.asarray(v, float)))
+        return a if a.size else None
+    except Exception:
+        return None
+
+
+def _pair(v, idx):
+    """Component idx of a small position array/list; the scalar if size 1."""
+    a = _as_num_vec(v)
+    if a is None or a.size == 0:
+        return None
+    return float(a[0]) if a.size == 1 else float(a[min(idx, a.size - 1)])
+
+
+def find_confocal(tree):
+    """Detect a confocal raster scan (has count_img) and collect the scan
+    geometry the nanodrive stored: per-axis position vectors (x_pos / y_pos /
+    z_pos), scan corners (point_a / point_b and, if a sub-region was picked,
+    min/max points), the step (resolution), and z-stack limits (z_min / z_max /
+    z_step). Returns a dict of raw pieces or None."""
+    _, img = get_by_name(tree, "count_img", "count_image", "raw_img",
+                         want=("image", "stack"))
+    if img is None:
+        return None
+
+    def vec(*names):
+        return _as_num_vec(find_node(tree, *names))
+
+    def arr(*names):
+        v = vec(*names)
+        return v if (v is not None and v.size >= 1) else None
+
+    def sca(*names):
+        v = vec(*names)
+        return float(v.flat[0]) if (v is not None and v.size) else None
+
+    def boo(*names):
+        v = find_node(tree, *names)
+        if isinstance(v, dict):
+            v = v.get("value", v.get("val"))
+        if v is None:
+            return None
+        try:
+            return bool(np.squeeze(np.asarray(v)))
+        except Exception:
+            return bool(v)
+
+    return {
+        "img": np.squeeze(np.asarray(img, float)),
+        "x_pos": arr("x_pos", "x_positions", "xpos"),
+        "y_pos": arr("y_pos", "y_positions", "ypos"),
+        "z_pos": arr("z_pos", "z_positions", "zpos"),
+        "point_a": vec("point_a", "point_A", "pointa", "point_1"),
+        "point_b": vec("point_b", "point_B", "pointb", "point_2"),
+        "min_pt": vec("min_point", "min_pos", "min_pt", "minimum_point"),
+        "max_pt": vec("max_point", "max_pos", "max_pt", "maximum_point"),
+        "resolution": sca("resolution"), "num_datapoints": sca("num_datapoints"),
+        "z_min": sca("z_min"), "z_max": sca("z_max"), "z_step": sca("z_step"),
+        "sel_min": boo("Select MIN?", "Select MIN", "select_min"),
+        "sel_max": boo("Select MAX?", "Select MAX", "select_max"),
+        "unit": "\u00b5m",
+    }
+
+
+def _axis_from_corners(lo, hi, n, step=None):
+    """Length-n coordinate vector lo->hi; else walk from lo by step; else pixels."""
+    if lo is not None and hi is not None and n > 1:
+        return np.linspace(lo, hi, n)
+    if lo is not None and step:
+        return lo + np.arange(n) * step
+    if step:
+        return np.arange(n) * step
+    return np.arange(n, dtype=float)
+
+
+def confocal_axes(conf, nx, ny, source="auto"):
+    """Return (x_vec[nx], y_vec[ny], xlabel, ylabel, note) for a confocal image.
+    The scan corners carry the absolute offset: point_a = (min x, min y),
+    point_b = (max x, max y). If 'Select MIN?' / 'Select MAX?' were on, the
+    corresponding corner is taken from the selected min/max point instead.
+    'auto' uses those corners first (so the axes start at the real position),
+    then absolute x_pos/y_pos vectors, then the step size, then pixels."""
+    unit = conf.get("unit", "\u00b5m")
+    step = conf.get("resolution")
+    xp, yp = conf.get("x_pos"), conf.get("y_pos")
+
+    def match(v, n):
+        return v is not None and v.size == n
+
+    # effective corners (selected min/max override point_a / point_b) ----------
+    a, b = conf.get("point_a"), conf.get("point_b")
+    amin = conf.get("min_pt") if conf.get("sel_min") else None
+    bmax = conf.get("max_pt") if conf.get("sel_max") else None
+    lo_x = _pair(amin if amin is not None else a, 0)
+    lo_y = _pair(amin if amin is not None else a, 1)
+    hi_x = _pair(bmax if bmax is not None else b, 0)
+    hi_y = _pair(bmax if bmax is not None else b, 1)
+    have_corners = None not in (lo_x, lo_y, hi_x, hi_y)
+    csrc = ("selected min / max points"
+            if (amin is not None or bmax is not None) else "point A \u2192 point B")
+
+    def from_corners():
+        xv = _axis_from_corners(lo_x, hi_x, nx, step)
+        yv = _axis_from_corners(lo_y, hi_y, ny, step)
+        note = (f"axes from {csrc}: x {lo_x:g}\u2192{hi_x:g}, "
+                f"y {lo_y:g}\u2192{hi_y:g} {unit}")
+        return xv, yv, f"x ({unit})", f"y ({unit})", note
+
+    # explicit dropdown choices ------------------------------------------------
+    if source == "pixels":
+        return (np.arange(nx, dtype=float), np.arange(ny, dtype=float),
+                "x (pixels)", "y (pixels)", "pixel index")
+    if source == "x_pos / y_pos":
+        xv = xp if match(xp, nx) else (yp if match(yp, nx) else np.arange(nx, dtype=float))
+        yv = yp if match(yp, ny) else (xp if match(xp, ny) else np.arange(ny, dtype=float))
+        return xv, yv, f"x ({unit})", f"y ({unit})", "axes from x_pos / y_pos"
+    if source in ("point A \u2192 B", "min / max points") and have_corners:
+        return from_corners()
+
+    # auto: corners first (they include the absolute offset) -------------------
+    if have_corners:
+        return from_corners()
+    if match(xp, nx) and match(yp, ny):
+        return xp, yp, f"x ({unit})", f"y ({unit})", "axes from x_pos / y_pos"
+    if step:
+        return (np.arange(nx) * step, np.arange(ny) * step,
+                f"x ({unit})", f"y ({unit})", f"axes from step = {step:g} {unit}")
+    return (np.arange(nx, dtype=float), np.arange(ny, dtype=float),
+            "x (pixels)", "y (pixels)", "pixel index (no scan geometry found)")
+
+
+def confocal_z(conf, nframes):
+    """Length-nframes z-coordinate vector for a z-stack, from z_pos, or
+    z_min + k*z_step, or linspace(z_min, z_max). None if unavailable."""
+    if conf is None or nframes < 1:
+        return None
+    zp = conf.get("z_pos")
+    if zp is not None and zp.size == nframes:
+        return zp
+    zmin, zmax, zstep = conf.get("z_min"), conf.get("z_max"), conf.get("z_step")
+    if zmin is not None and zstep:
+        return zmin + np.arange(nframes) * zstep
+    if zmin is not None and zmax is not None and nframes > 1:
+        return np.linspace(zmin, zmax, nframes)
+    return None
+
+
+# =============================================================================
 # Auto-detection of the default view when a file is opened
 # =============================================================================
 def detect_default_view(tree):
@@ -415,6 +796,24 @@ def detect_default_view(tree):
     if p is not None:
         return {"mode": "1d", "path": p}
     return {"mode": "none"}
+
+
+def find_odmr_channels(tree):
+    """Map a display name -> array search-token for a CW ODMR sweep, for each of
+    the forward / reverse / averaged channels that is present. 1-D only, so the
+    per-run 2-D arrays (all_counts_forward, ...) are ignored."""
+    out = {}
+    spec = [("averaged", ("counts_averaged", "counts_avg")),
+            ("forward", ("counts_forward", "counts_fwd")),
+            ("reverse (backward)", ("counts_reverse", "counts_backward",
+                                    "counts_rev"))]
+    for disp, toks in spec:
+        for tok in toks:
+            _, v = get_by_name(tree, tok, want=("1d",))
+            if v is not None:
+                out[disp] = tok
+                break
+    return out
 
 
 # =============================================================================
@@ -1329,6 +1728,8 @@ def main(argv=None):
             self.item_values = {}          # treeview item id -> value
             self.stacks = []               # detected image stacks
             self.camera_scan = None        # {modalities, present} for laser/white-light scans
+            self.averaging = None          # {navg, runs, avg} for averaged pulsed data
+            self.multiharp = None          # {centers, counts, meta} for MultiHarp files
 
             # current plot state
             self.view_kind = None          # '1d' | 'image' | 'stack' | 'sequence' | None
@@ -1343,8 +1744,32 @@ def main(argv=None):
             self.playing = False
             self.seq_parsed = None         # parsed sequence_text for the preview
             self.seq_index = 0             # current scan point in the preview
-            self.sel_x0 = self.sel_x1 = None       # 1-D span
+            self.sel_x0 = self.sel_x1 = None       # 1-D span (orange)
             self.sel_box = None                    # 2-D ROI (x0,x1,y0,y1)
+            self.cur_yerr = None                   # per-point error for the primary curve
+            self.extra_spans = []                  # [(x0,x1,color,alpha)] highlights
+            self.extra_vlines = []                 # [(x,color)] marker lines
+            self.mh = {}                           # manual multiharp regions/levels
+            self.confocal = None                   # find_confocal(): scan geometry
+            self._is_confocal = False              # current image is a confocal scan
+            self.frame_z = None                    # per-frame z (µm) for z-stacks
+            self._disp_data = None                 # oriented 2-D array now shown
+            self.img_x = None                      # physical x per column (shown)
+            self.img_y = None                      # physical y per row (shown)
+            self.img_xlabel = "x (pixels)"
+            self.img_ylabel = "y (pixels)"
+            self._cross_xy = None                  # crosshair position (data coords)
+            self._cross_cuts = None                # {'x':(x,y),'y':(x,y),...}
+            self._cross_win = None                 # (unused) reserved
+            self._cross_fit_x = None               # fit result for the x line-out
+            self._cross_fit_y = None               # fit result for the y line-out
+            self.bg_tree = None                    # loaded background-file tree
+            self.bg_on = False                     # background subtraction active
+            self.bg_path = None
+            self.cur_image_name = ""               # name of the shown image array
+            self._rerender = None                  # re-render current view (bg toggle)
+            self.odmr_channels = {}                # CW ODMR sweep channels present
+            self._bg_status = ""                   # last background-subtraction note
             self.pulsed_mode = "rabi_time"
             self.pulsed_cache = None       # dict(sig, ref, seq_text, has_freq...)
 
@@ -1391,6 +1816,24 @@ def main(argv=None):
             ttk.Button(left, text="Plot selected node",
                        command=self.plot_selected_node).pack(fill="x", pady=(6, 2))
 
+            bgf = ttk.LabelFrame(left, text="background subtraction", padding=(6, 4))
+            bgf.pack(fill="x", pady=(6, 0))
+            self.bg_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(bgf, text="subtract background",
+                            variable=self.bg_var, command=self._toggle_bg
+                            ).pack(anchor="w")
+            ttk.Button(bgf, text="choose background file\u2026",
+                       command=self._change_bg).pack(fill="x", pady=(2, 0))
+            self.bg_lbl = ttk.Label(bgf, text="(no background loaded)",
+                                    foreground="#777", wraplength=210)
+            self.bg_lbl.pack(anchor="w", pady=(2, 0))
+
+            ttk.Label(left, text="ODMR sweep channel:").pack(anchor="w", pady=(8, 0))
+            self.odmr_combo = ttk.Combobox(left, state="disabled", width=32, values=[])
+            self.odmr_combo.pack(fill="x")
+            self.odmr_combo.bind("<<ComboboxSelected>>",
+                                 lambda e: self.on_odmr_channel())
+
             ttk.Label(left, text="Info", font=("", 9, "bold")).pack(anchor="w", pady=(6, 0))
             self.info = tk.Text(left, height=8, width=40, wrap="word",
                                 font=("TkFixedFont", 9))
@@ -1404,6 +1847,7 @@ def main(argv=None):
             self.fig = Figure(figsize=(7.6, 5.4), dpi=100)
             self.canvas = FigureCanvasTkAgg(self.fig, master=right)
             self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+            self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
             toolbar = NavigationToolbar2Tk(self.canvas, right)
             toolbar.update()
 
@@ -1416,6 +1860,8 @@ def main(argv=None):
             self._build_tab_image(nb)
             self._build_tab_sequence(nb)
             self._seq_tab_index = nb.index("end") - 1
+            self._build_tab_multiharp(nb)
+            self._mh_tab_index = nb.index("end") - 1
 
         def _build_tab_plot(self, nb):
             f = ttk.Frame(nb, padding=8)
@@ -1437,6 +1883,15 @@ def main(argv=None):
             ttk.Button(row, text="Apply", command=self.replot_1d).pack(side="left", padx=6)
             ttk.Button(row, text="Plot selected together",
                        command=self.plot_selected_together).pack(side="left", padx=(16, 0))
+            self.errbar_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(row, text="error bars", variable=self.errbar_var,
+                            command=self.replot_1d).pack(side="left", padx=(16, 0))
+
+            rowe = ttk.Frame(f); rowe.pack(fill="x", pady=(4, 0))
+            ttk.Label(rowe, text="error:").pack(side="left")
+            self.err_lbl = ttk.Label(rowe, text="(select a counts array to see its "
+                                     "shot-noise error)", foreground="#068")
+            self.err_lbl.pack(side="left", padx=6)
 
             row2 = ttk.Frame(f); row2.pack(fill="x", pady=(8, 0))
             ttk.Label(row2, text="Selection:").pack(side="left")
@@ -1483,6 +1938,13 @@ def main(argv=None):
                                                     "phase"])
             self.pmode_combo.current(0)
             self.pmode_combo.pack(side="left", padx=(2, 10))
+            ttk.Label(row, text="dataset:").pack(side="left")
+            self.dataset_combo = ttk.Combobox(row, state="disabled", width=11,
+                                              values=["averaged"])
+            self.dataset_combo.set("averaged")
+            self.dataset_combo.pack(side="left", padx=(2, 10))
+            self.dataset_combo.bind("<<ComboboxSelected>>",
+                                    lambda e: self.on_dataset_change())
             ttk.Label(row, text="quantity:").pack(side="left")
             self.pq_combo = ttk.Combobox(row, state="readonly", width=10,
                                          values=["S/R", "(S-R)/R", "signal",
@@ -1530,6 +1992,27 @@ def main(argv=None):
             self.modality_combo.bind("<<ComboboxSelected>>",
                                      lambda e: self.on_modality_change())
 
+            row_or = ttk.Frame(f); row_or.pack(fill="x", pady=(6, 0))
+            ttk.Label(row_or, text="axes:").pack(side="left")
+            self.coord_src = ttk.Combobox(row_or, state="readonly", width=15,
+                values=["auto", "x_pos / y_pos", "min / max points",
+                        "point A → B", "pixels"])
+            self.coord_src.current(0)
+            self.coord_src.pack(side="left", padx=(2, 10))
+            self.coord_src.bind("<<ComboboxSelected>>", lambda e: self.redraw_image())
+            self.flipx_var = tk.BooleanVar(value=False)
+            self.flipy_var = tk.BooleanVar(value=False)
+            self.transpose_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(row_or, text="flip X", variable=self.flipx_var,
+                            command=self.redraw_image).pack(side="left")
+            ttk.Checkbutton(row_or, text="flip Y", variable=self.flipy_var,
+                            command=self.redraw_image).pack(side="left", padx=(6, 0))
+            ttk.Checkbutton(row_or, text="transpose (swap X/Y)",
+                            variable=self.transpose_var,
+                            command=self.redraw_image).pack(side="left", padx=(6, 0))
+            self.coord_lbl = ttk.Label(row_or, text="", foreground="#036")
+            self.coord_lbl.pack(side="left", padx=(10, 0))
+
             row2 = ttk.Frame(f); row2.pack(fill="x", pady=(8, 0))
             ttk.Label(row2, text="ROI:").pack(side="left")
             self.roi_lbl = ttk.Label(row2, text="(drag a box on the image)",
@@ -1541,6 +2024,30 @@ def main(argv=None):
                              ("ROI stats", self.roi_stats),
                              ("Clear ROI", self.clear_roi)]:
                 ttk.Button(row2, text=txt, command=cmd).pack(side="left", padx=(6, 0))
+
+            xrow = ttk.Frame(f); xrow.pack(fill="x", pady=(6, 0))
+            self.crosshair_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(xrow, text="crosshair", variable=self.crosshair_var,
+                            command=self._toggle_crosshair).pack(side="left")
+            ttk.Label(xrow, text="click the image to drop the crosshair \u2014 the "
+                      "counts-vs-x (top) and counts-vs-y (right) line-outs appear; "
+                      "fit them below.", foreground="#777"
+                      ).pack(side="left", padx=(6, 0))
+
+            xfit = ttk.Frame(f); xfit.pack(fill="x", pady=(2, 0))
+            ttk.Label(xfit, text="fit line-outs:").pack(side="left")
+            self.cross_model = ttk.Combobox(xfit, state="readonly", width=22,
+                                            values=list(MODELS.keys()))
+            self.cross_model.set("Gaussian peak")
+            self.cross_model.pack(side="left", padx=(2, 8))
+            ttk.Button(xfit, text="Fit counts-vs-x",
+                       command=lambda: self._fit_cut("x")).pack(side="left")
+            ttk.Button(xfit, text="Fit counts-vs-y",
+                       command=lambda: self._fit_cut("y")).pack(side="left", padx=6)
+            ttk.Button(xfit, text="clear fits",
+                       command=self._clear_cut_fits).pack(side="left")
+            self.cross_fit_lbl = ttk.Label(xfit, text="", foreground="#036")
+            self.cross_fit_lbl.pack(side="left", padx=(8, 0))
 
             self.movie_row = ttk.Frame(f); self.movie_row.pack(fill="x", pady=(8, 0))
             ttk.Label(self.movie_row, text="frame:").pack(side="left")
@@ -1593,6 +2100,195 @@ def main(argv=None):
                                      foreground="#a60")
             self.seq_lbl.pack(anchor="w", pady=(8, 0))
 
+        def _build_tab_multiharp(self, nb):
+            f = ttk.Frame(nb, padding=8)
+            nb.add(f, text="MultiHarp")
+            r1 = ttk.Frame(f); r1.pack(fill="x")
+            ttk.Label(r1, text="Auto rise / FWHM \u2014 levels:").pack(side="left")
+            self.mh_levels = ttk.Combobox(r1, state="readonly", width=8,
+                                          values=["10\u201390%", "5\u201395%"])
+            self.mh_levels.current(0)
+            self.mh_levels.pack(side="left", padx=(2, 10))
+            ttk.Button(r1, text="Measure rise time",
+                       command=self.mh_auto_rise).pack(side="left")
+            ttk.Button(r1, text="Measure FWHM",
+                       command=self.mh_auto_fwhm).pack(side="left", padx=6)
+            ttk.Button(r1, text="Clear marks", command=self.mh_clear).pack(side="left")
+
+            r2 = ttk.Frame(f); r2.pack(fill="x", pady=(6, 0))
+            self.mh_manual_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(r2, text="manual", variable=self.mh_manual_var).pack(side="left")
+            ttk.Button(r2, text="Set region 1 (low)",
+                       command=lambda: self.mh_set_region(1)).pack(side="left", padx=(8, 0))
+            ttk.Button(r2, text="Set region 2 (high)",
+                       command=lambda: self.mh_set_region(2)).pack(side="left", padx=6)
+            ttk.Button(r2, text="Rise between avgs",
+                       command=self.mh_manual_rise).pack(side="left")
+            ttk.Button(r2, text="FWHM between avgs",
+                       command=self.mh_manual_fwhm).pack(side="left", padx=6)
+
+            ttk.Label(f, text="blue = region 1 (low avg)   \u00b7   red = region 2 "
+                      "(high avg)   \u00b7   yellow = measured span   \u00b7   orange = "
+                      "the usual drag-select for zoom / fit", foreground="#777"
+                      ).pack(anchor="w", pady=(6, 0))
+            self.mh_text = tk.Text(f, height=9, wrap="none", font=("TkFixedFont", 9))
+            self.mh_text.pack(fill="both", expand=True, pady=(6, 0))
+
+        def show_multiharp(self):
+            mh = self.multiharp
+            if not mh:
+                return
+            self.mh = {}
+            self.set_1d(mh["centers"], mh["counts"], xlabel="delay (ns)",
+                        ylabel="counts", title="MultiHarp arrival-time histogram")
+            self._mh_show_stored()
+            try:
+                self.nb.select(self._mh_tab_index)
+            except Exception:
+                pass
+
+        def _mh_levels(self):
+            return (0.05, 0.95) if self.mh_levels.get().startswith("5") else (0.10, 0.90)
+
+        def _mh_show_stored(self):
+            m = self.multiharp["meta"] if self.multiharp else {}
+
+            def g(k, unit="ns", fmt="%.3f"):
+                v = m.get(k)
+                if v is None:
+                    return "\u2014"
+                try:
+                    return (fmt % float(np.squeeze(v))) + (f" {unit}" if unit else "")
+                except Exception:
+                    return str(v)
+
+            lbl = f"{m.get('start_label', 'start')} \u2192 {m.get('stop_label', 'stop')}"
+            lines = [f"MultiHarp timing   ({lbl})",
+                     "values stored in the file at acquisition time:",
+                     f"  rise (10\u201390%) = {g('rise_time_ns')}",
+                     f"  FWHM          = {g('fwhm_ns')}",
+                     f"  onset (10%)   = {g('onset_ns')}",
+                     f"  plateau       = {g('plateau_counts', 'cts', '%.0f')}",
+                     f"  median = {g('median_ns')}   mean = {g('mean_ns')}   "
+                     f"std = {g('std_ns')}",
+                     f"  drift (p-p)   = {g('drift_pp_ns')}",
+                     "",
+                     "re-measure below \u2014 auto (pick levels) or manual (set two "
+                     "regions, then measure between their averages)."]
+            self.mh_text.delete("1.0", "end")
+            self.mh_text.insert("end", "\n".join(lines))
+
+        def _mh_redraw(self, measured=None, vlines=None):
+            spans = []
+            if self.mh.get("r1"):
+                spans.append((self.mh["r1"][0], self.mh["r1"][1], "tab:blue", 0.20))
+            if self.mh.get("r2"):
+                spans.append((self.mh["r2"][0], self.mh["r2"][1], "tab:red", 0.20))
+            if measured is not None:
+                spans.append((measured[0], measured[1], "gold", 0.30))
+            self.extra_spans = spans
+            self.extra_vlines = vlines or []
+            self.draw_1d()
+
+        def mh_set_region(self, which):
+            if not self.multiharp:
+                messagebox.showinfo("MultiHarp", "Open a MultiHarp file first.")
+                return
+            if self.sel_x0 is None:
+                messagebox.showinfo("MultiHarp", "Drag a span on the plot first "
+                                    "(the orange selection), then click Set region.")
+                return
+            c, y = self.multiharp["centers"], self.multiharp["counts"]
+            m = span_mask(c, self.sel_x0, self.sel_x1)
+            avg = float(np.mean(y[m])) if m.any() else float("nan")
+            self.mh[f"r{which}"] = (self.sel_x0, self.sel_x1)
+            self.mh[f"avg{which}"] = avg
+            self._mh_redraw()
+            self.mh_text.insert("end", f"\nregion {which} average = {avg:.5g} cts   "
+                                f"(x \u2208 [{self.sel_x0:.4g}, {self.sel_x1:.4g}] ns)")
+
+        def _mh_report_rise(self, r, header):
+            lo, hi = int(round(r["lo_frac"] * 100)), int(round(r["hi_frac"] * 100))
+            self.mh_text.insert("end",
+                f"\n\n{header}\n"
+                f"  low level  = {r['low']:.5g} cts\n"
+                f"  high level = {r['high']:.5g} cts\n"
+                f"  t({lo}%) = {r['t_lo']:.4f} ns\n"
+                f"  t({hi}%) = {r['t_hi']:.4f} ns\n"
+                f"  RISE TIME = {r['rise']:.4f} ns")
+
+        def _rise_marks(self, r):
+            ok = np.isfinite(r["t_lo"]) and np.isfinite(r["t_hi"])
+            measured = (r["t_lo"], r["t_hi"]) if ok else None
+            vlines = ([(r["t_lo"], "goldenrod"), (r["t_hi"], "goldenrod")] if ok else [])
+            return measured, vlines
+
+        def mh_auto_rise(self):
+            if not self.multiharp:
+                messagebox.showinfo("MultiHarp", "Open a MultiHarp file first.")
+                return
+            lo, hi = self._mh_levels()
+            r = rise_time(self.multiharp["centers"], self.multiharp["counts"], lo, hi)
+            measured, vlines = self._rise_marks(r)
+            self._mh_redraw(measured=measured, vlines=vlines)
+            self._mh_report_rise(r, f"AUTO RISE  ({lo*100:.0f}\u2013{hi*100:.0f}% of plateau)")
+
+        def mh_manual_rise(self):
+            if not self.multiharp:
+                messagebox.showinfo("MultiHarp", "Open a MultiHarp file first.")
+                return
+            if "avg1" not in self.mh or "avg2" not in self.mh:
+                messagebox.showinfo("MultiHarp", "Set region 1 (low) and region 2 "
+                                    "(high) first \u2014 drag a span, click Set region 1, "
+                                    "drag again, click Set region 2.")
+                return
+            lo, hi = self._mh_levels()
+            r = rise_time(self.multiharp["centers"], self.multiharp["counts"], lo, hi,
+                          low=self.mh["avg1"], high=self.mh["avg2"])
+            measured, vlines = self._rise_marks(r)
+            self._mh_redraw(measured=measured, vlines=vlines)
+            self._mh_report_rise(r, f"MANUAL RISE  ({lo*100:.0f}\u2013{hi*100:.0f}% "
+                                    f"between region averages)")
+
+        def mh_auto_fwhm(self):
+            if not self.multiharp:
+                messagebox.showinfo("MultiHarp", "Open a MultiHarp file first.")
+                return
+            fw = fwhm_from_hist(self.multiharp["centers"], self.multiharp["counts"])
+            self._mh_mark_fwhm(fw, "AUTO FWHM  (half of max)")
+
+        def mh_manual_fwhm(self):
+            if not self.multiharp:
+                messagebox.showinfo("MultiHarp", "Open a MultiHarp file first.")
+                return
+            if "avg1" not in self.mh or "avg2" not in self.mh:
+                messagebox.showinfo("MultiHarp", "Set region 1 (baseline) and region "
+                                    "2 (peak) first.")
+                return
+            fw = fwhm_from_hist(self.multiharp["centers"], self.multiharp["counts"],
+                                baseline=self.mh["avg1"], peak=self.mh["avg2"])
+            self._mh_mark_fwhm(fw, "MANUAL FWHM  (half between region averages)")
+
+        def _mh_mark_fwhm(self, fw, header):
+            ok = np.isfinite(fw["t0"]) and np.isfinite(fw["t1"])
+            measured = (fw["t0"], fw["t1"]) if ok else None
+            vlines = ([(fw["t0"], "goldenrod"), (fw["t1"], "goldenrod")] if ok else [])
+            self._mh_redraw(measured=measured, vlines=vlines)
+            self.mh_text.insert("end",
+                f"\n\n{header}\n"
+                f"  half level = {fw['half']:.5g} cts\n"
+                f"  left  = {fw['t0']:.4f} ns\n"
+                f"  right = {fw['t1']:.4f} ns\n"
+                f"  FWHM  = {fw['fwhm']:.4f} ns")
+
+        def mh_clear(self):
+            self.mh = {}
+            self.extra_spans = []
+            self.extra_vlines = []
+            if self.view_kind == "1d":
+                self.draw_1d()
+            self._mh_show_stored()
+
         # ------------------------------------------------------------ files --
         def open_dialog(self):
             path = filedialog.askopenfilename(
@@ -1619,7 +2315,12 @@ def main(argv=None):
             self.file_lbl.configure(text=os.path.basename(path))
             self.stacks = find_image_stacks(self.tree_data)
             self.camera_scan = find_camera_scan(self.tree_data)
+            self.averaging = find_averaging(self.tree_data)
+            self.multiharp = find_multiharp(self.tree_data)
+            self.confocal = find_confocal(self.tree_data)
             self._update_modality_combo()
+            self._update_dataset_combo()
+            self._update_odmr_combo()
             self._populate_tree()
             self._auto_view()
             self._set_status("loaded")
@@ -1688,6 +2389,16 @@ def main(argv=None):
                             self.info.insert("end",
                                 f"min/max: {np.min(finite):.6g} / {np.max(finite):.6g}\n"
                                 f"mean: {np.mean(finite):.6g}\n")
+                    name = self.tree.item(iid, "text").split()[0] if iid else ""
+                    res = (self._error_summary_for(name, a)
+                           if (a.ndim == 1 and np.issubdtype(a.dtype, np.number)
+                               and self._is_countlike(name)) else None)
+                    if res:
+                        self.info.insert("end", "\n— shot-noise error —\n" + res[0] + "\n")
+                        self.err_lbl.configure(text=res[1])
+                    else:
+                        self.err_lbl.configure(text="(select a counts array to see "
+                                               "its shot-noise error)")
                 elif isinstance(val, str):
                     self.info.insert("end", "\n" + val[:1200])
                 elif isinstance(val, (dict, list)):
@@ -1695,6 +2406,43 @@ def main(argv=None):
                 else:
                     self.info.insert("end", f"value: {val}")
             self.info.configure(state="disabled")
+
+        @staticmethod
+        def _is_countlike(name):
+            low = (name or "").lower()
+            return any(k in low for k in ("count", "signal", "reference", "total"))
+
+        def _error_summary_for(self, name, arr):
+            """(info_text, short_label) describing the shot-noise error of a counts
+            array. If it's the averaged channel and the individual runs are on
+            disk, also report the empirical error-on-mean vs the Poisson value."""
+            a = np.squeeze(np.asarray(arr, float))
+            if a.ndim != 1 or not np.isfinite(a).any():
+                return None
+            runs = None
+            av = self.averaging
+            if av:
+                for ch in ("signal", "reference", "total"):
+                    if name in (f"{ch}_counts", f"{ch}_avg"):
+                        runs = av["runs"].get(ch)
+                        break
+            es = error_stats(a, runs=runs)
+            lines = [f"⟨N⟩ = {es['mean']:.6g}",
+                     f"Poisson σ = √N = {es['poisson_sigma']:.4g}  "
+                     f"({100 * es['rel_poisson']:.3g}% relative)"]
+            short = (f"⟨N⟩={es['mean']:.4g},  σ=√N={es['poisson_sigma']:.4g}  "
+                     f"({100 * es['rel_poisson']:.2g}%)")
+            if "navg" in es:
+                lines += [f"averaged over {es['navg']} runs:",
+                          f"  empirical σ_mean = {es['emp_sigma_mean']:.4g}  "
+                          f"({100 * es['rel_emp_mean']:.3g}% relative)",
+                          f"  Poisson-expected σ_mean = {es['poisson_sigma_mean']:.4g}",
+                          f"  ratio emp/Poisson = {es['ratio_emp_poisson']:.3f}  "
+                          f"(≈1 ⇒ shot-noise limited)"]
+                short = (f"averaged (n={es['navg']}): σ_mean={es['emp_sigma_mean']:.4g} "
+                         f"({100 * es['rel_emp_mean']:.2g}%),  "
+                         f"emp/Poisson={es['ratio_emp_poisson']:.2f}")
+            return "\n".join(lines), short
 
         def _update_xaxis_choices(self, val):
             """Populate the x-axis combobox for the selected 1-D array."""
@@ -1723,6 +2471,23 @@ def main(argv=None):
                             self._xaxis_map[label] = arr
                             if "freq" in label.lower():
                                 freq_choices.append(label)
+            # confocal physical position axes (with the point_a offset), offered
+            # whenever the selected 1-D array spans the scan width or height.
+            conf = getattr(self, "confocal", None)
+            if conf is not None and conf.get("img") is not None:
+                shp = np.asarray(conf["img"]).shape
+                if len(shp) >= 2:
+                    try:
+                        cxv, cyv, cxl, cyl, _ = confocal_axes(conf, shp[1], shp[0],
+                                                              "auto")
+                    except Exception:
+                        cxv = cyv = None
+                    if (cxv is not None and cxv.size == n
+                            and cxl not in self._xaxis_map):
+                        choices.append(cxl); self._xaxis_map[cxl] = cxv
+                    if (cyv is not None and cyv.size == n
+                            and cyl not in self._xaxis_map):
+                        choices.append(cyl); self._xaxis_map[cyl] = cyv
             # reconstructed pulsed axis from sequence_text — only the ONE that
             # matches what the sequence actually sweeps (tau / amplitude / freq)
             seq = find_text(self.tree_data, "sequence:", "variable ", "type=")
@@ -1791,11 +2556,96 @@ def main(argv=None):
                                     "image, or a stack (or a scalar to inspect).")
 
         def _plot_from_node(self, yarr, name):
+            self._rerender = lambda y=yarr, nm=name: self._plot_from_node(y, nm)
             xchoice = self.xaxis_combo.get() or "index"
             xmap = getattr(self, "_xaxis_map", {"index": np.arange(len(yarr))})
             x = xmap.get(xchoice, np.arange(len(yarr), dtype=float))
             xl = xchoice if xchoice != "index" else "index"
-            self.set_1d(x, yarr, xlabel=xl, ylabel=name, title=name)
+            y = self._bg_apply(name, yarr)
+            self.set_1d(x, y, xlabel=xl, ylabel=name, title=name)
+
+        # ---------------------------------------------------- bg subtraction --
+        def _bg_find(self, base):
+            """Background array whose leaf name equals `base` (exact preferred,
+            else a substring match); None if not found."""
+            if self.bg_tree is None:
+                return None
+            fallback = None
+            for path, v in flatten_tree(self.bg_tree):
+                if isinstance(v, np.ndarray):
+                    leaf = path.split("/")[-1]
+                    if leaf == base:
+                        return np.squeeze(np.asarray(v, float))
+                    if fallback is None and base and base in leaf:
+                        fallback = np.squeeze(np.asarray(v, float))
+            return fallback
+
+        def _bg_apply(self, name, arr):
+            """Subtract the matching background array from `arr`: by leaf name,
+            with a unique-same-shape fallback (for images whose name we don't
+            track). Returns `arr` unchanged when background is off / not loaded /
+            no compatible match, so it is always safe to call."""
+            if not (self.bg_on and self.bg_tree is not None) or arr is None:
+                return arr
+            a = np.asarray(arr, float)
+            b = self._bg_find(str(name).split("/")[-1]) if name else None
+            if b is None:
+                same = [np.squeeze(np.asarray(v, float))
+                        for _, v in flatten_tree(self.bg_tree)
+                        if isinstance(v, np.ndarray)
+                        and np.squeeze(np.asarray(v)).shape == a.shape]
+                if len(same) == 1:
+                    b = same[0]
+            if b is None:
+                return arr
+            try:
+                return a - b       # exact shape, or NumPy broadcast (2-D bg vs 3-D)
+            except Exception:
+                return arr
+
+        def _pick_bg(self):
+            path = filedialog.askopenfilename(
+                title="Select background HDF5 file",
+                filetypes=[("HDF5 files", "*.h5 *.hdf5 *.he5"), ("All files", "*.*")])
+            if not path:
+                return False
+            try:
+                self.bg_tree = load_hdf5_tree(path)
+                self.bg_path = path
+                self.bg_lbl.configure(text="bg: " + os.path.basename(path))
+            except Exception as e:
+                messagebox.showerror("Background",
+                                     f"Could not load background file:\n{e}")
+                return False
+            return True
+
+        def _change_bg(self):
+            if self._pick_bg():
+                self.bg_var.set(True)
+                self.bg_on = True
+                self._bg_refresh()
+
+        def _toggle_bg(self):
+            if self.bg_var.get():
+                if self.bg_tree is None and not self._pick_bg():
+                    self.bg_var.set(False)
+                    return
+                self.bg_on = True
+            else:
+                self.bg_on = False
+            self._bg_refresh()
+
+        def _bg_refresh(self):
+            """Re-render the current view so an on/off change takes effect."""
+            self._cross_fit_x = self._cross_fit_y = None
+            self.pulsed_cache = None
+            if self.view_kind in ("image", "stack"):
+                self.redraw_image()
+            elif self._rerender is not None:
+                try:
+                    self._rerender()
+                except Exception:
+                    pass
 
         def plot_selected_together(self):
             """Overlay every selected 1-D array on one plot (Ctrl/Shift-click to
@@ -1838,6 +2688,9 @@ def main(argv=None):
 
         # -------------------------------------------------- auto first view --
         def _auto_view(self):
+            if self.multiharp:                   # MultiHarp timing histogram
+                self.show_multiharp()
+                return
             if self.camera_scan:                 # laser / white-light camera scan
                 self.show_camera_scan()
                 self.nb.select(3)
@@ -1849,28 +2702,21 @@ def main(argv=None):
                 self.nb.select(2)
                 self.pulsed_plot_raw()
             elif mode == "cw_odmr":
-                _, freqs = get_by_name(self.tree_data, "frequencies", "freq_list",
-                                       want=("1d",))
-                _, counts = get_by_name(self.tree_data, "counts_averaged",
-                                        "all_counts_forward", "counts_forward",
-                                        "counts", want=("1d",))
-                f = np.squeeze(freqs).astype(float)
-                c = np.squeeze(counts).astype(float)
-                n = min(len(f), len(c))
-                xl = "frequency (GHz)" if np.nanmax(f) > 1e6 else "frequency"
-                xf = f[:n] / 1e9 if np.nanmax(f) > 1e6 else f[:n]
-                self.set_1d(xf, c[:n], xlabel=xl, ylabel="counts",
-                            title="CW ODMR sweep")
-                self.model_combo.set("Lorentzian dip (ODMR)")
-                self.nb.select(1)
+                self._update_odmr_combo()
+                self.show_cw_odmr()
             elif mode == "stack":
-                self.show_stack(info["stack"]["frames"], title=info["stack"]["name"])
+                frames = info["stack"]["frames"]
+                zc = confocal_z(self.confocal, frames.shape[0]) if self.confocal else None
+                self.show_stack(frames, title=info["stack"]["name"],
+                                confocal=(self.confocal is not None), zcoords=zc,
+                                name=info["stack"]["name"])
                 self.nb.select(3)
             elif mode == "image":
                 _, img = get_by_name(self.tree_data, "count_img", "count_image",
                                      "image", want=("image",))
                 self.show_image(np.squeeze(img).astype(float),
-                                title="confocal scan")
+                                title="confocal scan", confocal=True,
+                                name="count_img")
                 self.nb.select(3)
             elif mode == "1d":
                 _, v = get_by_name(self.tree_data, info["path"].split("/")[-1],
@@ -1918,7 +2764,7 @@ def main(argv=None):
             self.fig.tight_layout()
             self.canvas.draw_idle()
 
-        def set_1d(self, x, y, xlabel="", ylabel="", title=""):
+        def set_1d(self, x, y, xlabel="", ylabel="", title="", yerr=None):
             self._stop_play()
             self.view_kind = "1d"
             self.curves = None                    # single-curve mode
@@ -1926,10 +2772,13 @@ def main(argv=None):
             self.y = np.asarray(y, float).ravel()
             n = min(len(self.x), len(self.y))
             self.x, self.y = self.x[:n], self.y[:n]
+            self.cur_yerr = np.asarray(yerr, float).ravel()[:n] if yerr is not None else None
             self.xlabel, self.ylabel, self.title = xlabel, ylabel, title
             self.cur_frames = None
             self.sel_box = None
             self._last_fit = None
+            self.extra_spans = []
+            self.extra_vlines = []
             self.movie_row_state(False)
             self.draw_1d()
 
@@ -1946,12 +2795,15 @@ def main(argv=None):
             cx, cy, _ = curves[0]
             n = min(len(cx), len(cy))
             self.x, self.y = cx[:n], cy[:n]        # primary
+            self.cur_yerr = None
             self.xlabel = xlabel
             self.ylabel = curves[0][2] if len(curves) == 1 else ""
             self.title = title
             self.cur_frames = None
             self.sel_box = None
             self._last_fit = None
+            self.extra_spans = []
+            self.extra_vlines = []
             self.movie_row_state(False)
             self.draw_1d()
 
@@ -1977,18 +2829,32 @@ def main(argv=None):
             fmt = {"line": "-", "markers": "o", "line+markers": "-o"}[style]
             palette = ["tab:blue", "tab:red", "tab:green", "tab:purple",
                        "tab:orange", "tab:cyan", "tab:brown", "tab:pink"]
+            show_err = self.errbar_var.get()
+
+            def plot_curve(cx, cy, color, label, err=None):
+                yv = self._norm_apply(cy, cx)
+                if show_err:
+                    if err is None:
+                        err = poisson_error(cy)            # generic shot noise
+                    if self.norm_var.get() == "divide by max":
+                        m = np.nanmax(np.abs(cy))
+                        err = err / m if m else err
+                    self.ax.errorbar(cx, yv, yerr=err, fmt=fmt, ms=4, lw=1.3,
+                                     color=color, label=label, elinewidth=0.8,
+                                     capsize=2, ecolor=color, alpha=0.9)
+                else:
+                    self.ax.plot(cx, yv, fmt, ms=4, lw=1.3, color=color, label=label)
+
             if self.curves:                        # overlay of several curves
                 for i, (cx, cy, lab) in enumerate(self.curves):
-                    self.ax.plot(cx, self._norm_apply(cy, cx), fmt, ms=4, lw=1.3,
-                                 color=palette[i % len(palette)], label=lab)
+                    plot_curve(cx, cy, palette[i % len(palette)], lab)
             else:                                  # single curve
-                self.ax.plot(self.x, self._norm_apply(self.y, self.x), fmt, ms=4,
-                             lw=1.3, color="tab:blue", label=self.ylabel or "data")
-            # re-draw a stored fit if present
+                plot_curve(self.x, self.y, "tab:blue", self.ylabel or "data",
+                           err=self.cur_yerr)
             if self._last_fit is not None:
                 fitd = self._last_fit
                 self.ax.plot(fitd["x_dense"], fitd["y_dense"], "-k", lw=1.6,
-                             label=f"fit (R²={fitd['r2']:.4f})")
+                             label=f"fit (R\u00b2={fitd['r2']:.4f})")
             self.ax.set_xlabel(self.xlabel)
             self.ax.set_ylabel(self.ylabel)
             self.ax.set_title(getattr(self, "title", ""), fontsize=10)
@@ -1998,8 +2864,12 @@ def main(argv=None):
                 except Exception:
                     pass
             self.ax.grid(True, alpha=0.3)
+            for x0, x1, color, alpha in getattr(self, "extra_spans", []):
+                self.ax.axvspan(x0, x1, color=color, alpha=alpha, zorder=0)
+            for xv, color in getattr(self, "extra_vlines", []):
+                if np.isfinite(xv):
+                    self.ax.axvline(xv, color=color, ls="--", lw=1.2)
             self.ax.legend(fontsize=8)
-            # span selector
             self.span = _make_span(self.ax, self._on_span)
             if self.sel_x0 is not None:
                 self.ax.axvspan(self.sel_x0, self.sel_x1, color="tab:orange", alpha=0.15)
@@ -2096,29 +2966,68 @@ def main(argv=None):
 
         # ------------------------------------------------------- pulsed tab ---
         def _prepare_pulsed(self):
-            """Collect signal/reference + sequence text for the pulsed workflow."""
-            _, sig = get_by_name(self.tree_data, "signal_counts", "signal",
-                                 want=("1d", "image"))
-            _, ref = get_by_name(self.tree_data, "reference_counts", "reference",
-                                 want=("1d", "image"))
+            """Collect signal/reference (+ per-point errors) and sequence text for
+            the pulsed workflow, honoring the averaged / individual-run choice."""
+            ds = self.dataset_combo.get() if hasattr(self, "dataset_combo") else "averaged"
+            av = self.averaging
+            sig = ref = sig_err = ref_err = None
+            if av and ds.startswith("run "):
+                k = int(ds.split()[1]) - 1
+                rs = av["runs"]
+                if rs.get("signal") and k < len(rs["signal"]):
+                    sig = rs["signal"][k]; sig_err = poisson_error(sig)
+                if rs.get("reference") and k < len(rs["reference"]):
+                    ref = rs["reference"][k]; ref_err = poisson_error(ref)
             if sig is None or ref is None:
-                self.pulsed_cache = None
-                return
-            sig = np.squeeze(np.asarray(sig, float))
-            ref = np.squeeze(np.asarray(ref, float))
-            if sig.ndim == 2:
-                sig = sig[0]
-            if ref.ndim == 2:
-                ref = ref[0]
-            n = min(len(sig), len(ref))
+                _, sig = get_by_name(self.tree_data, "signal_counts", "signal",
+                                     want=("1d", "image"))
+                _, ref = get_by_name(self.tree_data, "reference_counts", "reference",
+                                     want=("1d", "image"))
+                if sig is None or ref is None:
+                    self.pulsed_cache = None
+                    return
+                sig = np.squeeze(np.asarray(sig, float))
+                ref = np.squeeze(np.asarray(ref, float))
+                if sig.ndim == 2:
+                    sig = sig[0]
+                if ref.ndim == 2:
+                    ref = ref[0]
+                sr = av["runs"] if av else {}
+                sig_err = (error_on_mean(sr["signal"]) if sr.get("signal")
+                           and len(sr["signal"]) >= 2 else poisson_error(sig))
+                ref_err = (error_on_mean(sr["reference"]) if sr.get("reference")
+                           and len(sr["reference"]) >= 2 else poisson_error(ref))
+            sig = np.asarray(sig, float); ref = np.asarray(ref, float)
+            sig = self._bg_apply("signal_counts", sig)      # background subtraction
+            ref = self._bg_apply("reference_counts", ref)
+            sig_err = np.asarray(sig_err, float); ref_err = np.asarray(ref_err, float)
+            n = min(len(sig), len(ref), len(sig_err), len(ref_err))
             seq = find_text(self.tree_data, "sequence:", "variable ", "type=")
             _, farr = get_by_name(self.tree_data, "frequencies", "freq_list",
                                   want=("1d",))
-            self.pulsed_cache = dict(sig=sig[:n], ref=ref[:n], seq=seq, n=n,
-                                     has_freq=(farr is not None), freq=farr)
+            self.pulsed_cache = dict(sig=sig[:n], ref=ref[:n], sig_err=sig_err[:n],
+                                     ref_err=ref_err[:n], seq=seq, n=n,
+                                     has_freq=(farr is not None), freq=farr, dataset=ds)
             mode = detect_pulsed_mode(seq, farr is not None)
             self.pulsed_mode = mode
             self.pmode_combo.set(mode)
+
+        def _update_dataset_combo(self):
+            """Populate the averaged/run selector. Enabled only when the file
+            actually stored individual runs; otherwise parked on 'averaged'."""
+            av = self.averaging
+            if not av:
+                self.dataset_combo.configure(values=["averaged"], state="disabled")
+                self.dataset_combo.set("averaged")
+                return
+            vals = ["averaged"] + [f"run {i}" for i in range(1, av["navg"] + 1)]
+            self.dataset_combo.configure(values=vals, state="readonly")
+            self.dataset_combo.set("averaged")
+
+        def on_dataset_change(self):
+            self._prepare_pulsed()
+            if self.pulsed_cache:
+                self.pulsed_plot_raw()
 
         def _pulsed_axis(self, mode):
             c = self.pulsed_cache
@@ -2148,6 +3057,7 @@ def main(argv=None):
             return build_time_axis(c["seq"], n)
 
         def pulsed_plot_raw(self):
+            self._rerender = self.pulsed_plot_raw
             if not self.pulsed_cache:
                 self._prepare_pulsed()
             if not self.pulsed_cache:
@@ -2158,9 +3068,16 @@ def main(argv=None):
             x, xlabel = self._pulsed_axis(mode)
             if mode == "odmr" and np.nanmax(x) > 1e6:
                 x = x / 1e9
+            q = self.pq_combo.get()
             y, ylabel = self._pulsed_quantity(c["sig"], c["ref"])
-            self.set_1d(x, y, xlabel=xlabel, ylabel=ylabel,
-                        title=f"pulsed: {mode}   [{ylabel}]")
+            yerr = None
+            if self.errbar_var.get():
+                se = c.get("sig_err"); re_ = c.get("ref_err")
+                yerr = quantity_error(q, c["sig"], c["ref"],
+                                      se if se is not None else poisson_error(c["sig"]),
+                                      re_ if re_ is not None else poisson_error(c["ref"]))
+            self.set_1d(x, y, xlabel=xlabel, ylabel=ylabel, yerr=yerr,
+                        title=f"pulsed: {mode}   [{ylabel}]   \u00b7 {c.get('dataset','averaged')}")
 
         def _pulsed_quantity(self, sig, ref):
             """Return (y, label) for the quantity chosen in the Pulsed tab."""
@@ -2178,49 +3095,59 @@ def main(argv=None):
 
         def _pulsed_prep_xy(self):
             """Common prep for analyse + significance: axis, chosen quantity,
-            dead-point drop, finite mask, GHz conversion, and optional selection
-            restriction.  Returns (mode, xplot, y_plot, x_fit, y_fit, ylabel, scope)."""
+            per-point error, dead-point drop, finite mask, GHz conversion, and
+            optional selection restriction. Returns
+            (mode, xlabel, xplot, y_plot, x_fit, y_fit, ylabel, scope, yerr_plot)."""
             c = self.pulsed_cache
             mode = self.pmode_combo.get()
             x, xlabel = self._pulsed_axis(mode)
             sig, ref = c["sig"].copy(), c["ref"].copy()
+            se = np.asarray(c.get("sig_err") if c.get("sig_err") is not None
+                            else poisson_error(sig), float).copy()
+            re_ = np.asarray(c.get("ref_err") if c.get("ref_err") is not None
+                             else poisson_error(ref), float).copy()
             if self.drop_dead_var.get():
                 med = np.median(sig[sig > 0]) if np.any(sig > 0) else 0
                 live = sig > 0.2 * med
-                x, sig, ref = x[live], sig[live], ref[live]
+                x, sig, ref, se, re_ = x[live], sig[live], ref[live], se[live], re_[live]
+            q = self.pq_combo.get()
             y, ylabel = self._pulsed_quantity(sig, ref)
+            yerr = quantity_error(q, sig, ref, se, re_)
             good = np.isfinite(y)
-            xg, yg = x[good], y[good]
+            xg, yg, eg = x[good], y[good], yerr[good]
             xplot = xg / 1e9 if (mode == "odmr" and np.nanmax(xg) > 1e6) else xg
-            # fit/test domain keeps physics units (Hz for odmr); optionally
-            # restrict to the span the user dragged on the Plot tab (in plotted
-            # coordinates), applying the same mask to the physics-unit array.
             xfit, yfit, scope = xg, yg, f"full trace ({len(xg)} pts)"
             if self.pulsed_sel_var.get():
                 if self.sel_x0 is None:
-                    scope = "no selection made — used full trace"
+                    scope = "no selection made \u2014 used full trace"
                 else:
                     m = span_mask(xplot, self.sel_x0, self.sel_x1)
                     if int(m.sum()) >= 4:
                         xfit, yfit = xg[m], yg[m]
                         scope = f"selection ({int(m.sum())} pts)"
                     else:
-                        scope = "selection <4 pts — used full trace"
-            return mode, xlabel, xplot, yg, xfit, yfit, ylabel, scope
+                        scope = "selection <4 pts \u2014 used full trace"
+            yerr_plot = eg if self.errbar_var.get() else None
+            return mode, xlabel, xplot, yg, xfit, yfit, ylabel, scope, yerr_plot
 
         def pulsed_analyse(self):
+            self._rerender = self.pulsed_analyse
             if not self.pulsed_cache:
                 self._prepare_pulsed()
             if not self.pulsed_cache:
                 messagebox.showinfo("Pulsed", "No signal/reference arrays found.")
                 return
-            mode, xlabel, xplot, yg, xfit, yfit, ylabel, scope = self._pulsed_prep_xy()
+            mode, xlabel, xplot, yg, xfit, yfit, ylabel, scope, yerr = self._pulsed_prep_xy()
             self.pulsed_text.delete("1.0", "end")
             res = self._pulsed_fit(mode, xfit, yfit)
-            self.set_1d(xplot, yg,
+            ds = self.pulsed_cache.get("dataset", "averaged")
+            self.set_1d(xplot, yg, yerr=yerr,
                         xlabel=("frequency (GHz)" if mode == "odmr" else xlabel),
-                        ylabel=ylabel, title=f"pulsed: {mode}   [{ylabel}]")
-            head = f"[{ylabel}  ·  {scope}]\n\n"
+                        ylabel=ylabel, title=f"pulsed: {mode}   [{ylabel}]   \u00b7 {ds}")
+            errline = ""
+            if yerr is not None and np.isfinite(yerr).any():
+                errline = f"  \u00b7  median \u03c3 = {np.nanmedian(yerr):.4g}"
+            head = f"[{ylabel}  \u00b7  {ds}  \u00b7  {scope}{errline}]\n\n"
             if res is not None:
                 xf = res["xf"] / 1e9 if (mode == "odmr" and np.nanmax(res["xf"]) > 1e6) \
                     else res["xf"]
@@ -2274,12 +3201,13 @@ def main(argv=None):
                     "summary": r["summary"] + note}
 
         def pulsed_significance(self):
+            self._rerender = self.pulsed_significance
             if not self.pulsed_cache:
                 self._prepare_pulsed()
             if not self.pulsed_cache:
                 messagebox.showinfo("Pulsed", "No signal/reference arrays found.")
                 return
-            mode, xlabel, xplot, yg, xfit, yfit, ylabel, scope = self._pulsed_prep_xy()
+            mode, xlabel, xplot, yg, xfit, yfit, ylabel, scope, _yerr = self._pulsed_prep_xy()
             self._set_status("running permutation test …")
             self.root.update_idletasks()
             r = run_significance(mode, xfit, yfit)
@@ -2323,11 +3251,14 @@ def main(argv=None):
                     except Exception:
                         pass
 
-        def show_image(self, img, title=""):
+        def show_image(self, img, title="", confocal=False, name=""):
             self._stop_play()
             self.view_kind = "image"
             self.cur_image = np.asarray(img, float)
+            self.cur_image_name = name
             self.cur_frames = None
+            self.frame_z = None
+            self._is_confocal = bool(confocal)
             self.sel_box = None
             self.title = title
             self.movie_row_state(False)
@@ -2349,6 +3280,53 @@ def main(argv=None):
             self.modality_combo.set(display[0])
             self.modality_combo.configure(
                 state="readonly" if len(cs["present"]) > 1 else "disabled")
+
+        def _update_odmr_combo(self):
+            """Populate the CW ODMR channel selector with whichever of
+            averaged / forward / reverse the file has; disable otherwise."""
+            self.odmr_channels = find_odmr_channels(self.tree_data)
+            if self.odmr_channels:
+                vals = list(self.odmr_channels.keys())
+                self.odmr_combo.configure(values=vals, state="readonly")
+                self.odmr_combo.set("averaged" if "averaged" in self.odmr_channels
+                                    else vals[0])
+            else:
+                self.odmr_combo.configure(values=[], state="disabled")
+                self.odmr_combo.set("")
+
+        def on_odmr_channel(self):
+            self.show_cw_odmr(self.odmr_combo.get())
+
+        def show_cw_odmr(self, channel=None):
+            """Plot a CW ODMR sweep channel (forward / reverse / averaged) vs
+            frequency, with background subtraction applied to that channel."""
+            chans = self.odmr_channels or find_odmr_channels(self.tree_data)
+            if not chans:
+                return
+            if channel not in chans:
+                channel = "averaged" if "averaged" in chans else next(iter(chans))
+            token = chans[channel]
+            _, freqs = get_by_name(self.tree_data, "frequencies", "freq_list",
+                                   "freq_axis", want=("1d",))
+            cpath, counts = get_by_name(self.tree_data, token, want=("1d",))
+            if freqs is None or counts is None:
+                return
+            leaf = cpath.split("/")[-1] if cpath else token
+            f = np.squeeze(freqs).astype(float)
+            c = self._bg_apply(leaf, np.squeeze(counts).astype(float))
+            n = min(len(f), len(c))
+            ghz = np.nanmax(f) > 1e6
+            xl = "frequency (GHz)" if ghz else "frequency"
+            xf = f[:n] / 1e9 if ghz else f[:n]
+            try:
+                self.odmr_combo.set(channel)
+            except Exception:
+                pass
+            self._rerender = lambda ch=channel: self.show_cw_odmr(ch)
+            self.set_1d(xf, c[:n], xlabel=xl, ylabel="counts",
+                        title=f"CW ODMR sweep \u2014 {channel}")
+            self.model_combo.set("Lorentzian dip (ODMR)")
+            self.nb.select(1)
 
         def show_camera_scan(self, modality=None):
             cs = self.camera_scan
@@ -2373,13 +3351,17 @@ def main(argv=None):
             if self.camera_scan and modality in self.camera_scan["modalities"]:
                 self.show_camera_scan(modality)
 
-        def show_stack(self, frames, title=""):
+        def show_stack(self, frames, title="", confocal=False, zcoords=None, name=""):
             self._stop_play()
             self.view_kind = "stack"
             self.cur_frame_meta = getattr(self, "_pending_meta", None)
             self._pending_meta = None
             self.cur_frames = np.asarray(frames, float)
+            self.cur_image_name = name
             self.frame_idx = 0
+            self._is_confocal = bool(confocal)
+            self.frame_z = (np.asarray(zcoords, float)
+                            if zcoords is not None else None)
             self.sel_box = None
             self.title = title
             self.movie_row_state(True)
@@ -2392,16 +3374,107 @@ def main(argv=None):
         def _current_image_data(self):
             if self.view_kind == "stack":
                 proj = self.proj_combo.get()
-                if proj == "frame":
-                    return self.cur_frames[self.frame_idx]
-                return stack_projection(self.cur_frames, proj)
-            return self.cur_image
+                img = (self.cur_frames[self.frame_idx] if proj == "frame"
+                       else stack_projection(self.cur_frames, proj))
+            else:
+                img = self.cur_image
+            if img is None:
+                return None
+            if not (self.bg_on and self.bg_tree is not None):
+                self._bg_status = ""
+                return img
+            out, status = self._bg_image(np.asarray(img, float))
+            self._bg_status = status
+            return out
+
+        def _match_frame(self, cand, a):
+            """A background array reshaped to match image `a`: exact shape, or a
+            single frame of a matching stack. None if not compatible (no loose
+            broadcasting for images, to avoid silently-wrong subtraction)."""
+            cand = np.squeeze(np.asarray(cand, float))
+            if cand.shape == a.shape:
+                return cand
+            if cand.ndim == a.ndim + 1 and cand.shape[1:] == a.shape:
+                idx = min(getattr(self, "frame_idx", 0), cand.shape[0] - 1)
+                return cand[idx]
+            return None
+
+        def _bg_image(self, a):
+            """(subtracted_or_original, status) for the current image/frame. Tries
+            count_img and the other standard image names, then a unique same-shape
+            array; reports clearly when nothing compatible is found."""
+            names = [getattr(self, "cur_image_name", ""), "count_img",
+                     "count_image", "raw_img", "image", "img"]
+            for nm in names:
+                if not nm:
+                    continue
+                cand = self._bg_find(str(nm).split("/")[-1])
+                if cand is not None:
+                    cb = self._match_frame(cand, a)
+                    if cb is not None:
+                        return a - cb, f"background subtracted (matched '{nm}')"
+            same = []
+            for _, v in flatten_tree(self.bg_tree):
+                if isinstance(v, np.ndarray):
+                    cb = self._match_frame(np.squeeze(np.asarray(v, float)), a)
+                    if cb is not None:
+                        same.append(cb)
+            if len(same) == 1:
+                return a - same[0], "background subtracted (unique shape match)"
+            shapes = sorted({np.squeeze(np.asarray(v)).shape
+                             for _, v in flatten_tree(self.bg_tree)
+                             if isinstance(v, np.ndarray)}, key=str)
+            if len(same) > 1:
+                return a, (f"background NOT applied: several arrays match "
+                           f"{a.shape} — rename the background image 'count_img'")
+            return a, (f"background NOT applied: no array matching {a.shape} in the "
+                       f"background file (it has {', '.join(map(str, shapes[:5]))})")
+
+        def _image_coords(self, shape):
+            """(x_vec, y_vec, xlabel, ylabel, note) for the image being drawn."""
+            ny, nx = shape[0], shape[1]
+            src = getattr(self, "coord_src", None)
+            src = src.get() if src is not None else "auto"
+            if self._is_confocal and self.confocal and src != "pixels":
+                xv, yv, xl, yl, note = confocal_axes(self.confocal, nx, ny, src)
+                return np.asarray(xv, float), np.asarray(yv, float), xl, yl, note
+            return (np.arange(nx, dtype=float), np.arange(ny, dtype=float),
+                    "x (pixels)", "y (pixels)", "pixel index")
+
+        def _z_label(self):
+            if (self.view_kind == "stack" and self.frame_z is not None
+                    and 0 <= self.frame_idx < len(self.frame_z)):
+                unit = self.confocal.get("unit", "µm") if self.confocal else "µm"
+                return f"   z = {self.frame_z[self.frame_idx]:.3f} {unit}"
+            return ""
+
+        def _box_to_pixels(self, box):
+            """Physical-coordinate ROI box -> integer (c0,c1,r0,r1) pixel bounds
+            into self._disp_data, via the ascending shown coordinate vectors."""
+            x0, x1, y0, y1 = box
+            xv, yv = self.img_x, self.img_y
+            if xv is None or yv is None:
+                c0, c1 = sorted((int(round(x0)), int(round(x1))))
+                r0, r1 = sorted((int(round(y0)), int(round(y1))))
+            else:
+                c0 = int(np.searchsorted(xv, min(x0, x1)))
+                c1 = int(np.searchsorted(xv, max(x0, x1)))
+                r0 = int(np.searchsorted(yv, min(y0, y1)))
+                r1 = int(np.searchsorted(yv, max(y0, y1)))
+            h, w = self._disp_data.shape[:2]
+            c0 = max(0, min(c0, w - 1)); c1 = max(c0 + 1, min(c1, w))
+            r0 = max(0, min(r0, h - 1)); r1 = max(r0 + 1, min(r1, h))
+            return c0, c1, r0, r1
 
         def redraw_image(self, *_):
             data = self._current_image_data()
             if data is None:
                 return
-            self._new_axes()
+            self._kill_selectors()
+            self.fig.clear()
+            self.ax = self.fig.add_subplot(111)
+            self.ax_top = self.ax_right = None
+            self.span = None; self.rect = None; self.imobj = None; self.cbar = None
             clip = float(self.clip_var.get())
             finite = data[np.isfinite(data)]
             if finite.size:
@@ -2409,29 +3482,125 @@ def main(argv=None):
                 hi = np.percentile(finite, 100 - clip)
             else:
                 lo, hi = None, None
-            self.imobj = self.ax.imshow(data, origin="lower",
+            # physical coordinates + orientation ---------------------------
+            xv, yv, xlabel, ylabel, note = self._image_coords(data.shape)
+            if self.transpose_var.get():
+                data = data.T
+                xv, yv = yv, xv
+                xlabel, ylabel = ylabel, xlabel
+            # order both axes ascending so extent + ROI math stay consistent
+            if xv.size > 1 and xv[0] > xv[-1]:
+                data = data[:, ::-1]; xv = xv[::-1]
+            if yv.size > 1 and yv[0] > yv[-1]:
+                data = data[::-1, :]; yv = yv[::-1]
+            self._disp_data = data
+            self.img_x, self.img_y = xv, yv
+            self.img_xlabel, self.img_ylabel = xlabel, ylabel
+            active = not xlabel.endswith("(pixels)")
+            if active:
+                dx = (xv[1] - xv[0]) if xv.size > 1 else 1.0
+                dy = (yv[1] - yv[0]) if yv.size > 1 else 1.0
+                extent = [xv[0] - dx / 2, xv[-1] + dx / 2,
+                          yv[0] - dy / 2, yv[-1] + dy / 2]
+            else:
+                extent = None
+            self.imobj = self.ax.imshow(data, origin="lower", extent=extent,
                                         cmap=self.cmap_combo.get(),
                                         vmin=lo, vmax=hi,
                                         aspect="equal" if self.equal_var.get() else "auto",
                                         interpolation="nearest")
-            self.cbar = self.fig.colorbar(self.imobj, ax=self.ax, fraction=0.046, pad=0.04)
+
+            cross_on = bool(getattr(self, "crosshair_var", None)
+                            and self.crosshair_var.get())
+            marginal = cross_on and (self._cross_xy is not None)
+
+            # counts-vs-x strip on top, counts-vs-y strip on the right --------
+            if marginal:
+                from mpl_toolkits.axes_grid1 import make_axes_locatable
+                div = make_axes_locatable(self.ax)
+                self.ax_top = div.append_axes("top", size="32%", pad=0.08,
+                                              sharex=self.ax)
+                self.ax_right = div.append_axes("right", size="32%", pad=0.08,
+                                                sharey=self.ax)
+                cax = div.append_axes("right", size="4%", pad=0.55)
+                self.cbar = self.fig.colorbar(self.imobj, cax=cax)
+            else:
+                self.cbar = self.fig.colorbar(self.imobj, ax=self.ax,
+                                              fraction=0.046, pad=0.04)
+
+            # user mirror toggles (view-only; shared marginals follow)
+            xa, xb = self.ax.get_xlim(); ya, yb = self.ax.get_ylim()
+            self.ax.set_xlim((max(xa, xb), min(xa, xb)) if self.flipx_var.get()
+                             else (min(xa, xb), max(xa, xb)))
+            self.ax.set_ylim((max(ya, yb), min(ya, yb)) if self.flipy_var.get()
+                             else (min(ya, yb), max(ya, yb)))
+
             ttl = getattr(self, "title", "")
             if self.view_kind == "stack" and self.proj_combo.get() == "frame":
-                ttl += f"   frame {self.frame_idx+1}/{self.cur_frames.shape[0]}"
-                self.frame_lbl.configure(text=f"{self.frame_idx+1}/{self.cur_frames.shape[0]}")
+                n = self.cur_frames.shape[0]
+                zlab = self._z_label()
+                ttl += f"   frame {self.frame_idx+1}/{n}{zlab}"
+                self.frame_lbl.configure(text=f"{self.frame_idx+1}/{n}{zlab}")
             meta_list = getattr(self, "cur_frame_meta", None)
             if (self.view_kind == "stack" and self.proj_combo.get() == "frame"
                     and meta_list and 0 <= self.frame_idx < len(meta_list)):
                 self.meta_lbl.configure(text=format_point_meta(meta_list[self.frame_idx]))
             else:
                 self.meta_lbl.configure(text="")
-            self.ax.set_title(ttl, fontsize=10)
-            self.ax.set_xlabel("x (pixels)"); self.ax.set_ylabel("y (pixels)")
-            self.rect = _make_rect(self.ax, self._on_rect)
-            if self.sel_box is not None:
-                x0, x1, y0, y1 = self.sel_box
-                self.ax.add_patch(plt_rect(x0, y0, x1 - x0, y1 - y0))
-            self.fig.tight_layout()
+            self.ax.set_xlabel(xlabel); self.ax.set_ylabel(ylabel)
+            if marginal:
+                self.ax_top.set_title(ttl, fontsize=10)
+            else:
+                self.ax.set_title(ttl, fontsize=10)
+            try:
+                bgs = getattr(self, "_bg_status", "")
+                self.coord_lbl.configure(
+                    text=(note + "   |   " + bgs) if bgs else note)
+            except Exception:
+                pass
+
+            if cross_on:
+                self.rect = None                    # crosshair mode: no ROI drag
+                if self._cross_xy is not None:
+                    cx, cy = self._cross_xy
+                    col = int(np.clip(np.searchsorted(xv, cx), 0, data.shape[1] - 1))
+                    row = int(np.clip(np.searchsorted(yv, cy), 0, data.shape[0] - 1))
+                    xcut = data[row, :]; ycut = data[:, col]
+                    self._cross_cuts = {
+                        "x": (np.asarray(xv, float), np.asarray(xcut, float)),
+                        "y": (np.asarray(yv, float), np.asarray(ycut, float)),
+                        "row": row, "col": col, "xlabel": xlabel,
+                        "ylabel": ylabel, "pos": (cx, cy)}
+                    self.ax.axvline(cx, color="cyan", lw=0.9)
+                    self.ax.axhline(cy, color="cyan", lw=0.9)
+                    if self.ax_top is not None:
+                        self.ax_top.plot(xv, xcut, "-", lw=1.1, color="tab:blue")
+                        self.ax_top.set_ylabel("counts", fontsize=8)
+                        self.ax_top.tick_params(labelbottom=False, labelsize=8)
+                        self.ax_top.grid(alpha=0.3)
+                        fx = self._cross_fit_x
+                        if fx and fx.get("ok") and self._fit_matches(fx, xv):
+                            self.ax_top.plot(fx["x_dense"], fx["y_dense"], "-k",
+                                             lw=1.3, label=f"fit R\u00b2={fx['r2']:.3f}")
+                            self.ax_top.legend(fontsize=7, loc="best")
+                    if self.ax_right is not None:
+                        self.ax_right.plot(ycut, yv, "-", lw=1.1, color="tab:red")
+                        self.ax_right.set_xlabel("counts", fontsize=8)
+                        self.ax_right.tick_params(labelleft=False, labelsize=8)
+                        self.ax_right.grid(alpha=0.3)
+                        fy = self._cross_fit_y
+                        if fy and fy.get("ok") and self._fit_matches(fy, yv):
+                            self.ax_right.plot(fy["y_dense"], fy["x_dense"], "-k",
+                                               lw=1.3, label=f"fit R\u00b2={fy['r2']:.3f}")
+                            self.ax_right.legend(fontsize=7, loc="best")
+            else:
+                self.rect = _make_rect(self.ax, self._on_rect)
+                if self.sel_box is not None:
+                    x0, x1, y0, y1 = self.sel_box
+                    self.ax.add_patch(plt_rect(x0, y0, x1 - x0, y1 - y0))
+
+            if not marginal:
+                self.fig.tight_layout()
             self.canvas.draw_idle()
 
         def _on_rect(self, eclick, erelease):
@@ -2440,9 +3609,13 @@ def main(argv=None):
             if None in (x0, y0, x1, y1):
                 return
             self.sel_box = (min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1))
+            c0, c1, r0, r1 = self._box_to_pixels(self.sel_box)
+            unit = (self.img_xlabel.split("(")[-1].rstrip(")")
+                    if "(" in self.img_xlabel else "")
             self.roi_lbl.configure(
-                text=f"cols {int(self.sel_box[0])}–{int(self.sel_box[1])}, "
-                     f"rows {int(self.sel_box[2])}–{int(self.sel_box[3])}")
+                text=f"x [{self.sel_box[0]:.4g}, {self.sel_box[1]:.4g}]  "
+                     f"y [{self.sel_box[2]:.4g}, {self.sel_box[3]:.4g}] {unit}  "
+                     f"({c1 - c0}×{r1 - r0} px)")
 
         def clear_roi(self):
             self.sel_box = None
@@ -2454,30 +3627,162 @@ def main(argv=None):
             if self.view_kind not in ("image", "stack") or self.sel_box is None:
                 messagebox.showinfo("Crop", "Drag a box on the image first.")
                 return
-            data = self._current_image_data()
-            sub, _ = image_crop(data, *self.sel_box)
-            self.show_image(sub, title=getattr(self, "title", "") + " (cropped)")
+            data = self._disp_data if self._disp_data is not None \
+                else self._current_image_data()
+            c0, c1, r0, r1 = self._box_to_pixels(self.sel_box)
+            self.show_image(data[r0:r1, c0:c1],
+                            title=getattr(self, "title", "") + " (cropped)")
 
         def roi_profile(self, axis):
             if self.view_kind not in ("image", "stack"):
                 return
-            data = self._current_image_data()
-            box = self.sel_box
-            xi, col, yi, row = image_profiles(data, box)
+            data = self._disp_data if self._disp_data is not None \
+                else self._current_image_data()
+            if self.sel_box is not None:
+                c0, c1, r0, r1 = self._box_to_pixels(self.sel_box)
+            else:
+                r0, r1, c0, c1 = 0, data.shape[0], 0, data.shape[1]
+            sub = data[r0:r1, c0:c1]
+            xv = self.img_x[c0:c1] if self.img_x is not None else np.arange(c0, c1)
+            yv = self.img_y[r0:r1] if self.img_y is not None else np.arange(r0, r1)
             if axis == "x":
-                self.set_1d(xi, col, xlabel="x (pixels)",
+                self.set_1d(xv, np.nanmean(sub, axis=0), xlabel=self.img_xlabel,
                             ylabel="mean over ROI rows", title="X profile (line-out)")
             else:
-                self.set_1d(yi, row, xlabel="y (pixels)",
+                self.set_1d(yv, np.nanmean(sub, axis=1), xlabel=self.img_ylabel,
                             ylabel="mean over ROI cols", title="Y profile (line-out)")
 
         def roi_stats(self):
             if self.view_kind not in ("image", "stack"):
                 return
-            data = self._current_image_data()
-            s = region_stats_2d(data, self.sel_box)
-            title = "ROI" if self.sel_box is not None else "whole image"
-            messagebox.showinfo(f"Stats — {title}", format_stats_2d(s))
+            data = self._disp_data if self._disp_data is not None \
+                else self._current_image_data()
+            if self.sel_box is not None:
+                c0, c1, r0, r1 = self._box_to_pixels(self.sel_box)
+                sub = data[r0:r1, c0:c1]; scope = "ROI"
+            else:
+                sub = data; scope = "whole image"
+            v = sub[np.isfinite(sub)]
+            if v.size == 0:
+                messagebox.showinfo("Stats", "ROI is empty"); return
+            msg = (f"pixels     {v.size}\n"
+                   f"mean ± std {np.mean(v):.6g} ± {np.std(v):.4g}\n"
+                   f"min / max  {np.min(v):.6g} / {np.max(v):.6g}\n"
+                   f"sum        {np.sum(v):.6g}")
+            messagebox.showinfo(f"Stats — {scope}", msg)
+
+        # -------------------------------------------------------- crosshair --
+        def _toggle_crosshair(self):
+            if not self.crosshair_var.get():
+                self._cross_xy = None
+                self._cross_cuts = None
+            if self.view_kind in ("image", "stack"):
+                self.redraw_image()
+
+        def _on_canvas_click(self, event):
+            if (getattr(self, "ax", None) is None or event.inaxes is not self.ax
+                    or self.view_kind not in ("image", "stack")):
+                return
+            if not (getattr(self, "crosshair_var", None) and self.crosshair_var.get()):
+                return
+            if event.xdata is None or event.ydata is None:
+                return
+            if event.button == 3:                   # right-click -> fit menu
+                if self._cross_cuts is not None:
+                    self._crosshair_menu()
+                return
+            self._place_crosshair(float(event.xdata), float(event.ydata))
+
+        def _place_crosshair(self, x, y):
+            data = self._disp_data
+            if data is None:
+                return
+            xv = self.img_x if self.img_x is not None else np.arange(data.shape[1])
+            yv = self.img_y if self.img_y is not None else np.arange(data.shape[0])
+            col = int(np.clip(np.searchsorted(xv, x), 0, data.shape[1] - 1))
+            row = int(np.clip(np.searchsorted(yv, y), 0, data.shape[0] - 1))
+            self._cross_xy = (float(xv[col]), float(yv[row]))
+            self._cross_fit_x = self._cross_fit_y = None   # fits are position-specific
+            try:
+                self.cross_fit_lbl.configure(text="")
+            except Exception:
+                pass
+            self.redraw_image()      # cuts + marginal line-outs drawn there
+
+        def _crosshair_menu(self):
+            m = tk.Menu(self.root, tearoff=0)
+            m.add_command(label="Fit counts vs x  (horizontal cut)",
+                          command=lambda: self.send_cut_to_fit("x"))
+            m.add_command(label="Fit counts vs y  (vertical cut)",
+                          command=lambda: self.send_cut_to_fit("y"))
+            try:
+                px, py = self.canvas.get_tk_widget().winfo_pointerxy()
+                m.tk_popup(px, py)
+            finally:
+                m.grab_release()
+
+        def send_cut_to_fit(self, which):
+            if not self._cross_cuts:
+                return
+            c = self._cross_cuts
+            xarr, yarr = c[which]
+            if which == "x":
+                xl = c["xlabel"]; ttl = f"x line-out  (y = {c['pos'][1]:.4g})"
+            else:
+                xl = c["ylabel"]; ttl = f"y line-out  (x = {c['pos'][0]:.4g})"
+            self.set_1d(np.asarray(xarr, float), np.asarray(yarr, float),
+                        xlabel=xl, ylabel="counts", title=ttl)
+            try:
+                self.nb.select(1)                   # Fit tab
+            except Exception:
+                pass
+
+        def _fit_matches(self, res, axis_vec):
+            """True if a stored fit was computed for the axis currently shown
+            (guards against stale overlays after transpose / axis-source change)."""
+            try:
+                xd = np.asarray(res["x_dense"], float)
+                tol = 1e-6 + 0.02 * (abs(np.ptp(axis_vec)) + 1e-9)
+                return (abs(xd.min() - np.min(axis_vec)) <= tol
+                        and abs(xd.max() - np.max(axis_vec)) <= tol)
+            except Exception:
+                return False
+
+        def _fit_cut(self, which):
+            """Fit the current counts-vs-x or counts-vs-y line-out with the chosen
+            model and overlay it on the matching marginal panel."""
+            if not self._cross_cuts:
+                messagebox.showinfo("Fit line-out",
+                                    "Turn on the crosshair and click the image to "
+                                    "place it first \u2014 then the line-outs can be fit.")
+                return
+            xarr, yarr = self._cross_cuts[which]
+            name = self.cross_model.get()
+            res = fit_model(name, np.asarray(xarr, float), np.asarray(yarr, float))
+            if not res.get("ok"):
+                self.cross_fit_lbl.configure(
+                    text=f"{which}-fit failed: {res.get('error', 'no convergence')}")
+                messagebox.showinfo("Fit line-out",
+                                    "Fit did not succeed:\n"
+                                    + res.get("error", "unknown error")
+                                    + "\n\nTry a different model.")
+                return
+            if which == "x":
+                self._cross_fit_x = res
+            else:
+                self._cross_fit_y = res
+            parts = [f"{which}: {name}", f"R\u00b2={res['r2']:.4f}"]
+            for nm, val in zip(res.get("pnames", []), res.get("params", [])):
+                parts.append(f"{nm}={val:.4g}")
+            self.cross_fit_lbl.configure(text="   ".join(parts))
+            self.redraw_image()
+
+        def _clear_cut_fits(self):
+            self._cross_fit_x = None
+            self._cross_fit_y = None
+            self.cross_fit_lbl.configure(text="")
+            if self.view_kind in ("image", "stack"):
+                self.redraw_image()
 
         # ------------------------------------------------------ movie player --
         def on_frame_scale(self, val):
