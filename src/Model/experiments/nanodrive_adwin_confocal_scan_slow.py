@@ -107,6 +107,8 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         self.proteus = self.devices['proteus']['instance']
         self.filter_wheel = self.devices['filter_wheel']['instance']
         self.microdrive = self.devices['microdrive']['instance']
+        self.micro_x = None
+        self.micro_y = None
 
     def save_hdf5(self):
         """this function defines its custom data and metadata to be saved and then calls the
