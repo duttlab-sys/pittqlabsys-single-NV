@@ -62,10 +62,17 @@ class Experiment(QObject):
         Parameter('path', '', str, 'path to folder where data is saved'),
         Parameter('tag', 'default_tag'),
         Parameter('save', False, bool, 'check to automatically save data'),
+        Parameter('copy_prior_experiment',
+                  [Parameter('enable', False, bool,
+                             'T/F to copy the configuration from a prior experiment .h5 and override the current settings'),
+                   Parameter('hdf5_path', '', str,
+                             'Full path to a prior experiment .h5 file whose settings will be copied')]),
+
     ]
 
     RAW_DATA_DIR = 'raw_data'  # dir name for rawdata
     SUBEXPERIMENT_DATA_DIR = 'subexperiments_data'  # dir name for subexperiment data
+    _COPY_EXCLUDE_KEYS = {'copy_prior_experiment', 'path', 'tag', 'save', 'filename'}
 
     def __init__(self, name=None, settings=None, devices=None, sub_experiments =None, log_function=None, data_path=None):
         """
@@ -138,6 +145,7 @@ class Experiment(QObject):
             'subexperiment_exec_count': {},
             'subexperiment_exec_duration': {}
         }
+        self.apply_prior_experiment_config()
 
 
     @property
@@ -490,6 +498,7 @@ class Experiment(QObject):
         self.log('starting experiment {:s} at {:s} on {:s}'.format(self.name, self.start_time.strftime('%H:%M:%S'),
                                                                self.start_time.strftime('%d/%m/%y')))
         self._abort = False
+        self.apply_prior_experiment_config()
 
         # saves standard to disk
         if self.settings['save']:
@@ -1672,6 +1681,95 @@ class Experiment(QObject):
         :return: list of axes objects
         """
         return self.get_axes_layout(figure_list)
+
+    def _log_safe(self, msg):
+        try:
+            self.log(msg)
+        except Exception:
+            print(msg)
+
+    @staticmethod
+    def _to_native(val):
+        """h5py/numpy return types -> plain python (float/int/bool/str/list) so restored values slot
+        back into the Parameter tree and stay json-serializable."""
+        if isinstance(val, bytes):        return val.decode('utf-8', errors='replace')
+        if isinstance(val, np.bool_):     return bool(val)
+        if isinstance(val, np.integer):   return int(val)
+        if isinstance(val, np.floating):  return float(val)
+        if isinstance(val, np.str_):      return str(val)
+        if isinstance(val, np.ndarray):   return [Experiment._to_native(v) for v in val.tolist()]
+        if isinstance(val, (list, tuple)): return [Experiment._to_native(v) for v in val]
+        return val
+
+    def _read_settings_from_hdf5(self, filepath):
+        """Return the settings saved under meta/settings in a prior-run .h5 as a plain nested dict,
+        or None if absent. h5py imported lazily so importing this module never hard-requires it."""
+        import h5py
+
+        def group_to_dict(group):
+            out = {}
+            for key, value in group.attrs.items():  # leaf settings = attributes
+                out[key] = self._to_native(value)
+            for key in group.keys():  # nested settings = sub-groups
+                item = group[key]
+                out[key] = group_to_dict(item) if isinstance(item, h5py.Group) else self._to_native(item[()])
+            return out
+
+        with h5py.File(filepath, 'r') as f:
+            grp = None
+            if 'meta' in f and 'settings' in f['meta'] and isinstance(f['meta']['settings'], h5py.Group):
+                grp = f['meta']['settings']
+            elif 'settings' in f and isinstance(f['settings'], h5py.Group):
+                grp = f['settings']
+            return group_to_dict(grp) if grp is not None else None
+
+    def _apply_settings_dict(self, saved, live=None, _top=True):
+        """Copy values from `saved` into self.settings for keys that already exist (so legacy/unknown
+        keys are never injected). Top-level keys in _COPY_EXCLUDE_KEYS are skipped. Returns names changed."""
+        if live is None:
+            live = self.settings
+        changed = []
+        for key in list(live.keys()):
+            if _top and key in self._COPY_EXCLUDE_KEYS:
+                continue
+            if key not in saved:
+                continue
+            cur, new = live[key], saved[key]
+            if isinstance(cur, dict) and isinstance(new, dict):
+                changed.extend(self._apply_settings_dict(new, cur, _top=False))
+            else:
+                try:
+                    live[key] = self._to_native(new)
+                    changed.append(key)
+                except Exception as e:
+                    self._log_safe(f"copy_prior_experiment: skipped '{key}' ({e})")
+        return changed
+
+    def apply_prior_experiment_config(self):
+        """If copy_prior_experiment is enabled, load a prior run's saved settings and override the
+        current configuration. No-op when disabled or the path is unusable; never raises."""
+        if 'copy_prior_experiment' not in self.settings:
+            return
+        cfg = self.settings['copy_prior_experiment']
+        if not cfg.get('enable', False):
+            return
+        path = (cfg.get('hdf5_path') or '').strip()
+        if not path:
+            self._log_safe("copy_prior_experiment enabled but no path given - skipping.");
+            return
+        if not Path(path).is_file():
+            self._log_safe(f"copy_prior_experiment: file not found - skipping: {path}");
+            return
+        try:
+            saved = self._read_settings_from_hdf5(path)
+        except Exception as e:
+            self._log_safe(f"copy_prior_experiment: could not read {path} ({e}) - skipping.");
+            return
+        if not saved:
+            self._log_safe(f"copy_prior_experiment: no saved settings in {path} - skipping.");
+            return
+        changed = self._apply_settings_dict(saved)
+        self._log_safe(f"copy_prior_experiment: restored {len(changed)} setting(s) from {Path(path).name}")
 
 
 if __name__ == '__main__':

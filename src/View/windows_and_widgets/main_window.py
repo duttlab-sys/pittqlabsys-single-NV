@@ -486,31 +486,42 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def _handle_directory_parameter(self, item, column):
         """
-        Special handling for directory parameters - open file dialog.
+        Special handling for directory/file parameters - open the appropriate dialog.
         """
         if column == 1:  # Value column
-            # Check if this parameter is a directory path
             param_name = item.text(0).lower() if item.text(0) else ""
-
-            if any(keyword in param_name for keyword in ['directory', 'folder', 'path']):
-                # Get current value
-                current_value = item.text(1) if item.text(1) else os.path.expanduser("~")
-
-                # Open directory dialog
-                directory = QFileDialog.getExistingDirectory(
+            current_value = item.text(1) if item.text(1) else os.path.expanduser("~")
+            selected = None
+            # HDF5 file parameter: open a FILE picker. Must be checked BEFORE the directory
+            # keywords below, since 'hdf5_path' also contains 'path'.
+            if 'hdf5' in param_name:
+                start_dir = current_value
+                if start_dir and os.path.isfile(start_dir):
+                    start_dir = os.path.dirname(start_dir)
+                elif not (start_dir and os.path.isdir(start_dir)):
+                    start_dir = os.path.expanduser("~")
+                file_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "Select HDF5 file",
+                    start_dir,
+                    "HDF5 files (*.h5 *.hdf5);;All files (*)"
+                )
+                selected = file_path or None
+            # Directory parameter: open a FOLDER picker (unchanged behaviour).
+            elif any(keyword in param_name for keyword in ['directory', 'folder', 'path']):
+                selected = QFileDialog.getExistingDirectory(
                     self,
                     "Select Directory",
                     current_value,
                     QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-                )
-
-                if directory:
-                    item.setText(1, directory)
-                    # Update the parameter value
-                    if hasattr(item, 'value'):
-                        item.value = directory
-                    # Trigger the update
-                    self.update_parameters(self.tree_experiments, item, column)
+                ) or None
+            if selected:
+                item.setText(1, selected)
+                # Update the parameter value
+                if hasattr(item, 'value'):
+                    item.value = selected
+                # Trigger the update
+                self.update_parameters(self.tree_experiments, item, column)
 
     def update_current_data_saving_path(self):
         self.data_saving_path = self.data_saving_tab.current_path()

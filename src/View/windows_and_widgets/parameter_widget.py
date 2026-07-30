@@ -122,6 +122,111 @@ class DirectoryParameterWidget(QWidget):
         self.parameter[self.key] = value
         self.value_edit.setText(str(value))
 
+class FileParameterWidget(QWidget):
+    """
+    Parameter widget for selecting a single existing FILE (with a name filter),
+    e.g. an HDF5 file. Mirrors DirectoryParameterWidget but opens a file dialog
+    (getOpenFileName) instead of a directory dialog.
+    """
+
+
+    valueChanged = pyqtSignal(str, object)  # key, new_value
+
+
+    # default file-type filter; override via the constructor for other types (e.g. .aqs)
+    FILE_FILTER = "HDF5 files (*.h5 *.hdf5);;All files (*)"
+
+
+    def __init__(self, parameter, key=None, parent=None, file_filter=None):
+        if not PYQT5_AVAILABLE:
+            raise ImportError("PyQt5 is required for FileParameterWidget")
+
+
+        super().__init__(parent)
+
+
+        self.parameter = parameter
+        self.key = key or list(parameter.keys())[0] if parameter else None
+        self.file_filter = file_filter or self.FILE_FILTER
+
+
+        if self.key is None:
+            raise ValueError("No parameter key specified")
+
+
+        self._setup_ui()
+        self._connect_signals()
+
+
+    def _setup_ui(self):
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+
+
+        name_label = QLabel(f"{self.key}:")
+        layout.addWidget(name_label)
+
+
+        self.value_edit = QLineEdit()
+        current_value = self.parameter[self.key]
+        self.value_edit.setText(str(current_value))
+        layout.addWidget(self.value_edit)
+
+
+        self.browse_button = QToolButton()
+        self.browse_button.setText("...")
+        self.browse_button.setToolTip("Browse for file")
+        self.browse_button.setMaximumWidth(30)
+        layout.addWidget(self.browse_button)
+
+
+        self.setLayout(layout)
+
+
+    def _connect_signals(self):
+        self.value_edit.textChanged.connect(self._on_value_changed)
+        self.browse_button.clicked.connect(self._on_browse_clicked)
+
+
+    def _on_value_changed(self, text):
+        self.parameter[self.key] = text
+        self.valueChanged.emit(self.key, text)
+
+
+    def _on_browse_clicked(self):
+        """Open a file dialog to select an existing file."""
+        # start in the folder of the current value if it points somewhere sensible
+        current = self.value_edit.text()
+        if current and os.path.isfile(current):
+            start_dir = os.path.dirname(current)
+        elif current and os.path.isdir(current):
+            start_dir = current
+        else:
+            start_dir = os.path.expanduser("~")
+
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select HDF5 file",
+            start_dir,
+            self.file_filter
+        )
+
+
+        if file_path:
+            self.value_edit.setText(file_path)
+            self.parameter[self.key] = file_path
+            self.valueChanged.emit(self.key, file_path)
+
+
+    def get_value(self):
+        return self.parameter[self.key]
+
+
+    def set_value(self, value):
+        self.parameter[self.key] = value
+        self.value_edit.setText(str(value))
+
 
 class ParameterWidget(QWidget):
     """
@@ -478,7 +583,12 @@ def create_parameter_widget(parameter, key=None, parent=None):
             return None
 
         # Check if this is a directory parameter
-        if key and ('directory' in key.lower() or 'folder' in key.lower() or 'path' in key.lower() or 'calibration_file' in key.lower()):
+        if key and 'hdf5' in key.lower():
+            if isinstance(parameter[key], str):
+                return FileParameterWidget(parameter, key, parent)
+            # Check if this is a directory parameter
+        elif key and (
+                'directory' in key.lower() or 'folder' in key.lower() or 'path' in key.lower() or 'calibration_file' in key.lower()):
             # Check if the parameter is a string (typical for paths)
             if isinstance(parameter[key], str):
                 return DirectoryParameterWidget(parameter, key, parent)
