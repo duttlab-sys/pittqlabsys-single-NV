@@ -185,7 +185,6 @@ class ConfocalScan_Fast(Experiment):
 
         step = self.settings['resolution']
         num_points = (y_max - y_min) / step + 1
-        print('num_points',num_points)
         if num_points < 91:
             new_step = self.correct_step(step)
             self.log(f'Works best with minimum 91 pixel resolution in y-direction. You are getting a free resolution upgrade to {new_step} um!')
@@ -227,16 +226,13 @@ class ConfocalScan_Fast(Experiment):
 
         interation_num = 0 #number to track progress
         total_interations = ((x_max - x_min)/step + 1)*((y_max - y_min)/step + 1)       #plus 1 because in total_iterations because range is inclusive ie. [0,10]
-        #print('total_interations=',total_interations)
 
         #formula to set adwin to count for correct time frame. The event section is run every delay*3.3ns so the counter increments for that time then is read and clear
         #time_per_pt is in millisecond and the adwin delay time is delay_value*3.3ns
         adwin_delay = round((self.settings['time_per_pt']*1e6) / (3.3))
-        #print('adwin delay: ',delay)
 
         wf = list(y_array_adj)
         len_wf = len(y_array_adj)
-        #print(len_wf,wf)
         load_read_ratio = self.settings['time_per_pt']/2.0 #used for scaling when rates are different
         num_points_read = int(load_read_ratio*len_wf + 20) #20 is added to compensate for start warm up producing ~15 points of unwanted values
 
@@ -333,14 +329,10 @@ class ConfocalScan_Fast(Experiment):
         #tracker to only save test image once
         self.data_collected = True
 
-        print('Data collected')
         self.data['x_pos'] = x_data
         self.data['y_pos'] = np.array(y_data)
         self.data['raw_counts'] = np.array(raw_count_data)
         self.data['count_rate'] = np.array(count_rate_data)
-        #print('Position Data: ','\n',self.data['x_pos'],'\n',self.data['y_pos'],'\n','Max x: ',np.max(self.data['x_pos']),'Max y: ',np.max(self.data['y_pos']))
-        #print('Counts: ','\n',self.count_data)
-        #print('All data: ',self.data)
 
         self.after_scan()
 
@@ -398,7 +390,6 @@ class ConfocalScan_Fast(Experiment):
                     self.colorbar.setLevels(levels)
 
                     if self.settings['3D_scan']['enable'] and self.data_collected:
-                        print('z =', self.z_inital, 'max counts =', levels[1])
                         axes_list[0].setTitle(f"Confocal Scan with z = {self.z_inital:.2f}")
                         scene = axes_list[0].scene()
                         exporter = ImageExporter(scene)
@@ -409,7 +400,6 @@ class ConfocalScan_Fast(Experiment):
                             folder_path.mkdir(parents=True, exist_ok=True)  # Create directory if it doesn't exist
                             filename = folder_path / f'confocal_scan_z_{self.z_inital:.2f}.png'
                             exporter.export(str(filename))
-                            print(f"Saved 3D scan image to: {filename}")
                         except Exception as e:
                             print(f"Warning: Failed to save 3D scan image: {e}")
                             print(f"Attempted to save to: {folder_path}")
@@ -594,15 +584,12 @@ class ConfocalScan_Slow(Experiment):
 
         interation_num = 0 #number to track progress
         total_interations = ((x_max - x_min)/step + 1)*((y_max - y_min)/step + 1)       #plus 1 because in total_iterations range is inclusive ie. [0,10]
-        #print('total_interations=',total_interations)
 
         #formula to set adwin to count for correct time frame. The event section is run every delay*3.3ns so the counter increments for that time then is read and clear
         #time_per_pt is in millisecond and the adwin delay time is delay_value*3.3ns
         adwin_delay = round((self.settings['time_per_pt']*1e6) / (3.3))
-        #print('adwin delay: ',adwin_delay)  606061 for 2ms and 606061*3.3 ns ~= 2 ms
 
         self.adw.update({'process_1': {'delay': adwin_delay, 'running': True}})
-        # print(adwin_delay * 3.3 * 1e-9)
         # set inital x and y and set nanodrive stage to that position
         self.nd.update({'x_pos': x_min, 'y_pos': y_min})
         sleep(0.1)  # time for stage to move and adwin process to initilize
@@ -618,7 +605,6 @@ class ConfocalScan_Slow(Experiment):
             if forward == True:
                 for y in y_array:
                     y = float(y)
-                    print(x,y)
                     self.nd.update({'y_pos':y})
                     sleep(self.settings['settle_time'])
 
@@ -641,7 +627,6 @@ class ConfocalScan_Slow(Experiment):
             else:
                 for y in reversed_y_array:
                     y = float(y)
-                    print(x,y)
                     self.nd.update({'y_pos':y})
                     sleep(self.settings['settle_time'])
 
@@ -672,14 +657,11 @@ class ConfocalScan_Slow(Experiment):
         # tracker to only save test image once
         self.data_collected = True
 
-        print('Data collected')
         self.data['x_pos'] = x_data
         self.data['y_pos'] = y_data
         self.data['raw_counts'] = raw_counts_data
         self.data['counts'] = count_rate_data
 
-        #print('Position Data: ', '\n', self.data['x_pos'], '\n', self.data['y_pos'], '\n', 'Max x: ',np.max(self.data['x_pos']), 'Max y: ', np.max(self.data['y_pos']))
-        #print('All data: ',self.data)
 
         self.adw.update({'process_2': {'running': False}})
         self.after_scan()
@@ -736,7 +718,6 @@ class ConfocalScan_Slow(Experiment):
                     self.colorbar.setLevels(levels)
 
                     if self.settings['3D_scan']['enable'] and self.data_collected:
-                        print('z =', self.z_inital, 'max counts =', levels[1])
                         axes_list[0].setTitle(f"Confocal Scan with z = {self.z_inital:.2f}")
                         scene = axes_list[0].scene()
                         exporter = ImageExporter(scene)
@@ -747,7 +728,6 @@ class ConfocalScan_Slow(Experiment):
                             folder_path.mkdir(parents=True, exist_ok=True)  # Create directory if it doesn't exist
                             filename = folder_path / f'confocal_scan_z_{self.z_inital:.2f}.png'
                             exporter.export(str(filename))
-                            print(f"Saved 3D scan image to: {filename}")
                         except Exception as e:
                             print(f"Warning: Failed to save 3D scan image: {e}")
                             print(f"Attempted to save to: {folder_path}")
@@ -877,7 +857,6 @@ class Confocal_Point(Experiment):
         original_x = self.nd.read_probes('x_pos')
         original_y = self.nd.read_probes('y_pos')
         original_z = self.nd.read_probes('z_pos')
-        print(f'nanodrive at x = {original_x}, y = {original_y}, z = {original_z}')
 
         sleep(0.1)  # time for stage to move and adwin process to initilize
 
@@ -984,8 +963,6 @@ class Confocal_Point(Experiment):
                 # This also ensures that we are getting counts from the same nanodiamond that we started measuring)
                 if automated_optimization_on:
                     current_counts = (self.adw.read_probes('int_var', id=1) * 1e3) / self.settings['count_time']
-                    print('current counts:', current_counts)
-                    print('cutoff counts:', (min_reoptimize_ratio * highest_counts))
                     if Continuous_optimization_on or (
                             ((self.adw.read_probes('int_var', id=1) * 1e3) / self.settings['count_time']) < (
                             min_reoptimize_ratio * highest_counts)):
@@ -1393,7 +1370,6 @@ class Confocal_Point(Experiment):
                 count_rate_data.pop(0)
                 self.data['raw_counts'] = raw_counts_data
                 self.data['counts'] = count_rate_data
-                #print('Current count rate', self.data['counts'][-1])
 
                 self.progress = 50   #this is a infinite loop till stop button is hit; progress & updateProgress is only here to update plot
                 self.updateProgress.emit(self.progress)     #calling updateProgress.emit triggers _plot
