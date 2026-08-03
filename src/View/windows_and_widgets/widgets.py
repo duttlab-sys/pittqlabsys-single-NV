@@ -140,6 +140,8 @@ class AQuISSQTreeItem(QtWidgets.QTreeWidgetItem):
 
     @value.setter
     def value(self, value):
+        if self.valid_values is int and isinstance(value, float) and value.is_integer():
+            value = int(value)
         if Parameter.is_valid(value, self.valid_values):
             self._value = value
             # check if there is a special case for setting such as a checkbox or combobox

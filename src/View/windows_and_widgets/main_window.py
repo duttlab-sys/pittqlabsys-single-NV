@@ -2291,7 +2291,20 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         gui_logger.debug(f"Received delegate validation result for {item.name}: {result}")
         device, path_to_device = item.get_device()
-        device.update({param_name: result['actual_value']})
+        actual_value = result.get('actual_value')
+        # Only write to the device when the item maps to one, we have a real
+        # value, and validation didn't fail. Experiment/non-device params return
+        # device=None from get_device() — that None was causing the AttributeError.
+        if device is not None and actual_value is not None and result.get('reason') != 'error':
+            # Build the nested update dict from path_to_device, exactly like
+            # update_parameters does. A flat {param_name: value} only reaches
+            # top-level params and silently misses nested ones.
+            dictator = actual_value
+            for element in path_to_device:
+                dictator = {element: dictator}
+            device.update(dictator)
+        elif device is None:
+            gui_logger.debug(f"{item.name} is not a device parameter; skipping device.update()")
 
         # Update the item's display text if the actual value is different
         if result.get('actual_value') is not None and result.get('actual_value') != result.get('requested_value'):
@@ -2318,13 +2331,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             gui_logger.debug(f"MAIN WINDOW: Applying visual feedback '{feedback_status}' for item {item.name}")
 
             # Find the index for this item
-            tree_widget = None
-            for tree in [self.tree_settings, self.tree_experiments]:
-                # Check if this item belongs to this tree
-                if tree.indexOfTopLevelItem(item) >= 0:
-                    tree_widget = tree
-                    gui_logger.debug(f"MAIN WINDOW: Found item {item.name} in tree {tree.objectName()}")
-                    break
+            tree_widget = item.treeWidget()
 
             if tree_widget:
                 # Find the index for the value column (column 1)
