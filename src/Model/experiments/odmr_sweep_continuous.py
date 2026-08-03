@@ -9,16 +9,19 @@ Created: 2024
 License: GPL v2
 """
 import datetime
+from typing import List, Dict, Any, Optional, Tuple, Union
 import numpy as np
 import pyqtgraph as pg
 from scipy.optimize import curve_fit
 from typing import List, Dict, Any
 import time
+import logging
 from scipy.signal import savgol_filter, find_peaks   # add find_peaks
 from PyQt5.QtCore import Qt
 from src.core.experiment import Experiment
 from src.core.parameter import Parameter
 from src.core.struct_hdf5 import MyStruct, save_data, StructArray
+from src.core.adwin_helpers import get_adwin_binary_path
 
 class ODMRSweepContinuousExperiment(Experiment):
     """
@@ -54,7 +57,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('stop', 3.0e9, float, 'Stop frequency in Hz', units='Hz')
         ]),
         Parameter('microwave', [
-            Parameter('enable', False, [True, False],
+            Parameter('enable', True, bool,
                       'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
             Parameter('power', -10.0, float, 'Microwave power in dBm', units='dBm'),
             Parameter('step_freq', 1e6, float, 'Frequency step size in Hz', units='Hz'),
@@ -62,7 +65,20 @@ class ODMRSweepContinuousExperiment(Experiment):
         ]),
         Parameter('acquisition', [
             Parameter('integration_time', 0.001, float, 'Integration time per point in seconds', units='s'),
-            Parameter('averages', 10, int, 'Number of sweep averages'),
+            Parameter('averaging', [
+                Parameter('averages', 10, int,
+                          'Number of full runs to average term-by-term (1 = original behavior)'),
+                Parameter('optimize_between_runs', True, bool,
+                          'Re-optimize confocal position between runs (never in the middle of a run)'),
+                Parameter('opt_xstep', 0.1, float, 'Optimization x step', units='um'),
+                Parameter('opt_ystep', 0.1, float, 'Optimization y step', units='um'),
+                Parameter('opt_zstep', 0.1, float, 'Optimization z step', units='um'),
+                Parameter('opt_settle_time', 2.0, float, 'Settle time after each stage move', units='s'),
+                Parameter('opt_count_time', 2.0, float, 'Counting time per point during optimization', units='ms'),
+                Parameter('opt_num_cycles', 10, int, 'Par_10 cycles for the counter during optimization'),
+                Parameter('opt_damping_ratio', 0.9, float,
+                          'Move to x + damping*(best - x) instead of the raw parabola vertex')
+            ]),
             Parameter('settle_time', 0.01, float, 'Settle time between sweeps', units='s'),
             Parameter('ramp_delay', 0.1, float, 'ramp delay', units='s'),
             Parameter('bidirectional', True, bool, 'Enable bidirectional sweeps (doubles acquisition efficiency)')
@@ -96,8 +112,8 @@ class ODMRSweepContinuousExperiment(Experiment):
         'microwave': 'sg384',
         'adwin': 'adwin',
         'proteus': 'proteus',
-        'filter_wheel': 'filter_wheel'
-        # 'nanodrive': 'nanodrive'  # Optional - not needed for ODMR sweeps
+        'filter_wheel': 'filter_wheel',
+        'nanodrive': 'nanodrive'
     }
     
     _EXPERIMENTS = {}
@@ -116,7 +132,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             data_path: Path for data storage
         """
         super().__init__(name, settings, devices, experiments, log_function, data_path)
-        
+        self.logger = logging.getLogger(__name__)
         # Initialize data storage
         self.frequencies = None
         self.counts_forward = None
@@ -137,6 +153,8 @@ class ODMRSweepContinuousExperiment(Experiment):
                 raise ValueError("SG384 microwave generator is required")
         self.adwin = self.devices.get('adwin', {}).get('instance')
         self.nanodrive = self.devices.get('nanodrive', {}).get('instance')
+        # The confocal optimizer (_optimize_axis / _optimize_position) refers to the
+        # If no nanodrive is available this is None and optimization is skipped.
         self.proteus = self.devices['proteus']['instance']
         self.filter_wheel = self.devices['filter_wheel']['instance']
 
@@ -234,7 +252,201 @@ class ODMRSweepContinuousExperiment(Experiment):
             # Enable output
             self.microwave.enable_output()
 
-        
+    def run_experiment_averaged(self, frequency_range: Optional[List[float]] = None) -> Dict[str, Any]:
+        """
+        Run run_experiment() 'averages' times and average the count arrays
+        term-by-term to beat down noise. Optionally re-optimize the confocal
+        position BETWEEN runs (never in the middle of a run).
+
+        Timing matches your description:
+            run 1 (repeat_count reps, no optimization)
+            -> optimize -> run 2 -> optimize -> run 3 -> ...
+        i.e. optimization happens before runs 2..N, not after the last run.
+
+        Returns a dict containing, for each run i (1-based):
+            signal_i, reference_i, total_i        (int64,  shape [n_freq, n_iter])
+        plus the term-by-term averages:
+            signal_avg, reference_avg, total_avg  (float64, same shape)
+        The legacy keys signal_counts / reference_counts / total_counts are set
+        to the *_avg arrays so the rest of the code (save_hdf5, logging, plots)
+        keeps working with no other changes.
+        """
+        averages = int(self.settings['acquisition']['averaging']['averages'])
+        optimize_between = bool(self.settings['acquisition']['averaging']['optimize_between_runs'])
+        if averages < 1:
+            averages = 1
+
+        results: Dict[str, Any] = {'success': True, 'frequencies': frequency_range}
+        signal_runs, ref_runs, total_runs = [], [], []
+
+        for run_idx in range(1, averages + 1):
+            msg = f"=== Average run {run_idx}/{averages} ==="
+            self.logger.info(msg)
+            print(msg)
+
+            # Optimize BEFORE runs 2..N. Never before run 1, never mid-run.
+            if optimize_between and run_idx > 1:
+                try:
+                    self._optimize_position()
+                except Exception as e:
+                    # Optimization is best-effort: log and keep measuring.
+                    self.logger.error(f"Optimization before run {run_idx} failed (continuing): {e}")
+                    print(f"Optimization before run {run_idx} failed (continuing): {e}")
+
+            run = self.run_experiment(frequency_range)
+            if not run.get('success'):
+                self.logger.error(f"Run {run_idx} failed: {run.get('error')}")
+                return {'success': False,
+                        'error': run.get('error', f'run {run_idx} failed'),
+                        'frequencies': frequency_range}
+
+            s = np.asarray(run['signal_counts'], dtype=np.int64)
+            r = np.asarray(run['reference_counts'], dtype=np.int64)
+            t = np.asarray(run['total_counts'], dtype=np.int64)
+
+            signal_runs.append(s)
+            ref_runs.append(r)
+            total_runs.append(t)
+            results[f'signal_{run_idx}'] = s
+            results[f'reference_{run_idx}'] = r
+            results[f'total_{run_idx}'] = t
+
+        # Term-by-term average across runs (float; fractional averages are correct).
+        signal_avg = np.mean(np.stack(signal_runs, axis=0), axis=0)
+        ref_avg = np.mean(np.stack(ref_runs, axis=0), axis=0)
+        total_avg = np.mean(np.stack(total_runs, axis=0), axis=0)
+
+        results['signal_avg'] = signal_avg
+        results['reference_avg'] = ref_avg
+        results['total_avg'] = total_avg
+
+        # Keep the legacy keys pointing at the averages so nothing downstream breaks.
+        results['signal_counts'] = signal_avg
+        results['reference_counts'] = ref_avg
+        results['total_counts'] = total_avg
+        results['averages'] = averages
+
+        self.logger.info(f"Averaging complete over {averages} run(s)")
+        print(f"Averaging complete over {averages} run(s)")
+        return results
+
+    def _read_opt_counts(self) -> float:
+        """Read the current count rate (cts/s) from the simple counter binary."""
+        raw = self.adwin.read_probes('int_var', id=1)
+        return raw * 1e3 / self._opt_count_time_ms
+
+    def _optimize_axis(self, axis: str, step: float) -> None:
+        """
+        3-point quadratic-fit maximization on one nanodrive axis ('x'/'y'/'z').
+
+        Faithful to the confocal optimizer: step back 2x first to remove backlash,
+        sample minus/old/plus, parabola-fit, move to the vertex, and if a sampled
+        point beat the vertex, damp toward the best sampled point. Out-of-range
+        moves (ARGUMENT_ERROR) are skipped, not fatal.
+        """
+        nd = self.nanodrive
+        pos_key = f'{axis}_pos'
+        opt = self.settings['acquisition']['averaging']
+        settle_time = float(opt['opt_settle_time'])
+        damping_ratio = float(opt['opt_damping_ratio'])
+
+        def move(target) -> bool:
+            try:
+                nd.update({pos_key: target})
+                time.sleep(settle_time)
+                return True
+            except Exception as e:
+                if "ARGUMENT_ERROR" in str(e):
+                    print(f"Skipping {axis} move (out of range): {e}")
+                    return False
+                raise
+
+        def read_pos():
+            return nd.read_probes(pos_key)
+
+        # Back off two steps to take out backlash, then sample minus / old / plus.
+        move(read_pos() - 2 * step)
+        samples = []  # (position, count_rate)
+        for _ in range(3):
+            if move(read_pos() + step):
+                samples.append((read_pos(), self._read_opt_counts()))
+
+        if len(samples) < 3:
+            print(f"Skipping {axis}-optimization: insufficient valid points.")
+            return
+
+        coords = np.array([p for p, _ in samples], dtype=float)
+        counts = np.array([c for _, c in samples], dtype=float)
+        a, b, _c = np.polyfit(coords, counts, 2)
+        if a == 0:  # degenerate (flat) fit -> nothing to do
+            return
+        vertex = float(-b / (2 * a))
+
+        if not move(vertex):
+            return
+        counts_at_vertex = self._read_opt_counts()
+
+        # If a sampled point was actually better than the vertex, damp toward it.
+        best_pos, best_counts = max(samples, key=lambda pc: pc[1])
+        if best_counts > counts_at_vertex:
+            move(vertex + damping_ratio * (best_pos - vertex))
+
+    def _optimize_position(self) -> None:
+        """
+        One-shot confocal re-optimization between averaging runs.
+
+        Reuses your existing counter binary (Averagable_Trial_Counter.TB1) and the
+        same parabolic method as the confocal-point experiment. Does NOT modify any
+        ADbasic source: it loads the counter to read counts, then the next
+        run_experiment() reloads the pulsed state-machine binary via
+        _setup_adwin_counting() and reprograms Proteus, so state self-heals.
+        """
+        nd = getattr(self, 'nanodrive', None)
+        if nd is None:
+            self.logger.warning("No nanodrive available; skipping optimization.")
+            print("No nanodrive available; skipping optimization.")
+            return
+        opt = self.settings['acquisition']['averaging']
+        self._opt_count_time_ms = float(opt['opt_count_time'])
+        num_cycles = int(opt['opt_num_cycles'])
+
+        # --- switch ADwin to the simple counter (does NOT touch ADbasic source) ---
+        self.adwin.stop_process(1)
+        time.sleep(0.1)
+        self.adwin.clear_process(1)
+        counter_path = get_adwin_binary_path('Averagable_Trial_Counter.TB1')
+        self.adwin.update({'process_1': {'load': str(counter_path)}})
+        self.adwin.set_int_var(10, num_cycles)
+        adwin_delay = round((self._opt_count_time_ms * 1e6) / 3.3)
+        self.adwin.update({'process_1': {'delay': adwin_delay, 'running': True}})
+
+        # --- laser on for counting (reprogrammed by the next run) ---
+        try:
+            self.proteus.set_channel_voltage_high(4, self.settings["Laser Control"])
+        except Exception as e:
+            self.logger.warning(f"Could not force laser channel high for optimization: {e}")
+
+        time.sleep(0.2)  # let the stage settle and the counter spin up
+
+        print("Optimizing confocal position between runs (x -> y -> z)...")
+        self._optimize_axis('x', float(opt['opt_xstep']))
+        self._optimize_axis('y', float(opt['opt_ystep']))
+        self._optimize_axis('z', float(opt['opt_zstep']))
+
+        try:
+            final = self._read_opt_counts()
+            print(f"Optimization done: ~{final:.0f} cts/s at "
+                  f"x={nd.read_probes('x_pos'):.3f}, "
+                  f"y={nd.read_probes('y_pos'):.3f}, "
+                  f"z={nd.read_probes('z_pos'):.3f}")
+        except Exception:
+            pass
+
+        # Stop the counter so the next run starts clean (run_experiment reloads the SM).
+        self.adwin.update({'process_1': {'running': False}})
+        self.adwin.stop_process(1)
+        time.sleep(0.1)
+        self.adwin.clear_process(1)
 
     
     def _setup_adwin_sweep(self):
@@ -447,7 +659,7 @@ class ODMRSweepContinuousExperiment(Experiment):
     
     def _initialize_data_arrays(self):
         """Initialize data storage arrays."""
-        averages = self.settings['acquisition']['averages']
+        averages = self.settings['acquisition']['averaging']['averages']
         
         # Main data arrays - bidirectional sweeps return (num_steps-1) points each direction
         actual_steps = self.num_steps - 1  # 299 for bidirectional sweeps
@@ -511,11 +723,30 @@ class ODMRSweepContinuousExperiment(Experiment):
             raise
     
     def _run_sweep_averages(self):
-        """Run multiple sweep averages."""
-        averages = self.settings['acquisition']['averages']
+        """Run multiple sweep averages.
+
+        Optionally re-optimize the confocal position BETWEEN sweeps (never in the
+        middle of a sweep). Timing mirrors run_experiment_averaged():
+
+            sweep 1 (no optimization)
+            -> optimize -> sweep 2 -> optimize -> sweep 3 -> ...
+
+        i.e. optimization happens before sweeps 2..N -- not before sweep 1, and
+        never mid-sweep. Optimization is best-effort: any failure is logged and
+        the run continues.
+
+        Because _optimize_position() swaps in the simple counter binary
+        (Averagable_Trial_Counter.TB1) and stops/clears process 1 when it
+        finishes, we re-run _setup_adwin_sweep() afterwards to reload the sweep
+        counter and restore every Par_*/FPar_* value before the next sweep.
+        """
+        averages = self.settings['acquisition']['averaging']['averages']
+        optimize_between = bool(self.settings['acquisition']['averaging']['optimize_between_runs'])
         settle_time = self.settings['acquisition']['settle_time']
 
         self.log(f"Starting sweep averages: {averages} sweeps")
+        if optimize_between:
+            self.log("Confocal re-optimization ENABLED between sweeps (before sweeps 2..N)")
 
         n_steps = self.num_steps
         half = n_steps - 1               # points per direction
@@ -527,6 +758,22 @@ class ODMRSweepContinuousExperiment(Experiment):
         all_v_rev = np.empty((averages, half), dtype=np.float32)
 
         for avg in range(averages):
+            # Optimize BEFORE sweeps 2..N. Never before sweep 1, never mid-sweep.
+            if optimize_between and avg > 0:
+                try:
+                    self._optimize_position()
+                except Exception as e:
+                    # Optimization is best-effort: log and keep measuring.
+                    self.log(f"Optimization before sweep {avg + 1} failed (continuing): {e}")
+                    print(f"Optimization before sweep {avg + 1} failed (continuing): {e}")
+                # _optimize_position() only touches the ADwin when a nanodrive is
+                # present; if it ran it left process 1 stopped/cleared, so rebuild
+                # the sweep counter (reload binary + re-set all Par_*/FPar_*)
+                # before the next _run_single_sweep().
+                if getattr(self, 'nanodrive', None) is not None:
+                    self.log("Reloading sweep counter after optimization...")
+                    self._setup_adwin_sweep()
+
             self.log(f"Running sweep {avg + 1}/{averages}")
 
             counts, volts = self._run_single_sweep()
@@ -1082,7 +1329,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             'calculated_sweep_rate': f"{self.sweep_rate/1e6:.2f} MHz/s",
             'sweep_time': f"{self.sweep_time:.3f} s",
             'num_steps': self.num_steps,
-            'averages': self.settings['acquisition']['averages'],
+            'averages': self.settings['acquisition']['averaging']['averages'],
             'integration_time': f"{self.settings['acquisition']['integration_time']*1e3:.1f} ms"
         }
 
@@ -1124,7 +1371,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             all_counts_forward=all_forward,  # shape (averages, half)
             all_counts_reverse=all_reverse,  # shape (averages, half)
             all_voltages_forward=all_v_fwd,  # shape (averages, half)
-            n_averages=int(self.settings['acquisition']['averages']),
+            n_averages=int(self.settings['acquisition']['averaging']['averages']),
         )
         structure_to_save.meta = MyStruct(
             settings=settings,
