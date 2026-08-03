@@ -830,6 +830,11 @@
     </item>
     <item>
      <property name="text">
+      <string>Heliotis</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
       <string>CASCADE CCD</string>
      </property>
     </item>
