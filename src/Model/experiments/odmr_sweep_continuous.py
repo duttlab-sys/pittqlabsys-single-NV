@@ -200,9 +200,9 @@ class ODMRSweepContinuousExperiment(Experiment):
         try:
             if self.settings['microwave']['enable'] == True:
                 self.microwave.validate_sweep_parameters(center_freq, deviation)
-            self.log(f"✅ Sweep parameters validated: {center_freq/1e9:.3f} GHz ± {deviation/1e6:.1f} MHz")
+            self.log(f"Sweep parameters validated: {center_freq/1e9:.3f} GHz ± {deviation/1e6:.1f} MHz")
         except ValueError as e:
-            self.log(f"❌ Sweep parameter validation failed: {e}")
+            self.log(f"Sweep parameter validation failed: {e}")
             raise ValueError(f"Invalid sweep parameters: {e}")
         if self.settings['microwave']['enable'] == True:
             # Set center frequency
@@ -241,7 +241,7 @@ class ODMRSweepContinuousExperiment(Experiment):
                     print(f"SG384 setup for external DAC control:{center_freq/1e9:.3f} GHz ± {deviation/1e6:.1f} MHz")
                     self.log(
                         f"Microwave setup for external DAC control: {center_freq / 1e9:.3f} GHz ± {deviation / 1e6:.1f} MHz")
-                    self.log(f"✅ SG384 internal sweep DISABLED - ADwin DAC will control frequency via FM input")
+                    self.log(f"SG384 internal sweep DISABLED - ADwin DAC will control frequency via FM input")
                 else:
                     raise IOError(f"Unknown or Incorrect modulation function : {modfunc}")
         except Exception as e:
@@ -455,7 +455,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             self.adwin.connect()
         
         # Proper cleanup like debug script (bring_up_process function)
-        self.log("🧹 Cleaning up any existing ADwin process...")
+        self.log("Cleaning up any existing ADwin process...")
         try:
             self.adwin.stop_process(1)
             time.sleep(0.1)
@@ -476,64 +476,63 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.bidirectional = self.settings['acquisition'].get('bidirectional', True)
         
         # Debug: Print conversion details
-        self.log(f"🔍 DEBUG - Parameter conversions:")
-        self.log(f"   integration_time: {self.settings['acquisition']['integration_time']} s → {self.integration_time_us} µs")
-        self.log(f"   settle_time: {self.settings['acquisition']['settle_time']} s → {self.settle_time_us} µs")
-        self.log(f"   num_steps: {self.num_steps}")
-        self.log(f"   bidirectional: {self.bidirectional}")
+        self.log(f"DEBUG - Parameter conversions:")
+        self.log(f"integration_time: {self.settings['acquisition']['integration_time']} s → {self.integration_time_us} µs")
+        self.log(f"settle_time: {self.settings['acquisition']['settle_time']} s → {self.settle_time_us} µs")
+        self.log(f"num_steps: {self.num_steps}")
+        self.log(f"bidirectional: {self.bidirectional}")
         
         # Set parameters BEFORE loading/starting process (like debug script)
-        self.log("⚙️  Setting ADwin parameters...")
+        self.log("⚙Setting ADwin parameters...")
         try:
             # Par_1: Number of steps in sweep
-            self.log(f"🔍 Setting Par_1 (N_STEPS) = {self.num_steps}")
+            self.log(f"Setting Par_1 (N_STEPS) = {self.num_steps}")
             self.adwin.set_int_var(1, self.num_steps)
             
             # Par_2: Settle time in microseconds
-            self.log(f"🔍 Setting Par_2 (SETTLE_US) = {self.settle_time_us}")
+            self.log(f"Setting Par_2 (SETTLE_US) = {self.settle_time_us}")
             self.adwin.set_int_var(2, self.settle_time_us)
             
             # Par_3: Dwell/integration time in microseconds
-            self.log(f"🔍 Setting Par_3 (DWELL_US) = {self.integration_time_us}")
-            print(f"🔍 Setting Par_3 (DWELL_US) = {self.integration_time_us}")
+            self.log(f"Setting Par_3 (DWELL_US) = {self.integration_time_us}")
             self.adwin.set_int_var(3, self.integration_time_us)
             
             # Par_4: Edge mode (0=rising, 1=falling) - use rising like debug script
             edge_mode = 0  # Rising edges
-            self.log(f"🔍 Setting Par_4 (EDGE_MODE) = {edge_mode} (rising edges)")
+            self.log(f"Setting Par_4 (EDGE_MODE) = {edge_mode} (rising edges)")
             self.adwin.set_int_var(4, edge_mode)
             
             # Par_5: DAC channel (1 or 2)
             dac_channel = 1  # Use DAC channel 1
-            self.log(f"🔍 Setting Par_5 (DAC_CH) = {dac_channel}")
+            self.log(f"Setting Par_5 (DAC_CH) = {dac_channel}")
             self.adwin.set_int_var(5, dac_channel)
             
             # Par_6: Direction sense (0=DIR Low=up, 1=DIR High=up) - use DIR High=up like debug script
             dir_sense = 1  # DIR High=up
-            self.log(f"🔍 Setting Par_6 (DIR_SENSE) = {dir_sense} (DIR High=up)")
+            self.log(f"Setting Par_6 (DIR_SENSE) = {dir_sense} (DIR High=up)")
             self.adwin.set_int_var(6, dir_sense)
             
             # Par_8: Processdelay_us (0 = auto-calculate, >0 = manual override)
             processdelay_us = 0  # Auto-calculate like debug script
-            self.log(f"🔍 Setting Par_8 (PROCESSDELAY_US) = {processdelay_us} (auto-calculate)")
+            self.log(f"Setting Par_8 (PROCESSDELAY_US) = {processdelay_us} (auto-calculate)")
             self.adwin.set_int_var(8, processdelay_us)
             
             # Par_9: Overhead factor (scaled by 10: 12 = 1.2x)
             overhead_factor_scaled = 12  # 1.2x overhead factor like debug script
-            self.log(f"🔍 Setting Par_9 (OVERHEAD_FACTOR) = {overhead_factor_scaled} (1.2× scaled by 10)")
+            self.log(f"Setting Par_9 (OVERHEAD_FACTOR) = {overhead_factor_scaled} (1.2× scaled by 10)")
             self.adwin.set_int_var(9, overhead_factor_scaled)
             
             # FPar_1: VMIN (voltage range minimum)
             vmin = -1.0  # -1.0V like debug script
-            self.log(f"🔍 Setting FPar_1 (VMIN) = {vmin} V")
+            self.log(f"Setting FPar_1 (VMIN) = {vmin} V")
             self.adwin.set_float_var(1, vmin)
             
             # FPar_2: VMAX (voltage range maximum)
             vmax = 1.0  # +1.0V like debug script
-            self.log(f"🔍 Setting FPar_2 (VMAX) = {vmax} V")
+            self.log(f"Setting FPar_2 (VMAX) = {vmax} V")
             self.adwin.set_float_var(2, vmax)
             
-            self.log("✅ All parameters set successfully!")
+            self.log("All parameters set successfully!")
             self.log(f"   Par_1 (N_STEPS): {self.num_steps}")
             self.log(f"   Par_2 (SETTLE_US): {self.settle_time_us} µs")
             self.log(f"   Par_3 (DWELL_US): {self.integration_time_us} µs")
@@ -544,12 +543,12 @@ class ODMRSweepContinuousExperiment(Experiment):
             self.log(f"   Par_9 (OVERHEAD_FACTOR): {overhead_factor_scaled} (1.2×)")
             
         except Exception as e:
-            self.log(f"❌ Error setting ADwin parameters: {e}")
+            self.log(f"Error setting ADwin parameters: {e}")
             raise RuntimeError(f"Failed to set ADwin parameters: {e}")
         
         # Load ODMR Sweep Counter script (use debug version for now)
         sweep_binary_path = get_adwin_binary_path('ODMR_Sweep_Counter_Debug.TB1')
-        self.log(f"📁 Loading TB1: {sweep_binary_path}")
+        self.log(f"Loading TB1: {sweep_binary_path}")
         self.adwin.update({
             'process_1': {
                 'load': str(sweep_binary_path),
@@ -559,30 +558,30 @@ class ODMRSweepContinuousExperiment(Experiment):
         })
         
         # Start the process once (like debug script)
-        self.log("▶️  Starting ADwin process...")
+        self.log("Starting ADwin process...")
         self.adwin.start_process(1)
         time.sleep(0.1)  # Give process time to start
         
         # Verify process started
         process_status = self.adwin.get_process_status(1)
         if process_status != "Running":
-            self.log(f"❌ Process failed to start! Status: {process_status}")
+            self.log(f"Process failed to start! Status: {process_status}")
             raise RuntimeError("ADwin process failed to start")
         
         # Check signature
         signature = self.adwin.get_int_var(80)
         if signature != 7777:
-            self.log(f"❌ Wrong signature! Expected 7777, got {signature}")
+            self.log(f"Wrong signature! Expected 7777, got {signature}")
             raise RuntimeError("Wrong ADwin script loaded")
         
-        self.log(f"✅ ADwin process started correctly (signature: {signature})")
+        self.log(f"ADwin process started correctly (signature: {signature})")
         
         self.log(f"Adwin sweep setup: {self.num_steps} steps, {self.settings['acquisition']['integration_time']*1e3:.1f} ms per step")
         if self.bidirectional:
-            self.log(f"✅ Bidirectional sweeps enabled - will collect data during both forward and reverse sweeps")
+            self.log(f"Bidirectional sweeps enabled - will collect data during both forward and reverse sweeps")
             self.log(f"   This doubles acquisition efficiency compared to unidirectional sweeps")
         else:
-            self.log(f"ℹ️  Unidirectional sweeps enabled - will collect data during forward sweep only")
+            self.log(f"Unidirectional sweeps enabled - will collect data during forward sweep only")
     
     def _setup_nanodrive(self):
         """Setup MCL nanodrive if available."""
@@ -632,16 +631,16 @@ class ODMRSweepContinuousExperiment(Experiment):
         # Ensure we don't exceed SG384 maximum of 120 Hz
         max_sg384_rate = 120.0  # Hz
         if self.sweep_rate > max_sg384_rate:
-            self.log(f"⚠️  Calculated sweep rate {self.sweep_rate:.2f} Hz exceeds SG384 maximum {max_sg384_rate} Hz")
-            self.log(f"   Using SG384 maximum rate: {max_sg384_rate} Hz")
+            self.log(f"Calculated sweep rate {self.sweep_rate:.2f} Hz exceeds SG384 maximum {max_sg384_rate} Hz")
+            self.log(f"Using SG384 maximum rate: {max_sg384_rate} Hz")
             self.sweep_rate = max_sg384_rate
             # Recalculate sweep time based on SG384 rate limit
             self.sweep_time = 1.0 / self.sweep_rate
-            self.log(f"   New sweep time: {self.sweep_time:.3f} s")
+            self.log(f"New sweep time: {self.sweep_time:.3f} s")
         
         # Triangle waveform - smooth retrace, no delay needed
         self.ramp_delay = 0.0
-        self.log(f"✅ Using TRIANGLE waveform - smooth retrace, no delay needed")
+        self.log(f"Using TRIANGLE waveform - smooth retrace, no delay needed")
         
         # Generate frequency array for data collection
         # For bidirectional sweeps, we get (num_steps-1) points each direction
@@ -765,7 +764,6 @@ class ODMRSweepContinuousExperiment(Experiment):
                 except Exception as e:
                     # Optimization is best-effort: log and keep measuring.
                     self.log(f"Optimization before sweep {avg + 1} failed (continuing): {e}")
-                    print(f"Optimization before sweep {avg + 1} failed (continuing): {e}")
                 # _optimize_position() only touches the ADwin when a nanodrive is
                 # present; if it ran it left process 1 stopped/cleared, so rebuild
                 # the sweep counter (reload binary + re-set all Par_*/FPar_*)
@@ -814,14 +812,14 @@ class ODMRSweepContinuousExperiment(Experiment):
         actual_steps = self.num_steps - 1
         
         # Process should already be running from _setup_adwin_sweep
-        self.log("✅ Using already-running ADwin process")
+        self.log("Using already-running ADwin process")
         
         # Arm the sweep (like debug script)
-        self.log("🚀 Arming sweep...")
+        self.log("Arming sweep...")
         self.adwin.set_int_var(10, 1)  # Par_10 = START
         
         # Wait for heartbeat to start advancing (like debug script)
-        self.log("⏳ Waiting for ADwin heartbeat to start...")
+        self.log("Waiting for ADwin heartbeat to start...")
         initial_hb = self.adwin.get_int_var(25)
         start_time = time.time()
         
@@ -829,18 +827,18 @@ class ODMRSweepContinuousExperiment(Experiment):
             try:
                 current_hb = self.adwin.get_int_var(25)
                 if current_hb > initial_hb:
-                    self.log(f"✅ ADwin heartbeat advancing: {initial_hb} → {current_hb}")
+                    self.log(f"ADwin heartbeat advancing: {initial_hb} → {current_hb}")
                     break
                 time.sleep(0.01)  # 10ms polling
             except Exception as e:
-                self.log(f"⚠️  Transient Get_Par error (tolerated): {e}")
+                self.log(f"Transient Get_Par error (tolerated): {e}")
                 time.sleep(0.01)
         else:
-            self.log("❌ ADwin heartbeat not advancing after 1s - process not running!")
+            self.log("ADwin heartbeat not advancing after 1s - process not running!")
             return np.zeros(2 * actual_steps), np.zeros(2 * actual_steps)
         
         # Clear any stale ready flags first (like debug script)
-        self.log("🧹 Clearing any stale ready flags...")
+        self.log("Clearing any stale ready flags...")
         try:
             self.adwin.set_int_var(20, 0)  # Clear Par_20 (ready flag)
         except Exception as e:
@@ -853,7 +851,7 @@ class ODMRSweepContinuousExperiment(Experiment):
         per_point_s = settle_time + integration_time  # Both already in seconds
         timeout = max(5.0, expected_points * per_point_s * 10)  # Very generous margin
         
-        self.log(f"⏳ Waiting for Par_20 == 1 (sweep ready)…")
+        self.log(f"Waiting for Par_20 == 1 (sweep ready)…")
         self.log(f"   Expected {expected_points} points, timeout: {timeout:.1f}s")
         
         t0 = time.time()
@@ -867,30 +865,30 @@ class ODMRSweepContinuousExperiment(Experiment):
                 elapsed = time.time() - t0
                 
                 if ready == 1:
-                    self.log(f"✅ Sweep ready after {elapsed:.2f}s!")
+                    self.log(f"Sweep ready after {elapsed:.2f}s!")
                     break
                     
                 # Check if heartbeat is still advancing (after 100ms grace period)
                 if hb <= last_hb and elapsed > 0.1:
-                    self.log(f"⚠️  Heartbeat stalled at {hb}!")
+                    self.log(f"Heartbeat stalled at {hb}!")
                     
                 last_hb = hb
                 time.sleep(0.05)
             except Exception as e:
-                self.log(f"⚠️  Transient Get_Par error (tolerated): {e}")
+                self.log(f"Transient Get_Par error (tolerated): {e}")
                 time.sleep(0.05)  # Continue polling despite error
 
             if elapsed > timeout:
-                self.log(f"❌ Timeout after {elapsed:.1f}s (expected ~{expected_points * per_point_s:.1f}s)")
+                self.log(f"Timeout after {elapsed:.1f}s (expected ~{expected_points * per_point_s:.1f}s)")
                 return np.zeros(2 * actual_steps), np.zeros(2 * actual_steps)
         
         # Read arrays (like debug script)
         n_points = self.adwin.get_int_var(21)
         if n_points <= 0:
-            self.log("❌ n_points <= 0 — nothing to read.")
+            self.log("n_points <= 0 — nothing to read.")
             return np.zeros(2 * actual_steps), np.zeros(2 * actual_steps)
         
-        self.log(f"📊 Sweep reports n_points = {n_points}")
+        self.log(f"Sweep reports n_points = {n_points}")
         
         # Read the data arrays
         try:
@@ -907,15 +905,15 @@ class ODMRSweepContinuousExperiment(Experiment):
                 else:
                     volts.append(0.0)  # Invalid digit
             
-            self.log(f"✅ Read {len(counts)} counts, {len(volts)} volts")
+            self.log(f"Read {len(counts)} counts, {len(volts)} volts")
             
         except Exception as e:
-            self.log(f"❌ Error reading arrays: {e}")
+            self.log(f"Error reading arrays: {e}")
             return np.zeros(2 * actual_steps), np.zeros(2 * actual_steps)
         
         # Sanity check: ensure n_points matches expected value
         if n_points != expected_points:
-            self.log(f"❌ CRITICAL: n_points mismatch!")
+            self.log(f"CRITICAL: n_points mismatch!")
             self.log(f"   Expected: {expected_points} points (2*{self.num_steps}-2)")
             self.log(f"   Received: {n_points} points")
             self.log(f"   This indicates ADwin sweep did not complete properly")
@@ -943,14 +941,14 @@ class ODMRSweepContinuousExperiment(Experiment):
         last_state = None
         check_interval = 0.5  # Check every 500ms
         
-        self.log("🔍 Monitoring ADwin sweep progress...")
+        self.log("Monitoring ADwin sweep progress...")
         
         while time.time() - start_time < total_wait_time:
             try:
                 # Check heartbeat
                 current_heartbeat = self.adwin.get_int_var(25)
                 if last_heartbeat is not None and current_heartbeat == last_heartbeat:
-                    self.log(f"⚠️  Warning: ADwin heartbeat not advancing ({current_heartbeat})")
+                    self.log(f"Warning: ADwin heartbeat not advancing ({current_heartbeat})")
                 last_heartbeat = current_heartbeat
                 
                 # Check state
@@ -962,18 +960,18 @@ class ODMRSweepContinuousExperiment(Experiment):
                         35: "NEXT_STEP", 70: "READY"
                     }
                     state_name = state_names.get(current_state, f"UNKNOWN({current_state})")
-                    self.log(f"   State: {current_state} ({state_name})")
+                    self.log(f"State: {current_state} ({state_name})")
                 last_state = current_state
                 
                 # Check if ready (sweep complete)
                 ready_flag = self.adwin.get_int_var(20)
                 if ready_flag == 1:
                     elapsed = time.time() - start_time
-                    self.log(f"✅ Sweep completed early at {elapsed:.2f}s (expected {total_wait_time:.2f}s)")
+                    self.log(f"Sweep completed early at {elapsed:.2f}s (expected {total_wait_time:.2f}s)")
                     break
                     
             except Exception as e:
-                self.log(f"⚠️  Error monitoring ADwin: {e}")
+                self.log(f"Error monitoring ADwin: {e}")
             
             time.sleep(check_interval)
         
@@ -982,9 +980,9 @@ class ODMRSweepContinuousExperiment(Experiment):
             final_heartbeat = self.adwin.get_int_var(25)
             final_state = self.adwin.get_int_var(26)
             final_ready = self.adwin.get_int_var(20)
-            self.log(f"🔍 Final status: heartbeat={final_heartbeat}, state={final_state}, ready={final_ready}")
+            self.log(f"Final status: heartbeat={final_heartbeat}, state={final_state}, ready={final_ready}")
         except Exception as e:
-            self.log(f"⚠️  Could not get final ADwin status: {e}")
+            self.log(f"Could not get final ADwin status: {e}")
     
     def _smooth_data(self, data: np.ndarray) -> np.ndarray:
         """Apply Savitzky-Golay smoothing to the data."""
@@ -1074,67 +1072,6 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.data['all_counts_forward'] = getattr(self, 'all_forward', None)
         self.data['all_counts_reverse'] = getattr(self, 'all_reverse', None)
         self.data['all_voltages_forward'] = getattr(self, 'all_v_fwd', None)
-
-    """def _plot(self, axes_list):
-        #Plot into pyqtgraph. The GUI passes GraphicsLayoutWidget containers, so we fetch/create a PlotItem from each before plotting.
-        if not axes_list:
-            return
-
-        def _plot_item(w):
-            # already a PlotItem/PlotWidget we can draw on
-            if hasattr(w, "plot") and hasattr(w, "clear"):
-                return w
-            # GraphicsLayoutWidget: reuse its existing PlotItem or add one
-            if hasattr(w, "ci") and hasattr(w, "addPlot"):
-                items = [it for it in w.ci.items if isinstance(it, pg.PlotItem)]
-                return items[0] if items else w.addPlot(row=0, col=0)
-            return None
-
-        axes = [pi for pi in (_plot_item(w) for w in axes_list) if pi is not None]
-        if not axes:
-            return
-
-        ax = axes[0]
-        ax.clear()
-
-        if self.frequencies is None or self.counts_averaged is None:
-            return
-        # ... keep the rest of your _plot body unchanged from here ...
-
-        f_ghz = self.frequencies / 1e9
-
-        # pyqtgraph pens (NOT matplotlib 'b-'/linewidth/alpha)
-        ax.plot(f_ghz, self.counts_forward, pen=None, symbol='o', symbolSize=5,
-                symbolBrush='b', symbolPen=None, name='Forward')
-        ax.plot(f_ghz, self.counts_reverse, pen=None, symbol='o', symbolSize=5,
-                symbolBrush='g', symbolPen=None, name='Reverse')
-        ax.plot(f_ghz, self.counts_averaged, pen=None, symbol='o', symbolSize=6,
-                symbolBrush='r', symbolPen=None, name='Averaged')
-
-        if self.resonance_frequencies:
-            for freq in self.resonance_frequencies:
-                ax.addItem(pg.InfiniteLine(pos=freq / 1e9, angle=90,
-                                           pen=pg.mkPen('y', style=Qt.DashLine)))
-
-        # pyqtgraph labels/title (NOT set_xlabel/set_ylabel/set_title/grid)
-        ax.setLabel('bottom', 'Frequency (GHz)')
-        ax.setLabel('left', 'Photon Counts')
-        ax.setTitle('ODMR Continuous Sweep Spectrum')
-        ax.showGrid(x=True, y=True, alpha=0.3)
-
-        # second graph: voltage ramp, if the GUI gave us a second axis
-        if len(axes) > 1:
-            ax2 = axes[1]
-            ax2.clear()
-            if self.voltages is not None:
-                ax2.plot(f_ghz, self.voltages, pen=None, symbol='o', symbolSize=5,
-                         symbolBrush='m', symbolPen=None,
-                         name='Voltage Ramp (SG384 FM Input)')
-                ax2.setLabel('bottom', 'Frequency (GHz)')
-                ax2.setLabel('left', 'Voltage (V)')
-                ax2.setTitle('SG384 FM Input Voltage Ramp')
-                ax2.showGrid(x=True, y=True, alpha=0.3)"""
-
 
     def _plot(self, axes_list):
         """Plot into pyqtgraph. Works whether axes_list holds PlotItems
