@@ -65,7 +65,7 @@ class AQuISSQTreeItem(QtWidgets.QTreeWidgetItem):
                 self.combo_box.addItem(str(item))
             self.combo_box.setCurrentIndex(self.combo_box.findText(str(self.value)))
             self.treeWidget().setItemWidget(self, 1, self.combo_box)
-            self.combo_box.currentIndexChanged.connect(lambda: self.setData(1, 2, self.combo_box))
+            self.combo_box.currentIndexChanged.connect(lambda: self._commit_widget_value(self.combo_box))
             self.combo_box.setFocusPolicy(QtCore.Qt.StrongFocus)
             self._visible = False
 
@@ -74,7 +74,7 @@ class AQuISSQTreeItem(QtWidgets.QTreeWidgetItem):
             self.checkbox = QtWidgets.QCheckBox()
             self.checkbox.setChecked(self.value)
             self.treeWidget().setItemWidget( self, 1, self.checkbox )
-            self.checkbox.stateChanged.connect(lambda: self.setData(1, 2, self.checkbox))
+            self.checkbox.stateChanged.connect(lambda: self._commit_widget_value(self.checkbox))
             self._visible = False
 
         elif isinstance(self.value, Parameter):
@@ -146,9 +146,11 @@ class AQuISSQTreeItem(QtWidgets.QTreeWidgetItem):
             self._value = value
             # check if there is a special case for setting such as a checkbox or combobox
             if self.ui_type == 'checkbox':
-                self.checkbox.setChecked(value)
+                with QtCore.QSignalBlocker(self.checkbox):
+                    self.checkbox.setChecked(value)
             elif self.ui_type == 'combo_box':
-                self.combo_box.setCurrentIndex(self.combo_box.findText(str(self.value)))
+                with QtCore.QSignalBlocker(self.combo_box):
+                    self.combo_box.setCurrentIndex(self.combo_box.findText(str(self.value)))
             else:  # for standard values
                 self.setData(1, 0, value)
         else:
@@ -238,6 +240,36 @@ class AQuISSQTreeItem(QtWidgets.QTreeWidgetItem):
         # Note: Currently not connected anywhere, so commented out to avoid errors
         # if user_editing:
         #     self.editingFinished.emit(None)
+
+    def _commit_widget_value(self, value_widget):
+        """
+        Commit a change coming from a checkbox / combo-box widget.
+
+
+        These widgets never go through the NumberClampDelegate's editor, so on
+        their own they update item.value but never trigger a device update. We
+        set the value as before, then emit the delegate's validation_result_signal
+        so the change flows through the same handler (_handle_delegate_validation_result)
+        that numeric edits use.
+        """
+        # Set item.value exactly as the old direct setData connection did
+        self.setData(1, 2, value_widget)
+
+        tree = self.treeWidget()
+        delegate = tree.itemDelegateForColumn(1) if tree is not None else None
+        if delegate is None or not hasattr(delegate, 'validation_result_signal'):
+            return
+
+        value = self.value
+        param_name = self.name
+        delegate.validation_result_signal.emit(self, param_name, {
+            'valid': True,
+            'message': f"Parameter {param_name} set successfully",
+            'clamped_value': None,
+            'requested_value': value,
+            'actual_value': value,
+            'reason': 'success',
+        })
 
     def cast_type(self, var, cast_type=None):
         """
@@ -772,7 +804,10 @@ class NumberClampDelegate(QtWidgets.QStyledItemDelegate):
             try:
                 num = float(raw)
                 model.setData(index, num, QtCore.Qt.EditRole)
-                model.setData(index, "{:.3g}".format(num), QtCore.Qt.DisplayRole)
+                #model.setData(index, "{:.3g}".format(num), QtCore.Qt.DisplayRole)
+                disp = str(int(num)) if isinstance(num, int) else "{:.3g}".format(num)
+                model.setData(index, disp, QtCore.Qt.DisplayRole)
+
                 # Update the item's internal value
                 if tw_item and hasattr(tw_item, 'value'):
                     tw_item.value = num
@@ -791,6 +826,19 @@ class NumberClampDelegate(QtWidgets.QStyledItemDelegate):
         
         num = _parse_number(raw)
         if num is None:
+            if tw_item is not None and getattr(tw_item, 'valid_values', None) not in (int, float):
+                model.setData(index, raw, QtCore.Qt.EditRole)
+                model.setData(index, raw, QtCore.Qt.DisplayRole)
+                if hasattr(tw_item, 'value'):
+                    tw_item.value = tw_item.cast_type(raw)
+                param_name = tw_item.name
+                self.validation_result_signal.emit(tw_item, param_name, {
+                    'valid': True, 'message': f"Parameter {param_name} set successfully",
+                    'clamped_value': None, 'requested_value': raw,
+                    'actual_value': tw_item.value, 'reason': 'success',
+                })
+                return
+            # genuinely invalid numeric entry -> revert as before
             gui_logger.debug("DELEGATE: Invalid number, reverting editor")
             current_value = index.data(QtCore.Qt.EditRole)
             if current_value is not None:
@@ -839,8 +887,10 @@ class NumberClampDelegate(QtWidgets.QStyledItemDelegate):
         
         # Write final value back to the model
         model.setData(index, final_value, QtCore.Qt.EditRole)
-        model.setData(index, "{:.3g}".format(final_value), QtCore.Qt.DisplayRole)
-        
+        #model.setData(index, "{:.3g}".format(final_value), QtCore.Qt.DisplayRole)
+        disp = str(int(final_value)) if isinstance(final_value, int) else "{:.3g}".format(final_value)
+        model.setData(index, disp, QtCore.Qt.DisplayRole)
+
         # Update the item's internal value
         if hasattr(tw_item, 'value'):
             tw_item.value = final_value
