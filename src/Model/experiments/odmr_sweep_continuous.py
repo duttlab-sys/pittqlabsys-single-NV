@@ -61,8 +61,18 @@ class ODMRSweepContinuousExperiment(Experiment):
                       'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
             Parameter('power', -10.0, float, 'Microwave power in dBm', units='dBm'),
             Parameter('step_freq', 1e6, float, 'Frequency step size in Hz', units='Hz'),
-            Parameter('sweep_function', 'Triangle', str, 'sweep function')
+            Parameter('sweep_function', 'Triangle', str, 'sweep function'),
+            Parameter('MW off after experiment?', True, bool,
+                      "Choose if you want to turn the MW off after the experiment finishes"),
         ]),
+        Parameter('GREEN_LASER',
+                  [
+                      Parameter('Filter Wheel OD', 0,
+                                [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
+                      Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+                                "Laser Control"),
+                      Parameter('Laser off after experiment?', True, bool,
+                                "Choose if you want to turn the laser off after the experiment finishes"), ]),
         Parameter('acquisition', [
             Parameter('integration_time', 0.001, float, 'Integration time per point in seconds', units='s'),
             Parameter('averaging', [
@@ -87,10 +97,6 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('power', 1.0, float, 'Laser power in mW', units='mW'),
             Parameter('wavelength', 532.0, float, 'Laser wavelength in nm', units='nm')
         ]),
-        Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-                  "Laser Control"),
-        Parameter('Filter Wheel OD', 0,
-                  [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('magnetic_field', [
             Parameter('enabled', False, bool, 'Enable magnetic field'),
             Parameter('strength', 0.0, float, 'Magnetic field strength in Gauss', units='G'),
@@ -422,7 +428,7 @@ class ODMRSweepContinuousExperiment(Experiment):
 
         # --- laser on for counting (reprogrammed by the next run) ---
         try:
-            self.proteus.set_channel_voltage_high(4, self.settings["Laser Control"])
+            self.proteus.set_channel_voltage_high(4, self.settings['GREEN_LASER']["Laser Control"])
         except Exception as e:
             self.logger.warning(f"Could not force laser channel high for optimization: {e}")
 
@@ -680,7 +686,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             self.adwin.clear_process(1)
         
         # Disable microwave sweep and output
-        if self.settings['microwave']['enable'] == True:
+        if self.settings['microwave']['enable'] == True and self.settings['microwave']['MW off after experiment?']:
             if self.microwave and self.microwave.is_connected:
                 self.microwave.disable_modulation()
                 self.microwave.disable_output()
@@ -690,10 +696,10 @@ class ODMRSweepContinuousExperiment(Experiment):
     def _function(self):
         """Main experiment function."""
         try:
-            self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
+            self.filter_wheel.update({'OD': self.settings['GREEN_LASER']['Filter Wheel OD']})
             self.log("Starting ODMR Phase Continuous Sweep Experiment")
             self.proteus.set_channel_voltage_high(1, "MAX")
-            self.proteus.set_channel_voltage_high(4, self.settings["Laser Control"])
+            self.proteus.set_channel_voltage_high(4, self.settings['GREEN_LASER']["Laser Control"])
             # Setup experiment and devices first
             self.setup()
             
@@ -706,7 +712,8 @@ class ODMRSweepContinuousExperiment(Experiment):
             self._run_sweep_averages()
             end_time = datetime.datetime.now()
             self.e_t = end_time.strftime("%m_%d_%Y_%H:%M:%S")
-            self.proteus.driver.off()
+            if self.settings['GREEN_LASER']['Laser off after experiment?']:
+                self.proteus.driver.off()
             # Analyze the data
             self._analyze_data()
             

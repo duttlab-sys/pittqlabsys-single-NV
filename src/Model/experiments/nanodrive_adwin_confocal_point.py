@@ -81,16 +81,22 @@ class NanodriveAdwinConfocalPoint(Experiment):
                    Parameter('y',0.0,float,'y-coordinate in microns'),
                    Parameter('z',0.0,float,'z-coordinate in microns')
                    ]),
-        Parameter('Filter Wheel OD', 0,
-                  [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('MICROWAVE',
                   [Parameter('enable', False, bool,
                              'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
                    Parameter('frequency', 2.0e9, float, 'MW Frequency'),
                    Parameter('power', -10.0, float, 'MW Power in dBm'),
+                   Parameter('MW off after experiment?', True, bool,
+                             "Choose if you want to turn the MW off after the experiment finishes"),
                    ]),
-        Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-                  "Laser Control"),
+        Parameter('LASER',
+                  [
+            Parameter('Filter Wheel OD', 0,
+                      [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
+            Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+                      "Laser Control"),
+            Parameter('Laser off after experiment?', True, bool,
+                      "Choose if you want to turn the laser off after the experiment finishes"),]),
         Parameter('count_time', 2.0, float, 'Time in ms at  point to get count data'),
         Parameter('num_cycles', 10, int, 'Number of samples to average; set as Par_10 in adbasic scirpt'),
         Parameter('plot_avg', True, bool, 'T/F to plot average count data'),
@@ -160,7 +166,7 @@ class NanodriveAdwinConfocalPoint(Experiment):
         will be overwritten in the __init__
         """
         self.setup()
-        self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
+        self.filter_wheel.update({'OD': self.settings['LASER']['Filter Wheel OD']})
 
         self.data['counts'] = None
         self.data['raw_counts'] = None
@@ -176,7 +182,7 @@ class NanodriveAdwinConfocalPoint(Experiment):
             self.sg384.set_frequency(frequency)
             self.sg384._send('ENBR 1')
             self.proteus.set_channel_voltage_high(1, "MAX")
-        self.proteus.set_channel_voltage_high(4, self.settings["Laser Control"])
+        self.proteus.set_channel_voltage_high(4, self.settings['LASER']["Laser Control"])
         # set to zero initially for smoother plotting
         count_rate_data = [0] * self.settings['graph_params']['length_data']
         raw_counts_data = [0] * self.settings['graph_params']['length_data']
@@ -716,8 +722,9 @@ class NanodriveAdwinConfocalPoint(Experiment):
 
                 self.progress = 50   #this is a infinite loop till stop button is hit; progress & updateProgress is only here to update plot
                 self.updateProgress.emit(self.progress)     #calling updateProgress.emit triggers _plot
-        self.proteus.driver.off()
-        if self.settings['MICROWAVE']['enable'] == True:
+        if self.settings['LASER']['Laser off after experiment?']:
+            self.proteus.driver.off()
+        if self.settings['MICROWAVE']['enable'] == True and self.settings['MICROWAVE']['MW off after experiment?']:
             self.sg384._send('ENBR 0')
         self.adw.update({'process_1': {'running': False}})
         self.cleanup()

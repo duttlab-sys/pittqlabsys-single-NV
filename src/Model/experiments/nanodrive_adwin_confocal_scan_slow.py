@@ -51,8 +51,6 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
         Parameter('time_per_pt', 5.0, float, 'Time in ms at each point to get counts'),
         Parameter('settle_time',0.2,float,'Time in seconds to allow NanoDrive to settle to correct position'),
         Parameter('ending_behavior', 'return_to_origin', ['return_to_inital_pos', 'return_to_origin', 'leave_at_corner'],'Nanodrive position after scan'),
-        Parameter('Filter Wheel OD', 0,
-                  [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('3D_scan',
                   # steps z from z_min to z_max (inclusive) and takes a full x-y raster at each z. Useful for finding where NVs are in the focal plane
                   [Parameter('enable', False, bool, 'T/F to enable 3D scan'),
@@ -66,8 +64,17 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
                              'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
                    Parameter('frequency', 2.0e9, float, 'MW Frequency'),
                    Parameter('power', -10.0, float, 'MW Power in dBm'),
+                   Parameter('MW off after experiment?', True, bool,
+                             "Choose if you want to turn the MW off after the experiment finishes"),
                    ]),
-        Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], "Laser Control"),
+        Parameter('LASER',
+                  [
+                      Parameter('Filter Wheel OD', 0,
+                                [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
+                      Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+                                "Laser Control"),
+                      Parameter('Laser off after experiment?', True, bool,
+                                "Choose if you want to turn the laser off after the experiment finishes"), ]),
         # !!! If you see horizontial lines in the confocal image, the adwin arrays likely are corrupted. The fix is to reboot the adwin. You will nuke all
         # other process, variables, and arrays in the adwin. This parameter is added to make that easy to do in the GUI.
         Parameter('reboot_adwin', False, bool,'Will reboot adwin when experiment is executed. Useful is data looks fishy'),
@@ -201,7 +208,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
 
         if self.settings['reboot_adwin'] == True:
             self.adw.reboot_adwin()
-        self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
+        self.filter_wheel.update({'OD': self.settings['LASER']['Filter Wheel OD']})
         if self.settings['MICROWAVE']['enable'] == True:
             if not self.sg384.is_connected:
                 self.sg384.connect()
@@ -214,7 +221,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
             self.sg384.set_frequency(frequency)
             self.sg384._send('ENBR 1')
             self.proteus.set_channel_voltage_high(1, "MAX")
-        self.proteus.set_channel_voltage_high(4, self.settings["Laser Control"])
+        self.proteus.set_channel_voltage_high(4, self.settings['LASER']["Laser Control"])
         self.setup_scan()
         sleep(0.1)
 
@@ -383,13 +390,11 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
             self.raw_counts_all.append(np.array(raw_counts_data))
             self.count_rate_all.append(np.array(count_rate_data))
             self.z_values.append(z)
-
-        self.proteus.driver.off()
-        if self.settings['MICROWAVE']['enable'] == True:
+        if self.settings['LASER']['Laser off after experiment?']:
+            self.proteus.driver.off()
+        if self.settings['MICROWAVE']['enable'] == True and self.settings['MICROWAVE']['MW off after experiment?']:
             self.sg384._send('ENBR 0')
-
         self.adw.update({'process_1': {'running': False}})
-
         # ONE end time and ONE save for the whole run -> image_1, image_2, ... in a single file.
         # skipped on abort so a partial run is not written.
         self.e_t = datetime.datetime.now()

@@ -54,8 +54,6 @@ class NanodriveAdwinConfocalScanFast(Experiment):
         Parameter('resolution', 1.0, [2.0,1.0,0.5,0.25,0.1,0.05,0.025,0.001], 'Resolution of each pixel in microns. Limited to give '),
         Parameter('time_per_pt', 2.0, [2.0,5.0], 'Time in ms at each point to get counts; same as load_rate for nanodrive. Wroking values 2 or 5 ms'),
         Parameter('ending_behavior', 'return_to_origin', ['return_to_inital_pos', 'return_to_origin', 'leave_at_corner'],'Nanodrive position after scan'),
-        Parameter('Filter Wheel OD', 0,
-                  [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('3D_scan',
                   [Parameter('enable', False, bool, 'T/F to enable 3D scan'),
                   Parameter('folderpath', '', str, 'folder location to save images at each z-value'),
@@ -63,12 +61,21 @@ class NanodriveAdwinConfocalScanFast(Experiment):
                   Parameter('z_max', 55.0, float, 'end z-position in microns for the 3D scan'),
                   Parameter('z_step', 1.0, float, 'z step size in microns for the 3D scan')]),
         Parameter('MICROWAVE',
-                  [Parameter('enable', False, bool, 'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
+                  [Parameter('enable', False, bool,
+                             'T/F to enable MW while MW is on: DO NOT DO IT IF THE AMP IS NOT POWERED!'),
                    Parameter('frequency', 2.0e9, float, 'MW Frequency'),
                    Parameter('power', -10.0, float, 'MW Power in dBm'),
+                   Parameter('MW off after experiment?', True, bool,
+                             "Choose if you want to turn the MW off after the experiment finishes"),
                    ]),
-        Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-                  "Laser Control"),
+        Parameter('LASER',
+                  [
+                      Parameter('Filter Wheel OD', 0,
+                                [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
+                      Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+                                "Laser Control"),
+                      Parameter('Laser off after experiment?', True, bool,
+                                "Choose if you want to turn the laser off after the experiment finishes"), ]),
         #!!! If you see horizontial lines in the confocal image, the adwin arrays likely are corrupted. The fix is to reboot the adwin. You will nuke all
         #other process, variables, and arrays in the adwin. This parameter is added to make that easy to do in the GUI.
         Parameter('reboot_adwin',False,bool,'Will reboot adwin when experiment is executed. Useful is data looks fishy'),
@@ -204,7 +211,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
 
         if self.settings['reboot_adwin'] == True:
             self.adw.reboot_adwin()
-        self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
+        self.filter_wheel.update({'OD': self.settings['LASER']['Filter Wheel OD']})
         if self.settings['MICROWAVE']['enable'] == True:
             if not self.sg384.is_connected:
                 self.sg384.connect()
@@ -217,7 +224,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
             self.sg384.set_frequency(frequency)
             self.sg384._send('ENBR 1')
             self.proteus.set_channel_voltage_high(1, "MAX")
-        self.proteus.set_channel_voltage_high(4, self.settings["Laser Control"])
+        self.proteus.set_channel_voltage_high(4, self.settings['LASER']["Laser Control"])
         self.setup_scan()
         sleep(0.1)
         # Override scan corners from GUI point-selection if enabled
@@ -446,8 +453,9 @@ class NanodriveAdwinConfocalScanFast(Experiment):
             self.raw_counts_all.append(np.array(raw_count_data))
             self.count_rate_all.append(np.array(count_rate_data))
             self.z_values.append(z)
-        self.proteus.driver.off()
-        if self.settings['MICROWAVE']['enable'] == True:
+        if self.settings['LASER']['Laser off after experiment?']:
+            self.proteus.driver.off()
+        if self.settings['MICROWAVE']['enable'] == True and self.settings['MICROWAVE']['MW off after experiment?']:
             self.sg384._send('ENBR 0')
         # ONE end time and ONE save for the whole run -> image_1, image_2, ... in a single file.
         # skipped on abort so a partial run is not written.
