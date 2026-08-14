@@ -713,6 +713,7 @@ class ODMRSweepContinuousExperiment(Experiment):
             end_time = datetime.datetime.now()
             self.e_t = end_time.strftime("%m_%d_%Y_%H:%M:%S")
             if self.settings['GREEN_LASER']['Laser off after experiment?']:
+                self.log("turning proteus off")
                 self.proteus.driver.off()
             # Analyze the data
             self._analyze_data()

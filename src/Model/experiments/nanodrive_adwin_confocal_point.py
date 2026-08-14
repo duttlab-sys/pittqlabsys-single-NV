@@ -723,6 +723,7 @@ class NanodriveAdwinConfocalPoint(Experiment):
                 self.progress = 50   #this is a infinite loop till stop button is hit; progress & updateProgress is only here to update plot
                 self.updateProgress.emit(self.progress)     #calling updateProgress.emit triggers _plot
         if self.settings['LASER']['Laser off after experiment?']:
+            self.log("turning proteus off")
             self.proteus.driver.off()
         if self.settings['MICROWAVE']['enable'] == True and self.settings['MICROWAVE']['MW off after experiment?']:
             self.sg384._send('ENBR 0')
