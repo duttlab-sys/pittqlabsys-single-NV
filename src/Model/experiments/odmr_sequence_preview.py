@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Written by <Jannet Trabelsi>
 """
 Standalone ODMR sequence preview.
 

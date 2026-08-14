@@ -1,4 +1,5 @@
 #config can tell us which devices the server can host
+# Written by <Jannet Trabelsi>
 from src.core import Parameter, Experiment
 from fastapi import FastAPI
 import uvicorn
