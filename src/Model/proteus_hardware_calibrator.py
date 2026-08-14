@@ -1,4 +1,5 @@
 """
+Written by <Jannet Trabelsi>
 Hardware Calibrator Module
 
 This module handles hardware-specific timing calibrations, such as delays
