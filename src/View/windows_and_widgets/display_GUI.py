@@ -502,6 +502,16 @@ class Display_View(QWidget):
                     self.widget.stop_live_view()
                 except Exception:
                     pass
+                # --- NEW: show one live-style frame the instant we connect ---
+                frame = self.widget.snapshot_one_frame()
+                if frame is not None:
+                    self.img_gray = frame
+                    self.h, self.w = frame.shape
+                    self._apply_crosshair_ranges()
+                    self._match_plot_sizes()
+                    self.build_cascade_controls()  # inttime/gain panel + intensity readout
+                    self.draw_crosshair(getattr(self, "x_selected", 0),
+                                        getattr(self, "y_selected", 0))
         else:
             if self.widget is None:
                 return
