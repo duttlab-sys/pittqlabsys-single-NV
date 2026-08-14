@@ -458,6 +458,23 @@ class ROPER_CASCADE_CCD_View(QWidget):
             timer.stop()
             self._poll_timer = None
 
+    def snapshot_one_frame(self):
+        """Snapshot mode: open the camera if needed, grab ONE frame, size the
+        view to it, and display it. Does NOT start the live poll timer.
+        Returns the raw 2-D frame (or None if the camera didn't open / no frame)."""
+        if self.hcam is None:  # open hardware only once
+            self._init_camera()
+            if self.hcam is None:
+                return None
+        frame = self.get_latest_frame()
+        if frame is None:
+            return None
+        self.h, self.w = frame.shape
+        self.setFixedSize(self.w, self.h + 40)
+        self.label.setFixedSize(self.w, self.h)
+        self.show_frame(frame)  # autoscale + colormap -> label
+        return frame
+
     def closeEvent(self, evt):  # noqa: N802 (Qt override)
         self.stop_live_view()
         if self.hcam is not None:
