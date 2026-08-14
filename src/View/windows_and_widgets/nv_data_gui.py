@@ -1,4 +1,5 @@
 """
+Written by <Jannet Trabelsi>
 nv_data_gui.py — a Tkinter + matplotlib GUI for visualising, analysing and
 fitting our lab's HDF5 data (pulsed ODMR / Rabi / Ramsey / echo, CW-ODMR
 frequency sweeps, confocal raster scans, and camera image stacks).
@@ -796,6 +797,109 @@ def detect_default_view(tree):
     if p is not None:
         return {"mode": "1d", "path": p}
     return {"mode": "none"}
+
+
+# =============================================================================
+# ParameterSweep coordinate picker support: a hdf5_single file is a list of
+# points, each carrying its 2-D image plus the swept-axis values (OD / laser /
+# frequency ...) as scalars. The default view already stacks those images (see
+# find_image_stacks case 3); these helpers let the GUI offer one dropdown per
+# swept axis that jumps the movie player to the matching frame.
+# =============================================================================
+_SWEEP_IMAGE_KEYS = ("count_img", "count_image", "image", "raw_img")
+_SWEEP_BOOKKEEPING = ("index", "status")
+
+
+def _sweep_point_image(point):
+    """The point's 2-D image (squeezed) or None. Prefers the known image keys,
+    then any 2-D array on the point, then anything 2-D under aux/."""
+    if not isinstance(point, dict):
+        return None
+    for k in _SWEEP_IMAGE_KEYS:
+        v = point.get(k)
+        if isinstance(v, np.ndarray) and np.squeeze(v).ndim == 2:
+            return np.squeeze(v)
+    for v in point.values():
+        if isinstance(v, np.ndarray) and np.squeeze(v).ndim == 2:
+            return np.squeeze(v)
+    aux = point.get("aux")
+    if isinstance(aux, dict):
+        for v in aux.values():
+            if isinstance(v, np.ndarray) and np.squeeze(v).ndim == 2:
+                return np.squeeze(v)
+    return None
+
+
+def sweep_frame_info(tree):
+    """If `tree` is a ParameterSweep hdf5_single file, return a dict:
+        {'axis_paths': [...], 'values': {axis: [sorted unique...]},
+         'frame_coords': [{axis: value}, ...], 'lookup': {tuple: frame_index}}
+    where frame i lines up with the image stack the movie player shows (points
+    that carry a 2-D image, in order, at the modal image shape - matching
+    find_image_stacks case 3). Returns None for non-sweep files."""
+    if not isinstance(tree, dict):
+        return None
+    points = tree.get("points")
+    meta = tree.get("meta")
+    # signature of our writer: a points list plus a meta block
+    if not isinstance(points, list) or not isinstance(meta, dict):
+        return None
+    if not any(k in meta for k in ("axis_paths", "n_points_total", "n_points_done")):
+        return None
+
+    cand = []  # (coords, image_shape) for points that have an image, in order
+    for p in points:
+        img = _sweep_point_image(p)
+        if img is None:
+            continue
+        coords = {k: v for k, v in p.items()
+                  if k not in _SWEEP_BOOKKEEPING and k != "aux" and np.isscalar(v)}
+        cand.append((coords, np.squeeze(img).shape))
+    if not cand:
+        return None
+
+    from collections import Counter
+    shp = Counter(s for _, s in cand).most_common(1)[0][0]
+    frame_coords = [c for c, s in cand if s == shp]
+    if not frame_coords:
+        return None
+
+    axis_paths = []
+    ap = meta.get("axis_paths")
+    if isinstance(ap, str) and ap.strip():
+        axis_paths = [s.strip() for s in ap.split("|") if s.strip()]
+    if not axis_paths:
+        common = set(frame_coords[0].keys())
+        for c in frame_coords[1:]:
+            common &= set(c.keys())
+        axis_paths = sorted(common)
+    # keep the axes that are present everywhere; drop any that never vary
+    axis_paths = [ax for ax in axis_paths
+                  if all(ax in c for c in frame_coords)]
+    varying = [ax for ax in axis_paths
+               if len({c[ax] for c in frame_coords}) > 1]
+    if varying:
+        axis_paths = varying
+    if not axis_paths:
+        return None
+
+    values = {ax: sorted({c[ax] for c in frame_coords}) for ax in axis_paths}
+    lookup = {}
+    for i, c in enumerate(frame_coords):
+        lookup.setdefault(tuple(c[ax] for ax in axis_paths), i)
+    return {"axis_paths": axis_paths, "values": values,
+            "frame_coords": frame_coords, "lookup": lookup}
+
+
+def sweep_fmt(v):
+    """Compact label for a coordinate value in a dropdown."""
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, (int, np.integer)):
+        return str(int(v))
+    if isinstance(v, (float, np.floating)):
+        return "%g" % float(v)
+    return str(v)
 
 
 def find_odmr_channels(tree):
@@ -1741,6 +1845,9 @@ def main(argv=None):
             self.cur_image = None          # 2-D array currently shown
             self.cur_frames = None         # (N,H,W) for stacks
             self.frame_idx = 0
+            self._sweep = None             # sweep_frame_info() for the loaded file, or None
+            self._sweep_combos = {}        # axis path -> ttk.Combobox
+            self._sweep_busy = False       # guard while syncing dropdowns to the frame
             self.playing = False
             self.seq_parsed = None         # parsed sequence_text for the preview
             self.seq_index = 0             # current scan point in the preview
@@ -2072,6 +2179,11 @@ def main(argv=None):
             self.proj_combo.current(0)
             self.proj_combo.pack(side="left")
             self.proj_combo.bind("<<ComboboxSelected>>", lambda e: self.redraw_image())
+
+            # ParameterSweep coordinate picker: one dropdown per swept axis (OD /
+            # laser / frequency ...). Built dynamically when such a file is loaded;
+            # hidden otherwise. Selecting values jumps the movie player to that point.
+            self.sweep_row = ttk.Frame(f)      # packed/unpacked by _refresh_sweep_picker
             self.meta_lbl = ttk.Label(f, text="", foreground="#036",
                                       font=("TkFixedFont", 9), wraplength=900,
                                       justify="left")
@@ -2318,6 +2430,7 @@ def main(argv=None):
             self.averaging = find_averaging(self.tree_data)
             self.multiharp = find_multiharp(self.tree_data)
             self.confocal = find_confocal(self.tree_data)
+            self._sweep = sweep_frame_info(self.tree_data)
             self._update_modality_combo()
             self._update_dataset_combo()
             self._update_odmr_combo()
@@ -3264,6 +3377,7 @@ def main(argv=None):
             self.movie_row_state(False)
             self.nb.select(3)
             self.redraw_image()
+            self._refresh_sweep_picker()
 
         # ------------------------------------------- camera light-source mode --
         def _update_modality_combo(self):
@@ -3370,6 +3484,7 @@ def main(argv=None):
             self.proj_combo.set("frame")
             self.nb.select(3)
             self.redraw_image()
+            self._refresh_sweep_picker()
 
         def _current_image_data(self):
             if self.view_kind == "stack":
@@ -3774,6 +3889,10 @@ def main(argv=None):
             parts = [f"{which}: {name}", f"R\u00b2={res['r2']:.4f}"]
             for nm, val in zip(res.get("pnames", []), res.get("params", [])):
                 parts.append(f"{nm}={val:.4g}")
+                if nm == "sigma":  # Gaussian width
+                    parts.append(f"FWHM={2.3548 * abs(val):.4g}")
+                elif nm == "hw" or (nm[:1] == "w" and nm[1:].isdigit()):
+                    parts.append(f"FWHM={2 * abs(val):.4g}")  # Lorentzian HWHM -> FWHM
             self.cross_fit_lbl.configure(text="   ".join(parts))
             self.redraw_image()
 
@@ -3795,6 +3914,7 @@ def main(argv=None):
                 if self.proj_combo.get() != "frame":
                     self.proj_combo.set("frame")
                 self.redraw_image()
+                self._sync_sweep_to_frame()
 
         def step_frame(self, d):
             if self.view_kind != "stack":
@@ -3808,6 +3928,7 @@ def main(argv=None):
             finally:
                 self._scale_busy = False
             self.redraw_image()
+            self._sync_sweep_to_frame()
 
         def toggle_play(self):
             if self.view_kind != "stack":
@@ -3831,6 +3952,82 @@ def main(argv=None):
                 self.play_btn.configure(text="▶ Play")
             except Exception:
                 pass
+
+        # -------------------------------------------- sweep coordinate picker --
+        def _refresh_sweep_picker(self):
+            """Show one dropdown per swept axis when the current stack is a
+            ParameterSweep file whose points line up with the shown frames; hide
+            the row otherwise. Safe to call after every view change."""
+            sw = self._sweep
+            active = (sw is not None and self.view_kind == "stack"
+                      and self.cur_frames is not None
+                      and len(sw["frame_coords"]) == self.cur_frames.shape[0])
+            for child in self.sweep_row.winfo_children():
+                child.destroy()
+            self._sweep_combos = {}
+            if not active:
+                self.sweep_row.pack_forget()
+                return
+            ttk.Label(self.sweep_row, text="pick point:").pack(side="left")
+            for ax in sw["axis_paths"]:
+                ttk.Label(self.sweep_row, text="   " + ax + ":").pack(side="left")
+                cb = ttk.Combobox(self.sweep_row, state="readonly", width=11,
+                                  values=[sweep_fmt(v) for v in sw["values"][ax]])
+                cb.pack(side="left")
+                cb.bind("<<ComboboxSelected>>", self._on_sweep_pick)
+                self._sweep_combos[ax] = cb
+            self.sweep_pick_lbl = ttk.Label(self.sweep_row, text="",
+                                            foreground="#036")
+            self.sweep_pick_lbl.pack(side="left", padx=(10, 0))
+            self.sweep_row.pack(fill="x", pady=(4, 0))
+            self._sync_sweep_to_frame()
+
+        def _on_sweep_pick(self, *_):
+            sw = self._sweep
+            if not sw or not self._sweep_combos:
+                return
+            try:
+                sel = tuple(sw["values"][ax][self._sweep_combos[ax].current()]
+                            for ax in sw["axis_paths"])
+            except Exception:
+                return
+            idx = sw["lookup"].get(sel)
+            if idx is None:                       # combination never measured
+                if hasattr(self, "sweep_pick_lbl"):
+                    self.sweep_pick_lbl.configure(text="(not measured)")
+                return
+            self.frame_idx = idx                  # drive the existing player
+            self.proj_combo.set("frame")
+            self._scale_busy = True               # don't let .set() re-trigger
+            try:
+                self.frame_scale.set(idx)
+            finally:
+                self._scale_busy = False
+            self.redraw_image()
+            self._sync_sweep_to_frame()
+
+        def _sync_sweep_to_frame(self):
+            """Point the dropdowns at whichever frame is currently shown, so they
+            track the slider / play / step buttons."""
+            sw = self._sweep
+            if not sw or not self._sweep_combos:
+                return
+            i = self.frame_idx
+            if not (0 <= i < len(sw["frame_coords"])):
+                return
+            coords = sw["frame_coords"][i]
+            self._sweep_busy = True
+            try:
+                for ax in sw["axis_paths"]:
+                    try:
+                        self._sweep_combos[ax].current(sw["values"][ax].index(coords[ax]))
+                    except Exception:
+                        pass
+                if hasattr(self, "sweep_pick_lbl"):
+                    self.sweep_pick_lbl.configure(
+                        text="frame %d/%d" % (i + 1, len(sw["frame_coords"])))
+            finally:
+                self._sweep_busy = False
 
         # -------------------------------------------------- sequence preview --
         def show_sequence(self, text):
