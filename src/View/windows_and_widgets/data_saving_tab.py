@@ -1,3 +1,4 @@
+#Written by <Jannet Trabelsi>
 from PyQt5.QtWidgets import (
     QWidget, QTreeView, QVBoxLayout, QHBoxLayout,
     QLineEdit, QFileSystemModel, QToolButton
