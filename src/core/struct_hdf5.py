@@ -1,4 +1,5 @@
 """
+Written by <Jonathan Beamariage> & <Jannet Trabelsi>
 MATLAB-style struct / struct-array save & load using HDF5 (+ SWMR-ready).
 """
 
@@ -59,7 +60,6 @@ def save_data(filename, obj, mode="w", swmr=True):
         if isinstance(obj, StructArray):
             _write_structarray(f, obj)
         else:
-            print(f"obj{obj}")
             _write_mystruct(f, obj)
 
         if swmr and mode in ("w", "r+"):
@@ -68,7 +68,15 @@ def save_data(filename, obj, mode="w", swmr=True):
 
 
 def load_data(filename):
-    with h5py.File(filename, "r", libver="latest", swmr=True) as f:
+    # Try SWMR read first (only works for files a SWMR writer opened / that
+    # have the SWMR superblock). Fall back to a normal read for regular HDF5
+    # files — e.g. anything saved before SWMR was added, or written elsewhere.
+    # Opening those with swmr=True raises, which is what was breaking reads.
+    try:
+        f = h5py.File(filename, "r", libver="latest", swmr=True)
+    except (OSError, ValueError):
+        f = h5py.File(filename, "r")
+    with f:
         obj = MyStruct()
         _read_mystruct(f, obj)
         return obj
@@ -101,6 +109,8 @@ def _write_value(h5group, name, value):
 
     # Scalars & strings → attributes
     elif np.isscalar(value) or isinstance(value, str):
+        if name in h5group:
+            del h5group[name]
         h5group.attrs[name] = value
 
     elif isinstance(value, dict):
@@ -117,14 +127,13 @@ def _write_value(h5group, name, value):
             arr = np.asarray(value)
             if name in h5group:
                 del h5group[name]
+            h5group.attrs.pop(name, None)
             h5group.create_dataset(
             name,
             data=arr,
             chunks=True)
         except Exception:
             h5group.attrs[name] = str(value)
-            """print(f"Failed to create {name}")
-            raise Exception"""
 
 
 # ============================================================
@@ -149,6 +158,8 @@ def _read_mystruct(h5group, mystruct):
 
     # Datasets / subgroups
     for name, obj in h5group.items():
+        if name in mystruct.__dict__:
+            continue
         if isinstance(obj, h5py.Dataset):
             mystruct.__dict__[name] = obj[()]
 
@@ -304,8 +315,6 @@ if __name__ == "__main__":
     save_data("example.h5", obj)
     loaded = load_data("example.h5")
 
-    print(loaded)
-    print(loaded[1].matrix)
     # PARAM HELPERS EXAMPLE USAGE
     """Save spectrum analyzer defaults
     save_parameters_hdf5(
