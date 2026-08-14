@@ -1,4 +1,5 @@
 """
+#Written by <Jannet Trabelsi>
 plot_pulsed_hdf5.py — pick a saved pulsed-experiment HDF5, choose the
 experiment type in a popup, and fit + plot it.
 ========================================================================
