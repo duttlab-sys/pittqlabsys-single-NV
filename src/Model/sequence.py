@@ -105,7 +105,6 @@ class Sequence:
                     continue
 
                 mk_markers = mk.generate_markers()
-                print("mk_markers dtype:", mk_markers.dtype)
 
                 # Check first pulse
                 on_indices = np.where(mk_markers != 0)[0]

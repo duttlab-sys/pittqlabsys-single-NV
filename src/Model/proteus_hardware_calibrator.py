@@ -295,7 +295,6 @@ class ProteusHardwareCalibrator:
 
             logger.debug(f"Shifting {pulse.name} from {start_sample} to {new_start_sample} "
                          f"(delay: {delay_ns}ns = {delay_samples} samples)")
-            print(f"Shifting {pulse.name} from {start_sample} to {new_start_sample} delay: {delay_ns}ns = {delay_samples} samples")
 
             # Add the pulse at the new timing
             calibrated_sequence.add_pulse(new_start_sample, pulse)
@@ -318,7 +317,6 @@ class ProteusHardwareCalibrator:
 
             logger.debug(f"Shifting {marker.name} marker from {marker.on_index} to {new_on_index} "
                          f"(delay: {delay_ns}ns = {delay_samples} samples)")
-            print(f"Shifting {marker.name} marker from {marker.on_index} to {new_on_index}. max_delay = {max_delay}samples. delay: {delay_ns}ns = {delay_samples} samples")
             marker.length = sequence.length + max_delay
             marker.on_index = new_on_index
             marker.off_index = new_off_index

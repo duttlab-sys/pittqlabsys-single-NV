@@ -157,15 +157,10 @@ class SequenceTextParser:
                 if line.startswith("sequence:"):
                     header_info = self._parse_sequence_header(line)
                     sequence_name = header_info.get("name", sequence_name)
-                    print(f"name {sequence_name}")
                     experiment_type = header_info.get("type", experiment_type)
-                    print(f"type {experiment_type}")
                     total_duration = header_info.get("duration", total_duration)
-                    print(f"duration {total_duration}")
                     sample_rate = header_info.get("sample_rate", sample_rate)
-                    print(f"sample_rate {sample_rate}")
                     repeat_count = header_info.get("repeat_count", repeat_count)
-                    print(f"repeat_count {repeat_count}")
                     i += 1
 
                 elif line.startswith("variable"):
@@ -177,14 +172,10 @@ class SequenceTextParser:
                         steps=steps,
                         unit=unit
                     )
-                    print(f"variable name {var_name}")
-                    print(start_val, stop_val, steps, unit)
                     i += 1
 
                 elif line.startswith("loop"):
-                    print("inside elif line.startswith(loop):")
                     loop_desc, lines_consumed = self._parse_loop_block(lines[i:])
-                    print(f"loop desc: {loop_desc} lines consumed: {lines_consumed}")
                     loops.append(loop_desc)
                     i += lines_consumed
 
@@ -207,8 +198,6 @@ class SequenceTextParser:
                 elif line.startswith("marker"):
                     try:
                         marker_desc = self._parse_marker_line(line)
-                        print("marker:")
-                        print(marker_desc)
                         markers.append(marker_desc)
                     except ParseError as e:
                         # Log warning but continue parsing
@@ -218,17 +207,12 @@ class SequenceTextParser:
                 else:
                     # Assume it's a pulse line
                     try:
-                        print("here 1")
                         pulse_desc = self._parse_pulse_line(line)
-                        print("here 2")
-                        print("pulse:")
-                        print(pulse_desc)
                         pulses.append(pulse_desc)
                     except ParseError as e:
                         # Log warning but continue parsing
                         print(f"Warning: Skipping invalid pulse line '{line}': {e}")
                     i += 1
-            print("after while loops:")
             # Validate single variable scanning
             if len(self.parser_variables) > 1:
                 raise ParseError(
@@ -293,7 +277,6 @@ class SequenceTextParser:
             timing = self._parse_timing_expression(timing_str)
             # Parse duration
             duration_val = self._parse_timing_expression(duration)
-            print("creating MarkerDescription")
             # Create pulse description
             return MarkerDescription(
                 name=f"{marker_name_index}",
@@ -454,7 +437,6 @@ class SequenceTextParser:
                                 parameters[param_name] = float(param_value)
                             except ValueError:
                                 parameters[param_name] = param_value
-            print("creating PulseDescription")
             # Create pulse description
             return PulseDescription(
                 name=f"{pulse_type.replace('/', '_')}_{channel}",
@@ -467,8 +449,7 @@ class SequenceTextParser:
                 parameters=parameters,
                 fixed_timing=fixed_timing
             )
-            print("done creating PulseDescription")
-            
+
         except Exception as e:
             if isinstance(e, ParseError):
                 raise
@@ -577,7 +558,6 @@ class SequenceTextParser:
         """
         if not lines or not lines[0].startswith("loop"):
             raise ParseError("Invalid loop block start")
-        print(lines[0])
         # Parse loop header
         header = lines[0]
         loop_match = re.match(r"loop\s+([A-Za-z_]\w*):$", header)
@@ -602,12 +582,8 @@ class SequenceTextParser:
         for line in lines[1:end_index]:
             if line.strip() and not line.startswith("#"):
                 try:
-                    print("before pulse = self._parse_pulse_line(line)")
                     pulse = self._parse_pulse_line(line)
-                    print("after pulse = self._parse_pulse_line(line)")
                     loop_pulses.append(pulse)
-                    print("loop pulse:")
-                    print(pulse)
                 except ParseError as e:
                     print(f"Warning: Skipping invalid pulse in loop: {line} - {e}")
         
