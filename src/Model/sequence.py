@@ -130,32 +130,42 @@ class Sequence:
 
     def plot(self, *, show_markers: bool = True, ax=None):
         """
-        Quick‐and‐dirty plot of the sequence:
-          - Red line: analog envelope
-          - Green step: digital markers (if requested)
-        Returns the (fig, ax) tuple so we can customize or save it.
+        Quick-and-dirty plot of the sequence, one line per channel:
+          - analog envelope per channel
+          - dashed step plot of that channel's markers (if requested)
+        Returns the (fig, ax) tuple so it can be customized or saved.
         """
-        wave = self.to_waveform()
-        env = wave['envelope']
-        mks = wave['markers']
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            raise ImportError("matplotlib is required for plotting. Install with: pip install matplotlib")
+
+
+        wave = self.to_waveform()   # {channel: {'envelope': ndarray, 'markers': ndarray}}
+
 
         if ax is None:
             fig, ax = plt.subplots(figsize=(6, 3))
         else:
             fig = ax.get_figure()
 
-        x = range(self.length)
-        ax.plot(x, env, label='Envelope')
-        if show_markers:
-            # scale marker to 10% of max envelope
-            scale = max(env) * 0.1 if env.any() else 1.0
-            ax.step(x, mks * scale, where='post', label='Markers', linestyle='--')
+
+        x = np.arange(self.length)
+        for ch in sorted(wave):
+            env = wave[ch]['envelope']
+            ax.plot(x, env, label=f'Ch {ch} envelope')
+            if show_markers:
+                mks = wave[ch]['markers']
+                scale = env.max() * 0.1 if env.any() else 1.0
+                ax.step(x, mks * scale, where='post', linestyle='--', label=f'Ch {ch} markers')
+
+
         ax.set_xlabel('Sample Index')
         ax.set_ylabel('Amplitude')
         ax.legend(loc='best')
         ax.set_title(repr(self))
-
         return fig, ax
+
     def __repr__(self) -> str:
         return (f"<Sequence length={self.length}  "
                 f"pulses={len(self.pulses)}  markers={len(self.markers)}>")

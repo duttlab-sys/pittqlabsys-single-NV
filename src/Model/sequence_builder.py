@@ -149,30 +149,16 @@ class SequenceBuilder:
         raise NotImplementedError("Preset integration not yet implemented")
     
     def optimize_for_memory_constraints(self, sequence: Sequence, max_samples_per_chunk: int) -> List[Sequence]:
-        """
-        Split a sequence into memory-optimized chunks for any hardware.
-        
-        Args:
-            sequence: Original sequence to optimize
-            max_samples_per_chunk: Maximum samples allowed per chunk
-            
-        Returns:
-            List of optimized sequences that fit within memory constraints
-            
-        Raises:
-            OptimizationError: If optimization fails
-        """
         try:
-            if len(sequence.waveform) <= max_samples_per_chunk:
-                # No optimization needed
+            # Sequence has no materialized buffer; its sample count is `length`
+            if sequence.length <= max_samples_per_chunk:
                 return [sequence]
-            
-            # Find optimal split points
+
+
             split_points = self._find_optimal_split_points(sequence, max_samples_per_chunk)
-            
-            # Split the sequence
             return self._split_sequence_at_boundaries(sequence, max_samples_per_chunk)
-            
+
+
         except Exception as e:
             raise OptimizationError(f"Failed to optimize sequence: {e}")
 
@@ -202,7 +188,7 @@ class SequenceBuilder:
             if not description.variables:
                 # No variables to scan, return single sequence
                 optimized_sequence = self.build_sequence(description)
-                self.sample_rate = optimized_sequence["sample_rate"]
+                self.sample_rate = optimized_sequence.metadata["sample_rate"]
                 main_sequence = optimized_sequence.sequences[0]
                 main_sequence.name = f"{description.name}_scan"
                 return [main_sequence]
@@ -696,91 +682,40 @@ class SequenceBuilder:
             return getattr(sequence, 'length', 0)
     
     def _split_sequence_at_boundaries(self, sequence: Sequence, max_samples: int) -> List[Sequence]:
-        """
-        Split a sequence at natural boundaries to fit memory constraints.
-        
-        Args:
-            sequence: Sequence to split
-            max_samples: Maximum samples per chunk
-            
-        Returns:
-            List of split sequences
-        """
-        # For now, implement a simple splitting strategy
-        # In a more sophisticated version, we'd split at pulse boundaries
-        
-        if not hasattr(sequence, 'waveform'):
-            # If sequence doesn't have waveform yet, we can't split
-            return [sequence]
-        
-        waveform = sequence.waveform
-        try:
-            total_samples = len(waveform)
-        except (TypeError, AttributeError):
-            # If we can't get the length (e.g., Mock objects), return the original sequence
-            return [sequence]
-        
+        total_samples = sequence.length
         if total_samples <= max_samples:
             return [sequence]
-        
-        # Check if waveform supports slicing (for real numpy arrays)
-        try:
-            # Test slicing to see if this is a real waveform or a mock
-            test_slice = waveform[0:1]
-            supports_slicing = True
-        except (TypeError, IndexError):
-            # Mock objects or other non-sliceable objects
-            supports_slicing = False
-        
-        if not supports_slicing:
-            # For mock objects or non-sliceable waveforms, return the original sequence
-            return [sequence]
-        
-        # Simple splitting at max_samples boundaries
+
+
         chunks = []
         for start in range(0, total_samples, max_samples):
             end = min(start + max_samples, total_samples)
-            chunk_length = end - start
-            
-            # Create new sequence for this chunk
-            chunk_sequence = Sequence(chunk_length)
-            
-            # Copy waveform data
-            chunk_waveform = waveform[start:end]
-            # Note: This is a simplified approach - in practice we'd need to
-            # handle pulses and markers properly across chunk boundaries
-            
-            chunks.append(chunk_sequence)
-        
+            chunk = Sequence(end - start)
+
+
+            # re-home any pulse whose start index lands in this chunk
+            for p_start, pulse in sequence.pulses:
+                if start <= p_start < end:
+                    chunk.add_pulse(p_start - start, pulse)
+
+
+            # re-home markers by their on_index, rebuilt against the chunk length
+            for mk in sequence.markers:
+                if start <= mk.on_index < end:
+                    chunk.add_marker(MarkerEvent(
+                        name=mk.name,
+                        length=chunk.length,
+                        on_index=mk.on_index - start,
+                        off_index=min(mk.off_index - start, chunk.length),
+                    ))
+            chunks.append(chunk)
         return chunks
     
     def _find_optimal_split_points(self, sequence: Sequence, max_samples: int) -> List[int]:
-        """
-        Find optimal points to split a sequence for memory optimization.
-        
-        Args:
-            sequence: Sequence to analyze
-            max_samples: Maximum samples per chunk
-            
-        Returns:
-            List of sample indices for splitting
-        """
-        # For now, return simple split points
-        # In a more sophisticated version, we'd analyze pulse boundaries
-        
-        if not hasattr(sequence, 'waveform'):
-            return []
-        
-        total_samples = len(sequence.waveform)
+        total_samples = sequence.length
         if total_samples <= max_samples:
             return []
-        
-        # Simple splitting at max_samples boundaries
-        split_points = []
-        for i in range(max_samples, total_samples, max_samples):
-            split_points.append(i)
-        
-        return split_points
+        return list(range(max_samples, total_samples, max_samples))
 
     def plot_sequence(self, sequence: Sequence, title: str = None, 
                      show_legend: bool = True, save_path: str = None) -> 'matplotlib.figure.Figure':
