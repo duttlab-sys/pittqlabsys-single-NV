@@ -51,6 +51,11 @@
     </item>
     <item>
      <property name="text">
+      <string>asi_lx_4000</string>
+     </property>
+    </item>
+    <item>
+     <property name="text">
       <string>Newport_Conex_microdrive</string>
      </property>
     </item>
