@@ -65,6 +65,10 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('MW off after experiment?', True, bool,
                       "Choose if you want to turn the MW off after the experiment finishes"),
         ]),
+        Parameter('constant_frequency', [
+            Parameter('disable sweep and enable constant frequency', False, bool,
+                      "enable this to do single frequency (in this case, it is used for background subtraction but the x axis in this case will remain the same even though it is wrong so you can save your data and in analysis you check background subtraction and you select the saved file with single frequency)"),
+            Parameter('frequency', 2.0e9, float, 'The constant frequency at which you need to run the experiment')]),
         Parameter('GREEN_LASER',
                   [
                       Parameter('Filter Wheel OD', 0,
@@ -204,13 +208,13 @@ class ODMRSweepContinuousExperiment(Experiment):
         
         # Validate sweep parameters using SG384 validation
         try:
-            if self.settings['microwave']['enable'] == True:
+            if self.settings['microwave']['enable'] == True and self.settings['constant_frequency']['disable sweep and enable constant frequency'] == False:
                 self.microwave.validate_sweep_parameters(center_freq, deviation)
             self.log(f"Sweep parameters validated: {center_freq/1e9:.3f} GHz ± {deviation/1e6:.1f} MHz")
         except ValueError as e:
             self.log(f"Sweep parameter validation failed: {e}")
             raise ValueError(f"Invalid sweep parameters: {e}")
-        if self.settings['microwave']['enable'] == True:
+        if self.settings['microwave']['enable'] == True and self.settings['constant_frequency']['disable sweep and enable constant frequency'] == False:
             # Set center frequency
             self.microwave.set_frequency(center_freq)
 
@@ -222,8 +226,10 @@ class ODMRSweepContinuousExperiment(Experiment):
             self.microwave.set_modulation_function("External")  # Don't enable internal modulation
             self.microwave.set_sweep_function('External')     # SFNC 5
             # set external mod input coupling = DC  (front panel, or add COUP to driver)
+        elif self.settings['microwave']['enable'] == True and self.settings['constant_frequency']['disable sweep and enable constant frequency'] == True:
+            self.microwave.set_frequency(self.settings['constant_frequency']['frequency'])
         try:
-            if self.settings['microwave']['enable'] == True:
+            if self.settings['microwave']['enable'] == True and self.settings['constant_frequency']['disable sweep and enable constant frequency'] == False:
                 modfunc = self.microwave.read_probes('modulation_function')
                 modtype = self.microwave.read_probes("modulation_type")
                 sweepfunc = self.microwave.read_probes("sweep_function")
@@ -253,8 +259,11 @@ class ODMRSweepContinuousExperiment(Experiment):
         except Exception as e:
             print("Issue with modulation function or type:",e)
         if self.settings['microwave']['enable'] == True:
-            # Enable modulation
-            self.microwave.enable_modulation()
+            if self.settings['constant_frequency']['disable sweep and enable constant frequency'] == False:
+                # Enable modulation
+                self.microwave.enable_modulation()
+            else:
+                self.microwave.disable_modulation()
             # Enable output
             self.microwave.enable_output()
 
@@ -850,7 +859,6 @@ class ODMRSweepContinuousExperiment(Experiment):
             # Experiment derives from self.progress — same mechanism the confocal
             # scan uses (self.updateProgress.emit).
             self.progress = 100. * (avg + 1) / averages
-            print(f"[ODMR] emit progress={self.progress}  (sweep {avg + 1}/{averages})")
             self.updateProgress.emit(int(round(self.progress)))
 
             if avg < averages - 1:
