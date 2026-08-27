@@ -721,7 +721,7 @@ class NanodriveAdwinConfocalPoint(Experiment):
                 #print('Current count rate', self.data['counts'][-1])
 
                 self.progress = 50   #this is a infinite loop till stop button is hit; progress & updateProgress is only here to update plot
-                self.updateProgress.emit(self.progress)     #calling updateProgress.emit triggers _plot
+                self.updateProgress.emit(int(round(self.progress)))     #calling updateProgress.emit triggers _plot
         if self.settings['LASER']['Laser off after experiment?']:
             self.log("turning proteus off")
             self.proteus.driver.off()

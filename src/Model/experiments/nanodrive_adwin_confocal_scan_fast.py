@@ -433,7 +433,7 @@ class NanodriveAdwinConfocalScanFast(Experiment):
                 # updates process bar and plots count_img so far
                 interation_num = interation_num + len(y_array)
                 self.progress = 100. * (interation_num + 1) / total_interations
-                self.updateProgress.emit(self.progress)
+                self.updateProgress.emit(int(round(self.progress)))
 
             # tracker to only save test image once
             self.data_collected = True

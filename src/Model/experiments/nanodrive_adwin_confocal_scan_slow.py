@@ -369,7 +369,7 @@ class NanodriveAdwinConfocalScanSlow(Experiment):
 
                 interation_num = interation_num + len(y_array)
                 self.progress = 100. * (interation_num + 1) / total_interations
-                self.updateProgress.emit(self.progress)
+                self.updateProgress.emit(int(round(self.progress)))
 
             # finalise this slice's data (this drives the live plot for the current slice)
             self.data['x_pos'] = x_data
