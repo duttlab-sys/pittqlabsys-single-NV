@@ -2500,30 +2500,33 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         Returns:
 
         """
-        gui_logger.debug(f"Status update received: progress = {progress}")
+        try:
+            gui_logger.debug(f"Status update received: progress = {progress}")
 
-        # interval at which the gui will be updated, if requests come in faster than they will be ignored
-        update_interval = 0.2
+            # interval at which the gui will be updated, if requests come in faster than they will be ignored
+            update_interval = 0.2
 
-        now = datetime.datetime.now()
+            now = datetime.datetime.now()
 
-        if not self._last_progress_update is None and now-self._last_progress_update < datetime.timedelta(seconds=update_interval):
-            gui_logger.debug("Status update ignored - too frequent")
-            return
+            if not self._last_progress_update is None and now-self._last_progress_update < datetime.timedelta(seconds=update_interval):
+                gui_logger.debug("Status update ignored - too frequent")
+                return
 
-        self._last_progress_update = now
-        gui_logger.debug(f"Updating progress bar to {progress}")
+            self._last_progress_update = now
+            gui_logger.debug(f"Updating progress bar to {progress}")
 
-        self.progressBar.setValue(progress)
+            self.progressBar.setValue(int(progress))
 
-        experiment = self.current_experiment
-
-        # Estimate remaining time if progress has been made
-        if progress:
-            remaining_time = str(datetime.timedelta(seconds=experiment.remaining_time.seconds))
-            self.lbl_time_estimate.setText('time remaining: {:s}'.format(remaining_time))
-        if experiment is not str(self.tabWidget.tabText(self.tabWidget.currentIndex())).lower() in ['experiments', 'devices']:
-            self.plot_experiment(experiment)
+            experiment = self.current_experiment
+            # Estimate remaining time if progress has been made
+            if progress:
+                remaining_time = str(datetime.timedelta(seconds=experiment.remaining_time.seconds))
+                self.lbl_time_estimate.setText('time remaining: {:s}'.format(remaining_time))
+            if experiment is not str(self.tabWidget.tabText(self.tabWidget.currentIndex())).lower() in ['experiments', 'devices']:
+                self.plot_experiment(experiment)
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
 
     @pyqtSlot()
