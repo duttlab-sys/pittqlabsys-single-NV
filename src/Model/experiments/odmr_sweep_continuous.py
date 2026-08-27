@@ -627,7 +627,7 @@ class ODMRSweepContinuousExperiment(Experiment):
         
         # Calculate sweep time based on integration time and settle time per step
         time_per_step = integration_time + settle_time
-        self.sweep_time = self.num_steps * time_per_step
+        self.sweep_time = (2 * self.num_steps - 2) * time_per_step
         
         # For SG384 continuous sweep, we need to match the sweep rate to our desired timing
         # The SG384 sweep rate should be calculated to match our integration requirements
@@ -661,7 +661,56 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.log(f"Sweep cycle time: {self.sweep_time:.3f} s")
         self.log(f"Frequency range: {start_freq/1e9:.3f} - {stop_freq/1e9:.3f} GHz")
         self.log(f"Frequency deviation: {abs(stop_freq - start_freq)/1e6:.1f} MHz")
-    
+
+    @staticmethod
+    def _fmt_hms(seconds: float) -> str:
+        """Format a duration (seconds) as a compact h/m/s string."""
+        seconds = int(round(max(0.0, seconds)))
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        if h:
+            return f"{h}h {m}m {s}s"
+        if m:
+            return f"{m}m {s}s"
+        return f"{s}s"
+
+    def _estimate_experiment_time(self) -> float:
+        """Estimate total wall-clock time for the whole run, in seconds.
+
+
+        total = (one bidirectional sweep) * (number of averages)
+                + optimization time, only if re-optimization is enabled.
+
+
+        Requires _calculate_sweep_parameters() to have run first: it uses
+        self.sweep_time (already the corrected 2*num_steps-2 single-sweep time).
+        """
+        avg_cfg = self.settings['acquisition']['averaging']
+        averages = max(1, int(avg_cfg['averages']))
+
+        # One bidirectional sweep, times the number of averaged sweeps.
+        total = self.sweep_time * averages
+
+        # Optimization runs BEFORE sweeps 2..N, so (averages - 1) times.
+        # Per optimization: ~6 stage moves per axis over x/y/z, each dominated
+        # by opt_settle_time.
+        if bool(avg_cfg['optimize_between_runs']):
+            moves_per_axis = 6
+            axes = 3
+            per_opt = moves_per_axis * axes * float(avg_cfg['opt_settle_time'])
+            total += max(0, averages - 1) * per_opt
+
+        return total
+
+    def _log_time_estimate(self) -> None:
+        """Log a single up-front estimate for the current settings."""
+        avg_cfg = self.settings['acquisition']['averaging']
+        averages = max(1, int(avg_cfg['averages']))
+        total = self._estimate_experiment_time()
+        note = " (incl. confocal re-optimization)" if bool(avg_cfg['optimize_between_runs']) else ""
+        self.log(f"Estimated experiment time: ~{self._fmt_hms(total)} "
+                 f"= {averages} × ~{self._fmt_hms(self.sweep_time)}/sweep{note}")
+
     def _initialize_data_arrays(self):
         """Initialize data storage arrays."""
         averages = self.settings['acquisition']['averaging']['averages']
@@ -702,9 +751,13 @@ class ODMRSweepContinuousExperiment(Experiment):
             self.proteus.set_channel_voltage_high(4, self.settings['GREEN_LASER']["Laser Control"])
             # Setup experiment and devices first
             self.setup()
-            
+
             # Calculate sweep parameters first
             self._calculate_sweep_parameters()
+
+            # Log an up-front estimate of how long this run will take.
+            self._log_time_estimate()
+
             start_time = datetime.datetime.now()
             self.s_t = start_time.strftime("%m_%d_%Y_%H:%M:%S")
 
@@ -792,6 +845,14 @@ class ODMRSweepContinuousExperiment(Experiment):
             all_v_fwd[avg, :] = volts[:half]
             all_v_rev[avg, :] = volts[half:]
 
+            # Feed the GUI progress bar + "time remaining" label. main_window's
+            # update_status() reads experiment.remaining_time, which the base
+            # Experiment derives from self.progress — same mechanism the confocal
+            # scan uses (self.updateProgress.emit).
+            self.progress = 100. * (avg + 1) / averages
+            print(f"[ODMR] emit progress={self.progress}  (sweep {avg + 1}/{averages})")
+            self.updateProgress.emit(int(round(self.progress)))
+
             if avg < averages - 1:
                 time.sleep(settle_time)
 
@@ -811,129 +872,111 @@ class ODMRSweepContinuousExperiment(Experiment):
         self.log("Sweep averages completed")
     
     def _run_single_sweep(self):
-        """Run a single frequency sweep (following debug script pattern exactly).
-        
+        """Run a single frequency sweep and return ONE freshly-completed sweep.
+
+
+        Synchronization is gated on Par_27 (the ADbasic sweep-complete counter,
+        incremented once per full bidirectional sweep in state 35). We snapshot it,
+        release the ready-handshake (clear Par_20) so the ADwin advances to the next
+        sweep, then wait until Par_27 has advanced before reading Data_1/Data_2. This
+        guarantees every call returns a new, complete sweep -- never a re-read of the
+        same buffer -- so averaging over N calls averages N independent sweeps.
+
+
         Returns:
             tuple: (counts, volts) - Raw arrays with 2*num_steps-2 points total
         """
-        # Define actual_steps for error returns
         actual_steps = self.num_steps - 1
-        
-        # Process should already be running from _setup_adwin_sweep
-        self.log("Using already-running ADwin process")
-        
-        # Arm the sweep (like debug script)
-        self.log("Arming sweep...")
-        self.adwin.set_int_var(10, 1)  # Par_10 = START
-        
-        # Wait for heartbeat to start advancing (like debug script)
-        self.log("Waiting for ADwin heartbeat to start...")
+
+
+        # Process is already loaded/started in _setup_adwin_sweep; make sure it's armed.
+        self.adwin.set_int_var(10, 1)  # Par_10 = START/run
+
+
+        # --- confirm the process is alive (heartbeat advancing) ---
         initial_hb = self.adwin.get_int_var(25)
         start_time = time.time()
-        
-        while time.time() - start_time < 1.0:  # Wait up to 1 second
+        while time.time() - start_time < 1.0:
             try:
-                current_hb = self.adwin.get_int_var(25)
-                if current_hb > initial_hb:
-                    self.log(f"ADwin heartbeat advancing: {initial_hb} → {current_hb}")
+                if self.adwin.get_int_var(25) > initial_hb:
                     break
-                time.sleep(0.01)  # 10ms polling
+                time.sleep(0.01)
             except Exception as e:
                 self.log(f"Transient Get_Par error (tolerated): {e}")
                 time.sleep(0.01)
         else:
             self.log("ADwin heartbeat not advancing after 1s - process not running!")
             return np.zeros(2 * actual_steps), np.zeros(2 * actual_steps)
-        
-        # Clear any stale ready flags first (like debug script)
-        self.log("Clearing any stale ready flags...")
-        try:
-            self.adwin.set_int_var(20, 0)  # Clear Par_20 (ready flag)
-        except Exception as e:
-            self.log(f"Warning: Could not clear ready flag: {e}")
-        
-        # Wait for sweep to complete (like debug script)
-        expected_points = max(2, 2 * self.num_steps - 2)  # Bidirectional sweep
-        integration_time = self.settings['acquisition']['integration_time']  # Already in seconds
-        settle_time = self.settings['acquisition']['settle_time']  # Already in seconds
-        per_point_s = settle_time + integration_time  # Both already in seconds
-        timeout = max(5.0, expected_points * per_point_s * 10)  # Very generous margin
-        
-        self.log(f"Waiting for Par_20 == 1 (sweep ready)…")
-        self.log(f"   Expected {expected_points} points, timeout: {timeout:.1f}s")
-        
+
+
+        # --- gate on the sweep-complete counter Par_27 ---
+        # 1) snapshot BEFORE releasing the ADwin
+        base_sweep = self.adwin.get_int_var(27)
+        # 2) clear READY so the ADwin leaves state 70 and fills a FRESH buffer
+        self.adwin.set_int_var(20, 0)  # Par_20 = 0 (release only; not used as data-ready)
+
+
+        # timeout: one full bidirectional sweep + generous margin
+        expected_points = max(2, 2 * self.num_steps - 2)
+        integration_time = self.settings['acquisition']['integration_time']
+        settle_time = self.settings['acquisition']['settle_time']
+        per_point_s = settle_time + integration_time
+        timeout = max(5.0, expected_points * per_point_s * 10)
+
+
+        self.log(f"Waiting for Par_27 to advance past {base_sweep} (new full sweep)…")
         t0 = time.time()
-        last_hb = self.adwin.get_int_var(25)
-        
         while True:
             try:
-                ready = self.adwin.get_int_var(20)  # ready flag
-                hb = self.adwin.get_int_var(25)     # heartbeat
-                state = self.adwin.get_int_var(26)  # current state
-                elapsed = time.time() - t0
-                
-                if ready == 1:
-                    self.log(f"Sweep ready after {elapsed:.2f}s!")
+                sweeps_done = self.adwin.get_int_var(27)
+                if sweeps_done > base_sweep:
+                    self.log(f"New sweep complete: Par_27 {base_sweep} -> {sweeps_done} "
+                             f"after {time.time() - t0:.2f}s")
                     break
-                    
-                # Check if heartbeat is still advancing (after 100ms grace period)
-                if hb <= last_hb and elapsed > 0.1:
-                    self.log(f"Heartbeat stalled at {hb}!")
-                    
-                last_hb = hb
-                time.sleep(0.05)
+                time.sleep(0.02)
             except Exception as e:
                 self.log(f"Transient Get_Par error (tolerated): {e}")
-                time.sleep(0.05)  # Continue polling despite error
-
-            if elapsed > timeout:
-                self.log(f"Timeout after {elapsed:.1f}s (expected ~{expected_points * per_point_s:.1f}s)")
+                time.sleep(0.02)
+            if time.time() - t0 > timeout:
+                self.log(f"Timeout after {timeout:.1f}s waiting for Par_27 to advance")
                 return np.zeros(2 * actual_steps), np.zeros(2 * actual_steps)
-        
-        # Read arrays (like debug script)
+
+
+        # --- read the freshly-completed buffer ---
+        # ADwin is now parked in state 70 holding this sweep; it will not overwrite
+        # Data_1 until Par_20 is cleared again (start of the next call).
         n_points = self.adwin.get_int_var(21)
         if n_points <= 0:
             self.log("n_points <= 0 — nothing to read.")
             return np.zeros(2 * actual_steps), np.zeros(2 * actual_steps)
-        
-        self.log(f"Sweep reports n_points = {n_points}")
-        
-        # Read the data arrays
+
+
         try:
-            counts = self.adwin.read_probes('int_array', 1, n_points)  # Data_1
+            counts = self.adwin.read_probes('int_array', 1, n_points)      # Data_1
             dac_digits = self.adwin.read_probes('int_array', 2, n_points)  # Data_2
-            
-            # Compute volts from DAC digits
             volts = []
             for d in dac_digits:
                 d_int = int(d)
                 if 0 <= d_int <= 65535:
-                    volt = (d_int * 20.0 / 65535.0) - 10.0
-                    volts.append(volt)
+                    volts.append((d_int * 20.0 / 65535.0) - 10.0)
                 else:
-                    volts.append(0.0)  # Invalid digit
-            
-            self.log(f"Read {len(counts)} counts, {len(volts)} volts")
-            
+                    volts.append(0.0)
         except Exception as e:
             self.log(f"Error reading arrays: {e}")
             return np.zeros(2 * actual_steps), np.zeros(2 * actual_steps)
-        
-        # Sanity check: ensure n_points matches expected value
+
+
         if n_points != expected_points:
-            self.log(f"CRITICAL: n_points mismatch!")
-            self.log(f"   Expected: {expected_points} points (2*{self.num_steps}-2)")
-            self.log(f"   Received: {n_points} points")
-            self.log(f"   This indicates ADwin sweep did not complete properly")
+            self.log(f"CRITICAL: n_points mismatch! expected {expected_points}, got {n_points}")
             return np.zeros(2 * actual_steps), np.zeros(2 * actual_steps)
-        
-        # Convert to numpy arrays
+
+
         counts = np.array(counts)
         volts = np.array(volts)
-        
-        # Clear ready flag for next sweep
-        self.adwin.set_int_var(20, 0)
-        
+
+
+        # Do NOT clear Par_20 here — it's cleared at the start of the next call,
+        # which is what releases the ADwin to run the following sweep.
         return counts, volts
 
     def _analyze_data(self):
