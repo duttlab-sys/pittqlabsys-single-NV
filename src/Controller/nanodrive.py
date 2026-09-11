@@ -752,6 +752,8 @@ class MCLNanoDrive(Device):
 
 if __name__ == '__main__':
     nd = MCLNanoDrive()
-    print(nd.is_connected)
-    print(nd.get_position("x"))
+    nd.home_axes()
+    nd.get_position('x')
+    nd.get_position('y')
+    nd.get_position('z')
     nd.close()
