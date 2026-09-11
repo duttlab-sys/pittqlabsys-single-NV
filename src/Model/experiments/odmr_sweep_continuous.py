@@ -84,6 +84,15 @@ class ODMRSweepContinuousExperiment(Experiment):
                           'Number of full runs to average term-by-term (1 = original behavior)'),
                 Parameter('optimize_between_runs', True, bool,
                           'Re-optimize confocal position between runs (never in the middle of a run)'),
+                Parameter('optimization_mode', "convergence", ["convergence", "fit"],
+                          'Re-optimization_mode for confocal position'),
+                Parameter('opt_max_steps', 20, int,
+                          'convergence mode only: max steps to climb per axis (safety cap so a '
+                          'noisy axis cannot walk off forever)'),
+                Parameter('opt_improve_frac', 0.02, float,
+                          'convergence mode only: a step must raise counts by more than this '
+                          'fraction (0.02 = 2%) to be accepted, so it climbs real signal '
+                          'instead of chasing shot noise'),
                 Parameter('opt_xstep', 0.1, float, 'Optimization x step', units='um'),
                 Parameter('opt_ystep', 0.1, float, 'Optimization y step', units='um'),
                 Parameter('opt_zstep', 0.1, float, 'Optimization z step', units='um'),
@@ -91,7 +100,24 @@ class ODMRSweepContinuousExperiment(Experiment):
                 Parameter('opt_count_time', 2.0, float, 'Counting time per point during optimization', units='ms'),
                 Parameter('opt_num_cycles', 10, int, 'Par_10 cycles for the counter during optimization'),
                 Parameter('opt_damping_ratio', 0.9, float,
-                          'Move to x + damping*(best - x) instead of the raw parabola vertex')
+                          'Move to x + damping*(best - x) instead of the raw parabola vertex'),
+                # --- retention safety net (ported from the confocal-point optimizer) ---
+                Parameter('min_retention_ratio', 0.5, float,
+                          'If post-optimization counts < min_retention_ratio * best-known counts, '
+                          'snap back toward the best-known position'),
+                Parameter('acceptable_counts', 2500000.0, float,
+                          'Do not update the best-known baseline to counts above '
+                          'acceptable_counts * acceptable_counts_ratio (rejects noise spikes). '
+                          'Set this a little above your real maximum cts/s.'),
+                Parameter('acceptable_counts_ratio', 1.1, float,
+                          'See acceptable_counts'),
+                Parameter('min_reoptimize_ratio', 0.5, float,
+                          'Only used when reoptimize_only_if_needed is True: skip the x/y/z pass '
+                          'when current counts >= min_reoptimize_ratio * best-known counts'),
+                Parameter('reoptimize_only_if_needed', True, bool,
+                          'If True, skip optimization before a run when counts are still healthy '
+                          '(fewer stage moves = less drift). If False, optimize before every run 2..N '
+                          'and rely on the retention net to prevent walking off.')
             ]),
             Parameter('settle_time', 0.01, float, 'Settle time between sweeps', units='s'),
             Parameter('ramp_delay', 0.1, float, 'ramp delay', units='s'),
@@ -354,10 +380,12 @@ class ODMRSweepContinuousExperiment(Experiment):
         """
         3-point quadratic-fit maximization on one nanodrive axis ('x'/'y'/'z').
 
-        Faithful to the confocal optimizer: step back 2x first to remove backlash,
-        sample minus/old/plus, parabola-fit, move to the vertex, and if a sampled
-        point beat the vertex, damp toward the best sampled point. Out-of-range
-        moves (ARGUMENT_ERROR) are skipped, not fatal.
+
+        Step back 2x first to remove backlash, sample minus/old/plus, parabola-fit.
+        The parabola vertex is trusted ONLY when the fit is concave-down (a < 0, a
+        real maximum) AND the vertex lands inside the sampled span; otherwise the
+        "vertex" is a minimum or a wild extrapolation, so we fall back to the best
+        point we actually measured. Out-of-range moves (ARGUMENT_ERROR) are skipped.
         """
         nd = self.nanodrive
         pos_key = f'{axis}_pos'
@@ -378,43 +406,119 @@ class ODMRSweepContinuousExperiment(Experiment):
 
         def read_pos():
             return nd.read_probes(pos_key)
+        if self.settings['acquisition']['averaging']['optimization_mode'] == "fit":
+            # Back off two steps to take out backlash, then sample minus / old / plus.
+            move(read_pos() - 2 * step)
+            samples = []  # (position, count_rate)
+            for _ in range(3):
+                if move(read_pos() + step):
+                    samples.append((read_pos(), self._read_opt_counts()))
 
-        # Back off two steps to take out backlash, then sample minus / old / plus.
-        move(read_pos() - 2 * step)
-        samples = []  # (position, count_rate)
-        for _ in range(3):
-            if move(read_pos() + step):
-                samples.append((read_pos(), self._read_opt_counts()))
 
-        if len(samples) < 3:
-            print(f"Skipping {axis}-optimization: insufficient valid points.")
-            return
+            if len(samples) < 3:
+                print(f"Skipping {axis}-optimization: insufficient valid points.")
+                return
 
-        coords = np.array([p for p, _ in samples], dtype=float)
-        counts = np.array([c for _, c in samples], dtype=float)
-        a, b, _c = np.polyfit(coords, counts, 2)
-        if a == 0:  # degenerate (flat) fit -> nothing to do
-            return
-        vertex = float(-b / (2 * a))
 
-        if not move(vertex):
-            return
-        counts_at_vertex = self._read_opt_counts()
+            coords = np.array([p for p, _ in samples], dtype=float)
+            counts = np.array([c for _, c in samples], dtype=float)
+            a, b, _c = np.polyfit(coords, counts, 2)
 
-        # If a sampled point was actually better than the vertex, damp toward it.
-        best_pos, best_counts = max(samples, key=lambda pc: pc[1])
-        if best_counts > counts_at_vertex:
-            move(vertex + damping_ratio * (best_pos - vertex))
+
+            best_pos, best_counts = max(samples, key=lambda pc: pc[1])
+            lo, hi = float(coords.min()), float(coords.max())
+
+
+            # Only trust the vertex for a concave-down parabola whose vertex is in range.
+            vertex = None
+            use_vertex = False
+            if a < 0:
+                vertex = float(-b / (2 * a))
+                if lo <= vertex <= hi:
+                    use_vertex = True
+
+
+            if use_vertex:
+                if not move(vertex):
+                    return
+                counts_at_vertex = self._read_opt_counts()
+                # If a sampled point actually beat the vertex, damp toward it.
+                if best_counts > counts_at_vertex:
+                    move(vertex + damping_ratio * (best_pos - vertex))
+            else:
+                # Unreliable fit (a >= 0, or vertex outside the sampled span):
+                # go to the best point we physically measured.
+                print(f"{axis}: unreliable parabola (a={a:.3g}); using best sampled point.")
+                move(best_pos)
+
+
+        elif opt['optimization_mode'] == "convergence":
+            # Hill-climb this axis until a step stops improving counts, then stop on
+            # the best point seen. We move as little as possible (the stage drifts
+            # the more it moves) and require a real improvement -- not a shot-noise
+            # flicker -- before accepting a step.
+            max_steps = int(opt['opt_max_steps'])
+            improve_frac = float(opt['opt_improve_frac'])
+            def better(new, ref):
+                # new must beat ref by more than improve_frac (relative) to count.
+                return new > ref * (1.0 + improve_frac)
+            # Opener: sample the current spot, then two steps in +.
+            samples = []  # (position, count_rate)
+            samples.append((read_pos(), self._read_opt_counts()))
+            for _ in range(2):
+                if move(read_pos() + step):
+                    samples.append((read_pos(), self._read_opt_counts()))
+            if len(samples) < 3:
+                print(f"Skipping {axis}-optimization: insufficient valid points.")
+                return
+            best_pos, best_counts = max(samples, key=lambda pc: pc[1])
+            c_start = samples[0][1]  # counts at the original position
+            c_far = samples[-1][1]  # counts at the furthest + point
+            # Pick a climbing direction from the opener:
+            #   + : the furthest point is best and clearly beats the start -> keep going +
+            #   - : the original start is best -> + was downhill, reverse
+            #   0 : the peak is bracketed in the middle (we already overshot) -> just
+            #       land on the best of the three below.
+            direction = 0
+            if best_pos == samples[-1][0] and better(c_far, c_start):
+                direction = +1
+            elif best_pos == samples[0][0]:
+                direction = -1
+                move(samples[0][0])  # return to start before heading - (takes up + backlash)
+            steps_taken = 0
+            while direction != 0 and steps_taken < max_steps:
+                if not move(read_pos() + direction * step):
+                    break  # hit the range limit
+                c_new = self._read_opt_counts()
+                if better(c_new, best_counts):
+                    best_pos, best_counts = read_pos(), c_new
+                    steps_taken += 1
+                else:
+                    break  # stopped improving -> we just stepped past the peak
+            move(best_pos)  # land on the best point we actually measured
+            print(f"{axis}: converged at {best_pos:.3f} um, ~{best_counts:.0f} cts/s "
+                  f"(+{steps_taken} step(s) past opener).")
+        else:
+            raise NotImplementedError
 
     def _optimize_position(self) -> None:
         """
-        One-shot confocal re-optimization between averaging runs.
+        One-shot confocal re-optimization between averaging runs, now with the
+        confocal-point retention net:
 
-        Reuses your existing counter binary (Averagable_Trial_Counter.TB1) and the
-        same parabolic method as the confocal-point experiment. Does NOT modify any
-        ADbasic source: it loads the counter to read counts, then the next
-        run_experiment() reloads the pulsed state-machine binary via
-        _setup_adwin_counting() and reprograms Proteus, so state self-heals.
+
+          * a best-known (position, counts) baseline is remembered across runs;
+          * after the z/x/y pass, if counts dropped below min_retention_ratio of
+            the best-known counts, the stage snaps back toward the best position;
+          * the baseline is only updated to counts below
+            acceptable_counts * acceptable_counts_ratio, so a noise spike can't
+            poison it;
+          * optionally (reoptimize_only_if_needed) the whole pass is skipped when
+            counts are still healthy, to minimise stage moves.
+
+
+        Reuses the counter binary (Averagable_Trial_Counter.TB1) and does NOT
+        modify any ADbasic source; the next run reloads the sweep state machine.
         """
         nd = getattr(self, 'nanodrive', None)
         if nd is None:
@@ -424,6 +528,14 @@ class ODMRSweepContinuousExperiment(Experiment):
         opt = self.settings['acquisition']['averaging']
         self._opt_count_time_ms = float(opt['opt_count_time'])
         num_cycles = int(opt['opt_num_cycles'])
+        settle_time = float(opt['opt_settle_time'])
+        damping_ratio = float(opt['opt_damping_ratio'])
+        min_retention_ratio = float(opt['min_retention_ratio'])
+        acceptable_counts = float(opt['acceptable_counts'])
+        acceptable_counts_ratio = float(opt['acceptable_counts_ratio'])
+        min_reoptimize_ratio = float(opt['min_reoptimize_ratio'])
+        reoptimize_only_if_needed = bool(opt['reoptimize_only_if_needed'])
+
 
         # --- switch ADwin to the simple counter (does NOT touch ADbasic source) ---
         self.adwin.stop_process(1)
@@ -435,18 +547,69 @@ class ODMRSweepContinuousExperiment(Experiment):
         adwin_delay = round((self._opt_count_time_ms * 1e6) / 3.3)
         self.adwin.update({'process_1': {'delay': adwin_delay, 'running': True}})
 
+
         # --- laser on for counting (reprogrammed by the next run) ---
-        try:
+        """try:
             self.proteus.set_channel_voltage_high(4, self.settings['GREEN_LASER']["Laser Control"])
         except Exception as e:
-            self.logger.warning(f"Could not force laser channel high for optimization: {e}")
+            self.logger.warning(f"Could not force laser channel high for optimization: {e}")"""
+
 
         time.sleep(0.2)  # let the stage settle and the counter spin up
 
-        print("Optimizing confocal position between runs (x -> y -> z)...")
-        self._optimize_axis('x', float(opt['opt_xstep']))
-        self._optimize_axis('y', float(opt['opt_ystep']))
-        self._optimize_axis('z', float(opt['opt_zstep']))
+
+        # Seed the best-known baseline on the first optimization of this experiment.
+        # (_run_sweep_averages resets it to None, so the seed is the good spot you
+        # started sweep 1 at.)
+        current_counts = self._read_opt_counts()
+        if getattr(self, '_opt_best_counts', None) is None:
+            self._opt_best_counts = current_counts
+            self._opt_best_x = nd.read_probes('x_pos')
+            self._opt_best_y = nd.read_probes('y_pos')
+            self._opt_best_z = nd.read_probes('z_pos')
+            print(f"Seeded best-known baseline: {current_counts:.0f} cts/s.")
+
+
+        # Optionally skip the pass entirely when the spot is still good.
+        if reoptimize_only_if_needed and current_counts >= (min_reoptimize_ratio * self._opt_best_counts):
+            print(f"Counts healthy ({current_counts:.0f} >= "
+                  f"{min_reoptimize_ratio:.2f} * {self._opt_best_counts:.0f}); skipping re-optimization.")
+        else:
+            print("Optimizing confocal position between runs (z -> x -> y)...")
+            self._optimize_axis('z', float(opt['opt_zstep']))   # <-- z first
+            self._optimize_axis('x', float(opt['opt_xstep']))
+            self._optimize_axis('y', float(opt['opt_ystep']))
+
+
+            # --- retention net (mirrors the confocal-point experiment) ---
+            optimized_counts = self._read_opt_counts()
+            if optimized_counts > self._opt_best_counts:
+                if optimized_counts < (acceptable_counts * acceptable_counts_ratio):
+                    self._opt_best_counts = optimized_counts
+                    self._opt_best_x = nd.read_probes('x_pos')
+                    self._opt_best_y = nd.read_probes('y_pos')
+                    self._opt_best_z = nd.read_probes('z_pos')
+                    print(f"New best-known position: {optimized_counts:.0f} cts/s.")
+                else:
+                    print(f"Ignoring implausibly high counts ({optimized_counts:.0f} cts/s) "
+                          f"for the baseline (likely a fluctuation).")
+            elif optimized_counts < (min_retention_ratio * self._opt_best_counts):
+                print(f"Post-opt counts {optimized_counts:.0f} < {min_retention_ratio:.2f} * best "
+                      f"{self._opt_best_counts:.0f}; snapping back toward best-known position.")
+                cx = nd.read_probes('x_pos')
+                cy = nd.read_probes('y_pos')
+                cz = nd.read_probes('z_pos')
+                try:
+                    nd.update({'x_pos': cx + damping_ratio * (self._opt_best_x - cx),
+                               'y_pos': cy + damping_ratio * (self._opt_best_y - cy),
+                               'z_pos': cz + damping_ratio * (self._opt_best_z - cz)})
+                    time.sleep(settle_time)
+                except Exception as e:
+                    if "ARGUMENT_ERROR" in str(e):
+                        print(f"Snap-back skipped (out of range): {e}")
+                    else:
+                        raise
+
 
         try:
             final = self._read_opt_counts()
@@ -457,11 +620,13 @@ class ODMRSweepContinuousExperiment(Experiment):
         except Exception:
             pass
 
+
         # Stop the counter so the next run starts clean (run_experiment reloads the SM).
         self.adwin.update({'process_1': {'running': False}})
         self.adwin.stop_process(1)
         time.sleep(0.1)
         self.adwin.clear_process(1)
+
 
     
     def _setup_adwin_sweep(self):
@@ -812,6 +977,13 @@ class ODMRSweepContinuousExperiment(Experiment):
         averages = self.settings['acquisition']['averaging']['averages']
         optimize_between = bool(self.settings['acquisition']['averaging']['optimize_between_runs'])
         settle_time = self.settings['acquisition']['settle_time']
+        # Reset the confocal optimizer's best-known baseline for THIS experiment run.
+        # It gets seeded on the first _optimize_position() call (before sweep 2),
+        # i.e. from the good spot you started sweep 1 at.
+        self._opt_best_counts = None
+        self._opt_best_x = None
+        self._opt_best_y = None
+        self._opt_best_z = None
 
         self.log(f"Starting sweep averages: {averages} sweeps")
         if optimize_between:
