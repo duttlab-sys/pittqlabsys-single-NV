@@ -64,8 +64,8 @@ class ODMRPulsedExperiment(Experiment):
         ]),
         Parameter('microwave', [
             Parameter('enable', True, bool, 'enable MICROWAVE'),
-            Parameter('frequency range', [2.875e9], list, 'Microwave frequency in Hz', units='Hz'),
-            Parameter('power', -5.0, float, 'Microwave power in dBm', units='dBm')
+            Parameter('frequency range', [2.73632e9], list, 'Microwave frequency in Hz', units='Hz'),
+            Parameter('power', 12, float, 'Microwave power in dBm', units='dBm')
         ]),
         Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
                   "Laser Control"),
@@ -73,7 +73,7 @@ class ODMRPulsedExperiment(Experiment):
             Parameter('power', 1.0, float, 'Green Laser power in mW', units='mW'),
             Parameter('wavelength', 532.0, float, 'Green Laser wavelength in nm', units='nm')
         ]),
-        Parameter('Filter Wheel OD', 2,
+        Parameter('Filter Wheel OD', 3,
                   [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('delays', [
             Parameter('green_laser_delay', 0.0, float, 'green_laser_delay in ns', units='ns'),
@@ -99,7 +99,7 @@ class ODMRPulsedExperiment(Experiment):
             Parameter('output_directory', 'odmr_pulsed_output', str, 'Output directory for AWG files')
         ]),
         Parameter('averaging', [
-            Parameter('averages', 1, int,
+            Parameter('averages', 10, int,
                       'Number of full runs to average term-by-term (1 = original behavior)'),
             Parameter('optimize_between_runs', True, bool,
                       'Re-optimize confocal position between runs (never in the middle of a run)'),
@@ -110,7 +110,24 @@ class ODMRPulsedExperiment(Experiment):
             Parameter('opt_count_time', 2.0, float, 'Counting time per point during optimization', units='ms'),
             Parameter('opt_num_cycles', 10, int, 'Par_10 cycles for the counter during optimization'),
             Parameter('opt_damping_ratio', 0.9, float,
-                      'Move to x + damping*(best - x) instead of the raw parabola vertex')
+                      'Move to x + damping*(best - x) instead of the raw parabola vertex'),
+            # --- retention safety net (ported from the confocal-point optimizer) ---
+            Parameter('min_retention_ratio', 0.5, float,
+                      'If post-optimization counts < min_retention_ratio * best-known counts, '
+                      'snap back toward the best-known position'),
+            Parameter('acceptable_counts', 2500000.0, float,
+                      'Do not update the best-known baseline to counts above '
+                      'acceptable_counts * acceptable_counts_ratio (rejects noise spikes). '
+                      'Set a little above your real max cts/s during optimization.'),
+            Parameter('acceptable_counts_ratio', 1.1, float,
+                      'See acceptable_counts'),
+            Parameter('min_reoptimize_ratio', 0.5, float,
+                      'Only used when reoptimize_only_if_needed is True: skip the x/y/z pass '
+                      'when current counts >= min_reoptimize_ratio * best-known counts'),
+            Parameter('reoptimize_only_if_needed', True, bool,
+                      'If True, skip optimization before a run when counts are still healthy '
+                      '(fewer stage moves = less drift). If False, optimize before every run 2..N '
+                      'and rely on the retention net to prevent walking off.')
         ]),
         Parameter('path', "D:\Data"),
         Parameter('filename', "odmr_pulsed_output"),
@@ -1182,6 +1199,14 @@ class ODMRPulsedExperiment(Experiment):
         if averages < 1:
             averages = 1
 
+            # Reset the confocal optimizer's best-known baseline for THIS experiment run.
+            # It gets seeded on the first _optimize_position() call (before run 2),
+            # i.e. from the good spot run 1 was measured at.
+        self._opt_best_counts = None
+        self._opt_best_x = None
+        self._opt_best_y = None
+        self._opt_best_z = None
+
         results: Dict[str, Any] = {'success': True, 'frequencies': frequency_range}
         signal_runs, ref_runs, total_runs = [], [], []
 
@@ -1245,16 +1270,19 @@ class ODMRPulsedExperiment(Experiment):
         """
         3-point quadratic-fit maximization on one nanodrive axis ('x'/'y'/'z').
 
-        Faithful to the confocal optimizer: step back 2x first to remove backlash,
-        sample minus/old/plus, parabola-fit, move to the vertex, and if a sampled
-        point beat the vertex, damp toward the best sampled point. Out-of-range
-        moves (ARGUMENT_ERROR) are skipped, not fatal.
+
+        Step back 2x first to remove backlash, sample minus/old/plus, parabola-fit.
+        The parabola vertex is trusted ONLY when the fit is concave-down (a < 0, a
+        real maximum) AND the vertex lands inside the sampled span; otherwise the
+        "vertex" is a minimum or a wild extrapolation, so we fall back to the best
+        point we actually measured. Out-of-range moves (ARGUMENT_ERROR) are skipped.
         """
         nd = self.nd
         pos_key = f'{axis}_pos'
         opt = self.settings['averaging']
         settle_time = float(opt['opt_settle_time'])
         damping_ratio = float(opt['opt_damping_ratio'])
+
 
         def move(target) -> bool:
             try:
@@ -1267,8 +1295,10 @@ class ODMRPulsedExperiment(Experiment):
                     return False
                 raise
 
+
         def read_pos():
             return nd.read_probes(pos_key)
+
 
         # Back off two steps to take out backlash, then sample minus / old / plus.
         move(read_pos() - 2 * step)
@@ -1277,34 +1307,53 @@ class ODMRPulsedExperiment(Experiment):
             if move(read_pos() + step):
                 samples.append((read_pos(), self._read_opt_counts()))
 
+
         if len(samples) < 3:
             print(f"Skipping {axis}-optimization: insufficient valid points.")
             return
 
+
         coords = np.array([p for p, _ in samples], dtype=float)
         counts = np.array([c for _, c in samples], dtype=float)
         a, b, _c = np.polyfit(coords, counts, 2)
-        if a == 0:  # degenerate (flat) fit -> nothing to do
-            return
-        vertex = float(-b / (2 * a))
 
-        if not move(vertex):
-            return
-        counts_at_vertex = self._read_opt_counts()
 
-        # If a sampled point was actually better than the vertex, damp toward it.
         best_pos, best_counts = max(samples, key=lambda pc: pc[1])
-        if best_counts > counts_at_vertex:
-            move(vertex + damping_ratio * (best_pos - vertex))
+        lo, hi = float(coords.min()), float(coords.max())
+
+
+        # Only trust the vertex for a concave-down parabola whose vertex is in range.
+        use_vertex = False
+        vertex = None
+        if a < 0:
+            vertex = float(-b / (2 * a))
+            if lo <= vertex <= hi:
+                use_vertex = True
+
+
+        if use_vertex:
+            if not move(vertex):
+                return
+            counts_at_vertex = self._read_opt_counts()
+            if best_counts > counts_at_vertex:
+                move(vertex + damping_ratio * (best_pos - vertex))
+        else:
+            print(f"{axis}: unreliable parabola (a={a:.3g}); using best sampled point.")
+            move(best_pos)
 
     def _optimize_position(self) -> None:
         """
-        One-shot confocal re-optimization between averaging runs.
+        One-shot confocal re-optimization between averaging runs, with the
+        confocal-point retention net: a best-known (position, counts) baseline is
+        remembered across runs; after the z/x/y pass, if counts dropped below
+        min_retention_ratio of the best-known counts the stage snaps back toward
+        the best position; the baseline is only updated below
+        acceptable_counts * acceptable_counts_ratio (rejects noise spikes); and
+        optionally the whole pass is skipped when counts are still healthy.
 
-        Reuses your existing counter binary (Averagable_Trial_Counter.TB1) and the
-        same parabolic method as the confocal-point experiment. Does NOT modify any
-        ADbasic source: it loads the counter to read counts, then the next
-        run_experiment() reloads the pulsed state-machine binary via
+
+        Reuses the counter binary (Averagable_Trial_Counter.TB1) and does NOT touch
+        ADbasic source: the next run_experiment() reloads the pulsed binary via
         _setup_adwin_counting() and reprograms Proteus, so state self-heals.
         """
         nd = getattr(self, 'nd', None)
@@ -1313,9 +1362,18 @@ class ODMRPulsedExperiment(Experiment):
             print("No nanodrive available; skipping optimization.")
             return
 
+
         opt = self.settings['averaging']
         self._opt_count_time_ms = float(opt['opt_count_time'])
         num_cycles = int(opt['opt_num_cycles'])
+        settle_time = float(opt['opt_settle_time'])
+        damping_ratio = float(opt['opt_damping_ratio'])
+        min_retention_ratio = float(opt['min_retention_ratio'])
+        acceptable_counts = float(opt['acceptable_counts'])
+        acceptable_counts_ratio = float(opt['acceptable_counts_ratio'])
+        min_reoptimize_ratio = float(opt['min_reoptimize_ratio'])
+        reoptimize_only_if_needed = bool(opt['reoptimize_only_if_needed'])
+
 
         # --- switch ADwin to the simple counter (does NOT touch ADbasic source) ---
         self.adwin.stop_process(1)
@@ -1327,27 +1385,80 @@ class ODMRPulsedExperiment(Experiment):
         adwin_delay = round((self._opt_count_time_ms * 1e6) / 3.3)
         self.adwin.update({'process_1': {'delay': adwin_delay, 'running': True}})
 
+
         # --- laser on for counting (reprogrammed by the next run) ---
         try:
             self.proteus.set_channel_voltage_high(4, self.settings["Laser Control"])
         except Exception as e:
             self.logger.warning(f"Could not force laser channel high for optimization: {e}")
 
+
         time.sleep(0.2)  # let the stage settle and the counter spin up
 
-        print("Optimizing confocal position between runs (x -> y -> z)...")
-        self._optimize_axis('x', float(opt['opt_xstep']))
-        self._optimize_axis('y', float(opt['opt_ystep']))
-        self._optimize_axis('z', float(opt['opt_zstep']))
 
-        try:
-            final = self._read_opt_counts()
-            print(f"Optimization done: ~{final:.0f} cts/s at "
-                  f"x={nd.read_probes('x_pos'):.3f}, "
-                  f"y={nd.read_probes('y_pos'):.3f}, "
-                  f"z={nd.read_probes('z_pos'):.3f}")
-        except Exception:
-            pass
+        # Seed the best-known baseline on the first optimization of this experiment.
+        current_counts = self._read_opt_counts()
+        if getattr(self, '_opt_best_counts', None) is None:
+            self._opt_best_counts = current_counts
+            self._opt_best_x = nd.read_probes('x_pos')
+            self._opt_best_y = nd.read_probes('y_pos')
+            self._opt_best_z = nd.read_probes('z_pos')
+            print(f"Seeded best-known baseline: {current_counts:.0f} cts/s.")
+
+
+        did_optimize = False
+        if reoptimize_only_if_needed and current_counts >= (min_reoptimize_ratio * self._opt_best_counts):
+            print(f"Counts healthy ({current_counts:.0f} >= "
+                  f"{min_reoptimize_ratio:.2f} * {self._opt_best_counts:.0f}); "
+                  f"skipping re-optimization -- stage NOT moved.")
+        else:
+            did_optimize = True
+            print("Optimizing confocal position between runs (z -> x -> y)...")
+            self._optimize_axis('z', float(opt['opt_zstep']))   # <-- z first
+            self._optimize_axis('x', float(opt['opt_xstep']))
+            self._optimize_axis('y', float(opt['opt_ystep']))
+
+
+            # --- retention net (mirrors the confocal-point experiment) ---
+            optimized_counts = self._read_opt_counts()
+            if optimized_counts > self._opt_best_counts:
+                if optimized_counts < (acceptable_counts * acceptable_counts_ratio):
+                    self._opt_best_counts = optimized_counts
+                    self._opt_best_x = nd.read_probes('x_pos')
+                    self._opt_best_y = nd.read_probes('y_pos')
+                    self._opt_best_z = nd.read_probes('z_pos')
+                    print(f"New best-known position: {optimized_counts:.0f} cts/s.")
+                else:
+                    print(f"Ignoring implausibly high counts ({optimized_counts:.0f} cts/s) "
+                          f"for the baseline (likely a fluctuation).")
+            elif optimized_counts < (min_retention_ratio * self._opt_best_counts):
+                print(f"Post-opt counts {optimized_counts:.0f} < {min_retention_ratio:.2f} * best "
+                      f"{self._opt_best_counts:.0f}; snapping back toward best-known position.")
+                cx = nd.read_probes('x_pos')
+                cy = nd.read_probes('y_pos')
+                cz = nd.read_probes('z_pos')
+                try:
+                    nd.update({'x_pos': cx + damping_ratio * (self._opt_best_x - cx),
+                               'y_pos': cy + damping_ratio * (self._opt_best_y - cy),
+                               'z_pos': cz + damping_ratio * (self._opt_best_z - cz)})
+                    time.sleep(settle_time)
+                except Exception as e:
+                    if "ARGUMENT_ERROR" in str(e):
+                        print(f"Snap-back skipped (out of range): {e}")
+                    else:
+                        raise
+
+
+        if did_optimize:
+            try:
+                final = self._read_opt_counts()
+                print(f"Optimization done: ~{final:.0f} cts/s at "
+                      f"x={nd.read_probes('x_pos'):.3f}, "
+                      f"y={nd.read_probes('y_pos'):.3f}, "
+                      f"z={nd.read_probes('z_pos'):.3f}")
+            except Exception:
+                pass
+
 
         # Stop the counter so the next run starts clean (run_experiment reloads the SM).
         self.adwin.update({'process_1': {'running': False}})
@@ -1633,8 +1744,8 @@ readout pulse on channel 3 at 502000ns, square, 2000ns, 1.0"
         HS{1,6} matches what a ref paper found best for short traces; flip to n_left=6, n_right=1 to reverse which side is steep.
         """
         sequence_text = """
-sequence: name=rabi, type=rabi, duration=12900ns, sample_rate=1GHz, repeat_count=1000000
-variable pulse_duration, start=4ns, stop=3000ns, steps=64
+sequence: name=rabi, type=rabi, duration=12900ns, sample_rate=1GHz, repeat_count=100000
+variable pulse_duration, start=4ns, stop=500ns, steps=64
 init pulse on channel 4 at 0ns, square, 2000ns, 1.0
 MW pulse on channel 1 at 2900ns, square, pulse_duration, 1.0
 marker, reference_MW_1 on channel 1 at 2900ns, pulse_duration
@@ -1854,7 +1965,7 @@ if __name__ == "__main__":
     experiment = ODMRPulsedExperiment(name="test_odmr")
 
     # Set parameters
-    experiment.set_microwave_parameters(2.87e9, -10.0, 0.0)
+    experiment.set_microwave_parameters(2.73632e9, 12.0, 0.0)
     experiment.set_green_laser_parameters(1.0, 532)
     experiment.set_delay_parameters(0.0, 0.0, 0.0)
     # Create and load example sequence
@@ -1915,7 +2026,7 @@ if __name__ == "__main__":
     experiment.reset_time = 6320
     experiment.readout_start_ns = 6000
     experiment.trigger_duration = 150
-    experiment.gate_align_offset_ns = 1650 #1650
+    experiment.gate_align_offset_ns = 1800 #1650
     # Run experiment
     print("running exp")
     experiment.logger.info("Running experiment...")
@@ -1932,10 +2043,10 @@ if __name__ == "__main__":
         experiment.logger.info(f"Experiment failed: {results['error']}")
     #experiment.show_sequence_preview(10)
     experiment.logger.info("\nODMR Pulsed Experiment ready!")
-    # Multiharp tester:
-    """experiment = ODMRPulsedExperiment(name="test_odmr", mode="testing")  # drop mode= for a real run
+    """# Multiharp tester:
+    experiment = ODMRPulsedExperiment(name="test_odmr", mode="testing")  # drop mode= for a real run
     # Set parameters
-    experiment.set_microwave_parameters(2.87e9, -10.0, 0.0)
+    experiment.set_microwave_parameters(2.86041e9, 12.0, 0.0)
     experiment.set_green_laser_parameters(1.0, 532)
     experiment.set_delay_parameters(0.0, 0.0, 0.0)
 
@@ -1991,7 +2102,7 @@ if __name__ == "__main__":
     experiment.reset_time = 6320
     experiment.readout_start_ns = 6000
     experiment.trigger_duration = 150
-    experiment.gate_align_offset_ns = 1900  # 1650
+    experiment.gate_align_offset_ns = 1800  # 1650
     # Run experiment
     print("running exp")
     experiment.logger.info("Running experiment...")
@@ -2018,7 +2129,7 @@ if __name__ == "__main__":
     """#Multiharp Rabi:
     experiment = ODMRPulsedExperiment(name="test_odmr", mode="testing")  # drop mode= for a real run
     # Set parameters
-    experiment.set_microwave_parameters(2.87e9, -10.0, 0.0)
+    experiment.set_microwave_parameters(2.86041e9, 12.0, 0.0)
     experiment.set_green_laser_parameters(1.0, 532)
     experiment.set_delay_parameters(0.0, 0.0, 0.0)
 
@@ -2074,7 +2185,7 @@ if __name__ == "__main__":
     experiment.reset_time = 6320
     experiment.readout_start_ns = 6000
     experiment.trigger_duration = 150
-    experiment.gate_align_offset_ns = 1900  # 1650
+    experiment.gate_align_offset_ns = 1800  # 1650
     # Run experiment
     print("running exp")
     experiment.logger.info("Running experiment...")
@@ -2082,19 +2193,15 @@ if __name__ == "__main__":
     import numpy as np
 
     tester = MultiHarpTimingTester(
-        case="rabi_mw_tagged",
-        start_input=1, stop_input=4,  # readout marker, SPCM
-        mw_input=2, mw_fall_input=3,  # MW copy: rise + fall  -> WIDTH mode
-        # (drop mw_fall_input and set mw_gap_ns=3000 for one-BNC GEOMETRY mode)
-        start_cfg=ChannelConfig(level_mV=360, edge=EDGE_RISING),  # your measured amplitudes
-        stop_cfg=ChannelConfig(level_mV=320, edge=EDGE_RISING),
-        mw_cfg=ChannelConfig(level_mV=200),  # edges are pinned automatically
-        mw_fall_cfg=ChannelConfig(level_mV=200),
-        rabi_sig_offset_ns=0, rabi_sig_width_ns=300,  # bright readout onset
-        rabi_ref_offset_ns=5000, rabi_ref_width_ns=300,  # later, still inside the readout
-        rabi_tau_values_ns=np.linspace(4, 3000, 64),  # your sweep
+        case="rabi_mw_tagged", start_input=1, stop_input=4,
+        mw_input=2, mw_fall_input=3,
+        rabi_sig_offset_ns=950, rabi_sig_width_ns=300,  # onset, past the ~900 ns rise
+        rabi_ref_offset_ns=5000, rabi_ref_width_ns=300,
+        rabi_tau_values_ns=np.linspace(4, 3000, 64),
+        decode_chunk_records=50_000_000,  # lower to ~20M if RAM is tight
     )
-    out = tester.run_with_experiment(experiment)  # {'odmr': ..., 'rabi': RabiResult}
+    out = tester.run_rabi_with_experiment(experiment, raw_records_path = r"D:\Data\rabi_raw.npy")
+
     results = out["odmr"]
     experiment.data = results
     experiment.save_hdf5()
