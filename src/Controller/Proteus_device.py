@@ -3293,13 +3293,14 @@ if __name__ == "__main__":
     # Verify on scope: should read −0.50 V to +0.50 V
     #dev.set_function_generator(1, 'SQU', 1000000)
     #dev.set_function_generator(4, 'SIN')
-    #dev.set_function_generator(1, 'SIN', BASEBAND_FREQ, FG_AMP_SET, 0.0, FG_OFFSET_SET)
+    dev = ProteusDevice('192.168.2.4')
+    dev.set_function_generator(1, 'SQU', 1e7, FG_AMP_SET, 0.0, FG_OFFSET_SET)
     #dev.set_function_generator(2, 'SIN', BASEBAND_FREQ, FG_AMP_SET, 90.0, FG_OFFSET_SET)
     #dev.set_function_generator(3, 'SIN', 7000000, 0.55, 0.0, 0.37)
     #dev.set_function_generator(2, 'SIN')
     #dev.set_ch1_marker1_voltage(-0.5, 0.5)
     #time.sleep(10)
-    dev = ProteusDevice('192.168.2.4')
-    dev.set_channel_voltage_high(0, 0)
+    #dev = ProteusDevice('192.168.2.4')
+    #dev.set_channel_voltage_high(0, 0)
     #dev._close()
 
