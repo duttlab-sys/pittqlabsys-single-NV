@@ -293,7 +293,6 @@ class ODMRPulsedExperiment(Experiment):
             True if sequence loaded successfully
         """
         try:
-            print("load_sequence_from_file")
             if not sequence_file.exists():
                 self.logger.error(f"Sequence file not found: {sequence_file}")
                 print("Sequence file not found")
@@ -301,9 +300,7 @@ class ODMRPulsedExperiment(Experiment):
 
             # Read sequence text
             with open(sequence_file, 'r') as f:
-                print("reading from file")
                 self.sequence_text = f.read()
-            print("parsing sequence text")
             # Parse sequence
             self.sequence_description = self.sequence_parser.parse_text(self.sequence_text)
             self.repeat_count = self.sequence_description.repeat_count
@@ -333,18 +330,15 @@ class ODMRPulsedExperiment(Experiment):
             if not self.sequence_description:
                 self.logger.error("No sequence description loaded")
                 return False
-            print("building scan sequences")
             # Build scan sequences
             self.scan_sequences = self.sequence_builder.build_scan_sequences(
                 self.sequence_description
             )
-            print("scan sequences built")
             self.sampling_rate = self.sequence_builder.sample_rate
             if self.sequence_description.variables:
                 self.number_of_iterations = len(self.scan_sequences)
             else:
                 self.number_of_iterations = 1
-            print("adding hardware calibration")
             # Apply hardware calibration
             for i, sequence in enumerate(self.scan_sequences):
                 calibrated_sequence = self.hardware_calibrator.calibrate_sequence(
@@ -353,7 +347,6 @@ class ODMRPulsedExperiment(Experiment):
                 )
                 self.scan_sequences[i] = calibrated_sequence
             self.sequence_duration = calibrated_sequence.length
-            print(f"calibrated_sequence duration {self.sequence_duration}")
             self.logger.info(f"Built {len(self.scan_sequences)} scan sequences")
             return True
 
@@ -423,7 +416,7 @@ class ODMRPulsedExperiment(Experiment):
                 q_correction_b = self._load_iq_calibration()
             else:
                 q_correction_b = 1.0
-            print(f"  Q amplitude correction b = {q_correction_b:.4f}")
+            print(f"Q amplitude correction b = {q_correction_b:.4f}")
             for sequence in self.scan_sequences:
                 for _, pulse_ in enumerate(sequence.pulses):
                     pulse = pulse_[1]
@@ -496,7 +489,6 @@ class ODMRPulsedExperiment(Experiment):
                     # Upload waveform
                     self.proteus.driver.write_trace_data(dac_wave)
                     resp = self.proteus.driver.query_error()
-                    print(f"loading trace data {resp}")
                     self.proteus.driver.inst.send_scpi_cmd(":VOLT:OFFS 0.012")
 
                     # Convert to uint8 and upload markers (zeros for idle channels)
@@ -504,13 +496,11 @@ class ODMRPulsedExperiment(Experiment):
                     tabor_markers = prepare_markers_for_tabor(markers)
                     self.proteus.driver.write_marker_data(tabor_markers)
                     resp = self.proteus.driver.query_error()
-                    print(f'Marker upload result: {resp}')
                     marker_index = 1
                     self.proteus.driver.set_marker(marker_index)
                     self.proteus.driver.set_marker_ptop_voltage(1.2)
                     self.proteus.driver.set_marker_voltage_offset(0.5)
                     resp = self.proteus.driver.query_error()
-                    print(f'Marker setup result: {resp}')
                     SEGNUM += 1
             i = 0
             for sequence in self.scan_sequences:
@@ -545,7 +535,6 @@ class ODMRPulsedExperiment(Experiment):
                 self.proteus.driver.set_channel(ch)
                 n_tasks = len(segment_for_channel[ch])  # tasks for THIS channel
                 self.proteus.driver.set_task_table_length(n_tasks)
-                print(f"channel {ch}: {n_tasks} tasks")
                 for segment_number in segment_for_channel[ch]:
                     self.proteus.driver.set_task_number(task_num)
                     if task_num == 1:
@@ -570,7 +559,6 @@ class ODMRPulsedExperiment(Experiment):
             ###self.proteus.driver.set_task_loop(self.repeat_count)
             self.proteus.driver.set_task_sync()
             resp = self.proteus.driver.set_trigger_coupling('ON')
-            print(resp)
             # for trigger source INT send:
             self.proteus.driver.set_channel(1)
             # time.sleep(1)
@@ -581,7 +569,6 @@ class ODMRPulsedExperiment(Experiment):
             return False
 
     def _function(self):
-        print("selected start")
         self.filter_wheel.update({'OD': self.settings['Filter Wheel OD']})
         self.adwin = self.devices['adwin']['instance']
         self.proteus = self.devices['proteus']['instance']
@@ -625,7 +612,6 @@ class ODMRPulsedExperiment(Experiment):
         sequence_loaded = False
 
         if self.settings['sequence']['load_from_file']:
-            print("loading from file")
             file_path = self.settings['sequence']['file_path']
             file_path = Path(file_path)
 
@@ -636,7 +622,6 @@ class ODMRPulsedExperiment(Experiment):
             else:
                 self.logger.info("File path is invalid or does not exist")
         else:
-            print("loading from text")
             self.sequence_text = self.settings['sequence']['text']
             print("ODMR Sequence:")
             print(self.sequence_text)
@@ -650,7 +635,6 @@ class ODMRPulsedExperiment(Experiment):
             self.logger.info(f"Failed to load sequence from {source}")
             return
         # Run experiment
-        print("running exp")
         self.logger.info("Running experiment...")
         results = self.run_experiment_averaged(self.settings['microwave']['frequency range'])
         self.data = results
@@ -665,7 +649,6 @@ class ODMRPulsedExperiment(Experiment):
         self.cleanup()
         self.show_sequence_preview(10)
         self.logger.info("\nODMR Pulsed Experiment ready!")
-        print("experiment ready")
 
     def save_hdf5(self):
         """this function defines its custom data and metadata to be saved and then calls the
@@ -767,9 +750,6 @@ class ODMRPulsedExperiment(Experiment):
             marker_indices = set()
             marker_channels = set()
             for sequence in self.scan_sequences:
-                # ++++++++++++++++++++++
-                print(f"to waveform output: {sequence.to_waveform()}")
-                # ++++++++++++++++++++++
                 for _, pulse_ in enumerate(sequence.pulses):
                     pulse = pulse_[1]
                     ch = int(pulse.name.split("_")[-1])
@@ -819,14 +799,11 @@ class ODMRPulsedExperiment(Experiment):
                 self.proteus.driver.set_channel(ch)
 
                 waveform = np.concatenate(channel_waveforms[ch])
-                print(f"waveform: {waveform}")
 
                 # Apply required alignment
                 rem = len(waveform) % ALIGNMENT
-                print(f"rem: {rem}")
                 if rem:
                     waveform = np.pad(waveform, (0, ALIGNMENT - rem))
-                    print(f"waveform: {waveform}")
 
                 # Scale to DAC
                 dac_wave = np.clip(waveform, -1.0, 1.0)
@@ -839,17 +816,12 @@ class ODMRPulsedExperiment(Experiment):
                 # Upload waveform
                 self.proteus.driver.write_trace_data(dac_wave)  # write, and wait while *OPC completes
                 resp = self.proteus.driver.query_error()
-                print('analog upload result: "{0}" after writing trace binary values'.format(resp))
 
                 segment_for_channel[ch] = segment_index
                 # Handle markers for this channel
                 if ch in channel_markers:
                     markers = np.concatenate(channel_markers[ch])
-                    print(f"\n=== MARKER VALUE ANALYSIS ===")
-                    print(f"Markers dtype: {markers.dtype}")
-                    print(f"Min value: {np.min(markers)}")
-                    print(f"Max value: {np.max(markers)}")
-                    print(f"Unique values: {np.unique(markers)}")
+
 
                     rem = len(waveform) % ALIGNMENT
                     if rem:
@@ -857,20 +829,13 @@ class ODMRPulsedExperiment(Experiment):
                     else:
                         waveform_padded_len = len(waveform)
 
-                    print(f"Waveform after padding: {waveform_padded_len} samples")
-                    print(f"Markers before padding: {len(markers)} samples")
-
                     # Now pad/truncate markers to match waveform length
                     if len(markers) < waveform_padded_len:
                         # Pad markers with zeros
                         markers = np.pad(markers, (0, waveform_padded_len - len(markers)), mode='constant')
-                        print(f"Markers padded to match waveform: {len(markers)} samples")
                     elif len(markers) > waveform_padded_len:
                         # Truncate markers
                         markers = markers[:waveform_padded_len]
-                        print(f"Markers truncated to match waveform: {len(markers)} samples")
-                    else:
-                        print(f"Markers already match waveform length")
 
                     if not np.all(markers == 0):
 
@@ -893,7 +858,6 @@ class ODMRPulsedExperiment(Experiment):
 
                         self.proteus.driver.write_marker_data(tabor_markers)
                         resp = self.proteus.driver.query_error()
-                        print(f'Marker upload result: {resp}')
                         # proteus P1284M only has 1 marker per channel, for other awgs, please implement code that handels that
                         # I have already coded the marker index here: mkr_index = int(marker.name.split('_')[-2]) so if the user
                         # gives marker, laser_int_1 on channel 4 at 0ns, 500ns then you know whatever is after laser_init_ is the index
@@ -902,29 +866,17 @@ class ODMRPulsedExperiment(Experiment):
                         self.proteus.driver.set_marker(marker_index)
                         # Verify Proteus marker settings
                         resp = self.proteus.driver.get_marker()
-                        print(f"Selected marker: {resp}")
                         resp = self.proteus.driver.get_marker_state()
-                        print(f"Marker state: {resp}")
                         resp = self.proteus.driver.query_error()
-                        print(f"System error: {resp}")
-
                         resp = self.proteus.driver.get_marker_ptop_voltage()
-                        print(f"Marker voltage PTOP setting: {resp}")
-
                         resp = self.proteus.driver.get_marker_voltage()
-                        print(f"Marker voltage LEV setting: {resp}")
                         self.proteus.driver.set_marker_ptop_voltage(1)
                         resp = self.proteus.driver.get_marker_ptop_voltage()
-                        print(f"Marker voltage PTOP setting: {resp}")
                         resp = self.proteus.driver.get_marker_voltage_offset()
-                        print(f"Marker voltage offset setting: {resp}")
                         self.proteus.driver.set_marker_voltage_offset(0.5)
                         resp = self.proteus.driver.get_marker_voltage_offset()
-                        print(f"Marker voltage offset setting: {resp}")
-
                         # Check for errors
                         resp = self.proteus.driver.query_error()
-                        print(f'Marker upload result: {resp}')
                     else:
                         print(f"Channel {ch}: Markers are all zeros, skipping marker upload")
 
@@ -1106,28 +1058,23 @@ class ODMRPulsedExperiment(Experiment):
         """
         try:
             self.logger.info("Starting ODMR Pulsed Experiment")
-            print("Starting ODMR Pulsed Experiment")
             # Step 1: Load sequence
             if not self.sequence_description:
                 self.logger.error("No sequence loaded")
                 print("No sequence loaded")
                 return {'success': False, 'error': 'No sequence loaded'}
-            print("sequence loaded")
 
             # Step 2: Build scan sequences
             if not self.build_scan_sequences():
                 return {'success': False, 'error': 'Failed to build scan sequences'}
-            print("scan sequences built")
 
             # Step 3: Generate AWG sequences
             if not self.generate_awg_task_sequences_adwin_triggering_awg_case():
                 return {'success': False, 'error': 'Failed to generate AWG sequences'}
-            print("awg sequences generated")
 
             # Step 4: Setup ADwin for photon counting
             if not self._setup_adwin_counting():
                 return {'success': False, 'error': 'Failed to setup ADwin counting'}
-            print("ADwin counting setup done")
 
             # Step 6: Run experiment for each frequency
             # 'success': True,
@@ -1140,7 +1087,6 @@ class ODMRPulsedExperiment(Experiment):
             # delete later:
             # frequency_range = [2.87e9]
             for freq in frequency_range:
-                print(f"Running experiment at {freq / 1e9:.3f} GHz")
                 self.logger.info(f"Running experiment at {freq / 1e9:.3f} GHz")
 
                 # Set SG384 frequency
@@ -1151,7 +1097,6 @@ class ODMRPulsedExperiment(Experiment):
                     self.sg384.enable_output()
                 self.microwave_frequency = freq
                 self.logger.info(f"Set SG384 to {freq / 1e9:.3f} GHz, {self.microwave_power} dBm")
-                print(f"Set SG384 to {freq / 1e9:.3f} GHz, {self.microwave_power} dBm")
 
                 # Run sequence and collect data
                 freq_results = self._run_sequence_and_collect_data()
@@ -1168,7 +1113,6 @@ class ODMRPulsedExperiment(Experiment):
             results['frequencies'] = frequency_range
 
             self.logger.info("ODMR Pulsed Experiment completed successfully")
-            print("ODMR Pulsed Experiment completed successfully")
             return results
 
         except Exception as e:
@@ -1222,7 +1166,6 @@ class ODMRPulsedExperiment(Experiment):
                 except Exception as e:
                     # Optimization is best-effort: log and keep measuring.
                     self.logger.error(f"Optimization before run {run_idx} failed (continuing): {e}")
-                    print(f"Optimization before run {run_idx} failed (continuing): {e}")
 
             run = self.run_experiment(frequency_range)
             if not run.get('success'):
@@ -1258,7 +1201,6 @@ class ODMRPulsedExperiment(Experiment):
         results['averages'] = averages
 
         self.logger.info(f"Averaging complete over {averages} run(s)")
-        print(f"Averaging complete over {averages} run(s)")
         return results
 
     def _read_opt_counts(self) -> float:
@@ -1291,7 +1233,6 @@ class ODMRPulsedExperiment(Experiment):
                 return True
             except Exception as e:
                 if "ARGUMENT_ERROR" in str(e):
-                    print(f"Skipping {axis} move (out of range): {e}")
                     return False
                 raise
 
@@ -1309,7 +1250,6 @@ class ODMRPulsedExperiment(Experiment):
 
 
         if len(samples) < 3:
-            print(f"Skipping {axis}-optimization: insufficient valid points.")
             return
 
 
@@ -1338,7 +1278,6 @@ class ODMRPulsedExperiment(Experiment):
             if best_counts > counts_at_vertex:
                 move(vertex + damping_ratio * (best_pos - vertex))
         else:
-            print(f"{axis}: unreliable parabola (a={a:.3g}); using best sampled point.")
             move(best_pos)
 
     def _optimize_position(self) -> None:
@@ -1488,7 +1427,6 @@ class ODMRPulsedExperiment(Experiment):
             True if setup successful
         """
         try:
-            print("Setting ADwin counting")
             # Load the odmr_pulsed_counter.bas process (Process 2)
             # This process handles dual-gate counting triggered by Proteus
             # process_file = "odmr_pulsed_counter.__2"
@@ -1496,7 +1434,6 @@ class ODMRPulsedExperiment(Experiment):
 
             if not self.adwin.is_connected:
                 self.adwin.connect()
-                print("adwin connected")
 
             # Proper cleanup like debug script
             self.log("Cleaning up any existing ADwin process...")
@@ -1538,7 +1475,6 @@ class ODMRPulsedExperiment(Experiment):
             else:
                 self.adwin_file = 'odmr_pulsed_statemachine_v1.TB1'  # (T1 and similar experiments)
 
-            print(f"self.adwin_file: {self.adwin_file}")
             if self.adwin_file.endswith('v2.TB1') or self.adwin_file.endswith('v4.TB1'):
                 expected_signature = 7778
             elif self.adwin_file.endswith('v1.TB1'):
@@ -1635,8 +1571,6 @@ class ODMRPulsedExperiment(Experiment):
             self.e_t = end_time.strftime("%m_%d_%Y_%H:%M:%S")
             self.number_of_sequences_done_by_adwin = self.adwin.get_int_var(28)  # Par_28 rep counter
             self.adwin_reached_the_end = self.adwin.get_int_var(20)  # Par_20: 1 = done
-            print(f"reps done (Par_28): {self.number_of_sequences_done_by_adwin}")
-            print(f"done flag (Par_20): {self.adwin_reached_the_end}")
             signal_counts = np.array(self.adwin.get_int_data(1, self.number_of_iterations), dtype=np.int64)
             """total_counts = np.array(self.adwin.get_int_data(2, self.number_of_iterations), dtype=np.int64)
             ref_counts=total_counts.astype(np.int64)-signal_counts.astype(np.int64)"""
@@ -1671,7 +1605,6 @@ class ODMRPulsedExperiment(Experiment):
             # Stop Proteus
             # self.proteus.stop_sequence()
             # self.proteus.driver._close()
-            print(f"end of _run_sequence_and_collect_data()")
 
             return {
                 'success': True,
