@@ -920,6 +920,64 @@ def find_odmr_channels(tree):
     return out
 
 
+def odmr_run_matrix(tree, channel):
+    """Per-run 2-D matrix (runs x steps) for a CW ODMR channel, or None.
+    'averaged' = mean of the forward and reverse per-run matrices. Rows are runs
+    (the smaller axis is assumed to be the run index)."""
+    def m2d(*names):
+        _, v = get_by_name(tree, *names, want=("image", "stack", "1d"))
+        if v is None:
+            return None
+        a = np.asarray(v, float)
+        if a.ndim == 1:
+            return a[None, :]
+        if a.ndim == 2 and a.shape[0] > a.shape[1]:
+            a = a.T                      # make runs the first (smaller) axis
+        return a
+    fwd = m2d("all_counts_forward", "all_counts_fwd")
+    rev = m2d("all_counts_reverse", "all_counts_reversed", "all_counts_rev")
+    ch = (channel or "").lower()
+    if "forward" in ch:
+        return fwd
+    if "revers" in ch or "backward" in ch:
+        return rev
+    if fwd is not None and rev is not None:                    # averaged
+        k = min(fwd.shape[0], rev.shape[0]); w = min(fwd.shape[1], rev.shape[1])
+        return (fwd[:k, :w] + rev[:k, :w]) / 2.0
+    return fwd if fwd is not None else rev
+
+
+def combine_odmr_runs(specs, channel):
+    """specs = [(tree, [run numbers, 1-based]), ...].  Returns
+    (frequencies, averaged_trace, n_runs_used, labels), averaging the chosen runs
+    (matched by step index) across all files.  Raises ValueError on trouble."""
+    traces, labels, nsteps, freqs = [], [], None, None
+    for idx, (tree, runs) in enumerate(specs):
+        mat = odmr_run_matrix(tree, channel)
+        if mat is None:
+            raise ValueError(f"file #{idx + 1}: no per-run '{channel}' data "
+                             f"(needs all_counts_forward / all_counts_reverse).")
+        if freqs is None:
+            _, fr = get_by_name(tree, "frequencies", "freq_list", "freq_axis",
+                                want=("1d",))
+            if fr is not None:
+                freqs = np.squeeze(fr).astype(float)
+        for r in runs:
+            j = int(r) - 1                                     # 1-based -> 0-based
+            if not (0 <= j < mat.shape[0]):
+                raise ValueError(f"file #{idx + 1}: run {r} is out of range "
+                                 f"(that file has {mat.shape[0]} runs).")
+            row = mat[j].astype(float)
+            nsteps = row.size if nsteps is None else min(nsteps, row.size)
+            traces.append(row); labels.append(f"f{idx + 1}:r{r}")
+    if not traces:
+        raise ValueError("no runs selected.")
+    traces = [t[:nsteps] for t in traces]
+    avg = np.mean(np.vstack(traces), axis=0)
+    freqs = (freqs[:nsteps] if freqs is not None else np.arange(nsteps, dtype=float))
+    return freqs, avg, len(traces), labels
+
+
 # =============================================================================
 # x-axis reconstruction for pulsed sequences (adapted from plot_pulsed_hdf5.py)
 # =============================================================================
@@ -1778,11 +1836,319 @@ def _fit_r2_fap(x, y, fit_fn, n_perm=1000, rng=None):
     fap = (np.sum(null >= r2) + 1) / (n_perm + 1)
     return r2, fap, np.percentile(null, 95), p
 
+def gaussian_2d(coords, bg, amp, x0, y0, sx, sy, theta):
+    """Elliptical 2-D Gaussian evaluated on flattened meshgrid (X, Y)."""
+    X, Y = coords
+    ct, st = np.cos(theta), np.sin(theta)
+    xr = (X - x0) * ct + (Y - y0) * st
+    yr = -(X - x0) * st + (Y - y0) * ct
+    return (bg + amp * np.exp(-0.5 * ((xr / sx) ** 2 + (yr / sy) ** 2))).ravel()
+
+
+
+
+def fit_gaussian_2d(Z, x=None, y=None, circular=True):
+    """Fit a 2-D Gaussian to image Z over physical axes x (columns) / y (rows).
+    circular=True -> one sigma (round 'spherical' spot); False -> elliptical.
+    Returns center (x0,y0), sigma(s), FWHM(s), amplitude, background, R^2."""
+    Z = np.asarray(Z, float)
+    ny, nx = Z.shape
+    x = np.arange(nx, dtype=float) if x is None else np.asarray(x, float)
+    y = np.arange(ny, dtype=float) if y is None else np.asarray(y, float)
+    X, Y = np.meshgrid(x, y)
+    good = np.isfinite(Z)
+    if good.sum() < 6:
+        return {"ok": False, "error": "not enough finite pixels"}
+    Zf = np.where(good, Z, np.nanmedian(Z[good]))
+    bg0 = float(np.nanpercentile(Z[good], 10))
+    amp0 = float(np.nanmax(Z[good])) - bg0
+    dip = amp0 < 0
+    iy, ix = np.unravel_index(np.nanargmax(Zf if not dip else -Zf), Z.shape)
+    x0, y0 = float(x[ix]), float(y[iy])
+    sx0 = max((x.max() - x.min()) / 8.0, 1e-9)
+    sy0 = max((y.max() - y.min()) / 8.0, 1e-9)
+    if dip:
+        amp0 = float(np.nanmin(Z[good])) - bg0
+    Zr = Zf.ravel()
+    try:
+        if circular:
+            def f(c, bg, amp, x0, y0, s):
+                return gaussian_2d(c, bg, amp, x0, y0, s, s, 0.0)
+            popt, _ = curve_fit(f, (X, Y), Zr,
+                                p0=[bg0, amp0, x0, y0, (sx0 + sy0) / 2], maxfev=20000)
+            bg, amp, x0, y0, s = popt
+            sx = sy = abs(s); theta = 0.0
+        else:
+            popt, _ = curve_fit(gaussian_2d, (X, Y), Zr,
+                                p0=[bg0, amp0, x0, y0, sx0, sy0, 0.0], maxfev=20000)
+            bg, amp, x0, y0, sx, sy, theta = popt
+            sx, sy = abs(sx), abs(sy)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    Zfit = gaussian_2d((X, Y), bg, amp, x0, y0, sx, sy, theta).reshape(Z.shape)
+    ss_res = np.nansum((Z[good] - Zfit[good]) ** 2)
+    ss_tot = np.nansum((Z[good] - np.nanmean(Z[good])) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    k = 2.3548200450309493  # FWHM = 2*sqrt(2 ln2) * sigma
+    return {"ok": True, "bg": bg, "amp": amp, "x0": x0, "y0": y0,
+            "sigma_x": sx, "sigma_y": sy, "sigma": (sx + sy) / 2, "theta": theta,
+            "fwhm_x": k * sx, "fwhm_y": k * sy, "fwhm": k * (sx + sy) / 2,
+            "r2": r2, "circular": circular}
+
+
+def guess_background_1d(x, y):
+    """Constant background = average of the off-feature points (the peak/dip
+    minority, far from the robust baseline, is excluded)."""
+    y = np.asarray(y, float)
+    good = np.isfinite(y)
+    if good.sum() < 3:
+        return float(np.nanmean(y)) if good.any() else 0.0
+    yv = y[good]
+    med = np.median(yv)
+    mad = np.median(np.abs(yv - med)) + 1e-12
+    keep = np.abs(yv - med) <= 3.0 * mad
+    return float(np.mean(yv[keep])) if keep.any() else float(med)
+
+
+
+
+def guess_background_2d(Z):
+    """Constant background = average of the non-bright pixels (the NV spot's
+    bright/dark outliers are excluded)."""
+    v = np.asarray(Z, float)
+    v = v[np.isfinite(v)]
+    if v.size < 3:
+        return float(np.mean(v)) if v.size else 0.0
+    med = np.median(v)
+    mad = np.median(np.abs(v - med)) + 1e-12
+    keep = np.abs(v - med) <= 3.0 * mad
+    return float(np.mean(v[keep])) if keep.any() else float(med)
+
+
+
+
+def eval_monomial(text, x):
+    """Evaluate a background string as a function of x (numpy namespace). A bare
+    number -> constant. Returns an array/scalar, or None if blank/invalid."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    ns = {"x": np.asarray(x, float), "np": np, "pi": np.pi, "sqrt": np.sqrt,
+          "exp": np.exp, "log": np.log, "abs": np.abs}
+    try:
+        return np.asarray(eval(text, {"__builtins__": {}}, ns), float)
+    except Exception:
+        return None
+
 
 # =============================================================================
 # ============================  GUI LAYER  ====================================
 # (All tkinter / matplotlib imports live here so the module stays importable.)
 # =============================================================================
+def _moving_average(y, w):
+    """Moving average over w points; edges handled by 'nearest'."""
+    y = np.asarray(y, float)
+    if w is None or w < 2 or y.size < 2:
+        return y
+    try:
+        from scipy.ndimage import uniform_filter1d
+        return uniform_filter1d(y, int(w), mode="nearest")
+    except Exception:
+        k = int(w); pad = k // 2
+        yp = np.pad(y, pad, mode="edge")
+        return np.convolve(yp, np.ones(k) / k, mode="same")[pad:pad + y.size]
+
+
+def parse_regions(text):
+    """Parse 'a b, c d' (also a-b, a:b, a to b) into [(lo, hi), ...] in x-units."""
+    out = []
+    for chunk in re.split(r"[,;]", text or ""):
+        c = chunk.strip()
+        if not c:
+            continue
+        c = c.replace("to", " ").replace(":", " ").replace("..", " ")
+        c = re.sub(r"(?<=[0-9])\s*-\s*(?=[0-9])", " ", c)   # 2.85-2.89 -> 2.85 2.89
+        nums = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", c)
+        if len(nums) >= 2:
+            a, b = float(nums[0]), float(nums[1])
+            out.append((min(a, b), max(a, b)))
+    return out
+
+
+def background_1d(x, y, regions, mode="outside"):
+    """Constant background from selected x-regions. mode 'outside' -> average the
+    points OUTSIDE the regions (regions mark the feature/resonance); 'inside' ->
+    average the points INSIDE the regions (regions are the baseline). Falls back
+    to the auto off-feature guess if nothing usable."""
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    if regions:
+        m = np.zeros(x.shape, bool)
+        for lo, hi in regions:
+            m |= (x >= lo) & (x <= hi)
+        sel = (~m) if mode == "outside" else m
+        pts = y[sel & np.isfinite(y)]
+        if pts.size >= 1:
+            return float(np.mean(pts))
+    return guess_background_1d(x, y)
+
+
+_CAM_IMG_RE = re.compile(r"^image_0*\d")
+
+
+def find_camera_sweep(tree):
+    """Detect an ODMR camera sweep: per-frequency image groups image_* each with
+    camera_image (2-D) + frequency_ghz/hz. Returns {'freqs' (GHz), 'images'
+    (list of 2-D), 'n'} sorted by frequency; falls back to a 3-D image_cube_mean
+    + frequencies; else None."""
+    imgs = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if (_CAM_IMG_RE.match(str(k)) and isinstance(v, dict)
+                        and "camera_image" in v):
+                    ci = v.get("camera_image")
+                    if isinstance(ci, np.ndarray) and np.squeeze(ci).ndim == 2:
+                        fg, fh, ix = (v.get("frequency_ghz"), v.get("frequency_hz"),
+                                      v.get("index"))
+                        if fg is not None:
+                            freq = float(np.squeeze(fg))
+                        elif fh is not None:
+                            freq = float(np.squeeze(fh)) / 1e9
+                        else:
+                            freq = None
+                        oi = int(np.squeeze(ix)) if ix is not None else None
+                        imgs.append((oi, freq, np.squeeze(ci).astype(float)))
+                elif isinstance(v, (dict, list)):
+                    walk(v)
+        elif isinstance(node, list):
+            for it in node:
+                walk(it)
+    walk(tree)
+    if imgs:
+        imgs.sort(key=lambda t: (t[1] if t[1] is not None
+                                 else (t[0] if t[0] is not None else 0)))
+        freqs = np.array([(t[1] if t[1] is not None else (t[0] or 0))
+                          for t in imgs], float)
+        return {"freqs": freqs, "images": [t[2] for t in imgs], "n": len(imgs)}
+    _, cube = get_by_name(tree, "image_cube_mean", "image_cube", want=("stack",))
+    if cube is not None:
+        cube = np.asarray(cube, float)
+        _, fr = get_by_name(tree, "frequencies", "freq_list", want=("1d",))
+        if fr is not None:
+            fr = np.squeeze(fr).astype(float)
+            freqs = fr / 1e9 if np.nanmax(fr) > 1e6 else fr
+        else:
+            freqs = np.arange(cube.shape[0], dtype=float)
+        m = cube.shape[0]
+        return {"freqs": freqs[:m], "images": [cube[i] for i in range(m)], "n": m}
+    return None
+
+
+def subtract_row_poly(img, degree):
+    """Fit a polynomial of `degree` to each row and subtract it -- removes the
+    smooth per-row (systematic) background while keeping localized features such
+    as the NV spot. degree 0 = constant, 1 = linear, 2 = quadratic, ..."""
+    img = np.asarray(img, float)
+    if img.ndim != 2:
+        return img
+    H, W = img.shape
+    x = np.arange(W, dtype=float)
+    out = np.array(img, float)
+    deg = max(0, int(degree))
+    for r in range(H):
+        y = img[r]
+        good = np.isfinite(y)
+        if int(good.sum()) > deg + 1:
+            try:
+                out[r] = y - np.polyval(np.polyfit(x[good], y[good], deg), x)
+            except Exception:
+                pass
+    return out
+
+
+def fft_lowpass(img, cutoff_frac=0.3):
+    """2-D FFT low-pass: keep spatial frequencies within cutoff_frac (0-1) of the
+    spectrum radius and zero the rest, to suppress white noise."""
+    img = np.asarray(img, float)
+    if img.ndim != 2:
+        return img
+    fill = float(np.nanmedian(img[np.isfinite(img)])) if np.isfinite(img).any() else 0.0
+    F = np.fft.fftshift(np.fft.fft2(np.nan_to_num(img, nan=fill)))
+    H, W = img.shape
+    Y, X = np.ogrid[:H, :W]
+    r = np.sqrt(((Y - H / 2.0) / (H / 2.0)) ** 2 + ((X - W / 2.0) / (W / 2.0)) ** 2)
+    F[r > float(cutoff_frac)] = 0.0
+    return np.real(np.fft.ifft2(np.fft.ifftshift(F)))
+
+
+def _odmr_model(x, coeffs, dips):
+    """Polynomial background (coeffs, highest power first) minus Lorentzian dips.
+    dips = flat [A1, x1, w1, A2, x2, w2, ...] (A > 0 = dip depth, w = HWHM)."""
+    y = np.polyval(np.asarray(coeffs, float), x)
+    d = list(dips)
+    for i in range(0, len(d) - 2, 3):
+        A, x0, w = d[i], d[i + 1], d[i + 2]
+        y = y - A / (1.0 + ((x - x0) / (w if w != 0 else 1e-9)) ** 2)
+    return y
+
+
+def fit_odmr_dips(x, y, n_dips=1, bg_degree=0, centers=None):
+    """Fit a polynomial background (degree bg_degree) minus n_dips Lorentzians.
+    `centers` are initial dip-position guesses (list, x-units); if omitted they
+    are auto-detected as the deepest excursions. Returns x_dense/y_dense/centers/
+    widths/depths/r2/summary (keys compatible with the plot overlay)."""
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    g = np.isfinite(x) & np.isfinite(y)
+    x, y = x[g], y[g]
+    if x.size < 4:
+        return {"ok": False, "error": "too few points"}
+    order = np.argsort(x); x, y = x[order], y[order]
+    span = float(x.max() - x.min()) or 1.0
+    base0 = np.polyfit(x, y, max(0, int(bg_degree)))
+    resid = np.polyval(base0, x) - y                 # positive at dips
+    if not centers:
+        centers, rr = [], resid.copy()
+        for _ in range(n_dips):
+            i = int(np.argmax(rr))
+            centers.append(float(x[i]))
+            rr[np.abs(x - x[i]) < span / 25.0] = -np.inf
+    centers = [float(c) for c in centers][:n_dips]
+    while len(centers) < n_dips:
+        centers.append(float(x.min() + span * (len(centers) + 1) / (n_dips + 1)))
+    depth0 = max(float(np.nanmax(resid)), 1e-9)
+    w0 = span / 60.0
+    nb = max(0, int(bg_degree)) + 1
+    p0 = list(base0)
+    for c in centers:
+        p0 += [depth0, c, w0]
+
+    def model(xx, *p):
+        return _odmr_model(xx, p[:nb], list(p[nb:]))
+
+    try:
+        popt, _ = curve_fit(model, x, y, p0=p0, maxfev=40000)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    coeffs, dips = popt[:nb], list(popt[nb:])
+    xd = np.linspace(x.min(), x.max(), 800)
+    yhat = model(x, *popt)
+    ss_res = float(np.nansum((y - yhat) ** 2))
+    ss_tot = float(np.nansum((y - np.nanmean(y)) ** 2))
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    cent = [float(dips[i + 1]) for i in range(0, len(dips), 3)]
+    wid = [abs(float(dips[i + 2])) for i in range(0, len(dips), 3)]
+    dep = [float(dips[i]) for i in range(0, len(dips), 3)]
+    summary = (f"ODMR fit: {n_dips} Lorentzian dip(s) + poly bg deg {bg_degree}\n"
+               + "\n".join(f"  dip {k+1}: center = {cent[k]:.6g}, "
+                            f"FWHM = {2*wid[k]:.4g}, depth = {dep[k]:.4g}"
+                            for k in range(len(cent)))
+               + f"\n  R\u00b2 = {r2:.4f}")
+    return {"ok": True, "x_dense": xd, "y_dense": _odmr_model(xd, coeffs, dips),
+            "centers": cent, "widths": wid, "depths": dep, "r2": r2,
+            "summary": summary}
+
+
 def main(argv=None):
     import sys
     import tkinter as tk
@@ -1861,6 +2227,12 @@ def main(argv=None):
             self._is_confocal = False              # current image is a confocal scan
             self.frame_z = None                    # per-frame z (µm) for z-stacks
             self._disp_data = None                 # oriented 2-D array now shown
+            self._img_gauss = None  # last 2-D Gaussian fit on the image
+            self.camera_sweep = None               # find_camera_sweep(): per-freq images
+            self._sweep_fits = None                # per-frame 2-D Gaussian params
+            self._sweep_freqs = None
+            self._frame_coord_label = "z"          # movie frame-coordinate label
+            self._frame_coord_unit = None
             self.img_x = None                      # physical x per column (shown)
             self.img_y = None                      # physical y per row (shown)
             self.img_xlabel = "x (pixels)"
@@ -1940,6 +2312,8 @@ def main(argv=None):
             self.odmr_combo.pack(fill="x")
             self.odmr_combo.bind("<<ComboboxSelected>>",
                                  lambda e: self.on_odmr_channel())
+            ttk.Button(left, text="Combine runs across files\u2026",
+                       command=self.combine_odmr_dialog).pack(fill="x", pady=(2, 0))
 
             ttk.Label(left, text="Info", font=("", 9, "bold")).pack(anchor="w", pady=(6, 0))
             self.info = tk.Text(left, height=8, width=40, wrap="word",
@@ -1977,8 +2351,11 @@ def main(argv=None):
             row = ttk.Frame(f); row.pack(fill="x")
             ttk.Label(row, text="style:").pack(side="left")
             self.style_var = tk.StringVar(value="line+markers")
-            ttk.Combobox(row, textvariable=self.style_var, width=13, state="readonly",
-                         values=["line", "markers", "line+markers"]).pack(side="left", padx=(2, 12))
+            self.style_combo = ttk.Combobox(row, textvariable=self.style_var, width=13,
+                                            state="readonly", values=["line", "markers", "line+markers"])
+            self.style_combo.pack(side="left", padx=(2, 12))
+            self.style_combo.bind("<<ComboboxSelected>>",
+                                  lambda e: self.draw_1d(keep_lims=True))
             self.logy_var = tk.BooleanVar(value=False)
             ttk.Checkbutton(row, text="log y", variable=self.logy_var,
                             command=self.replot_1d).pack(side="left")
@@ -2030,6 +2407,37 @@ def main(argv=None):
             ttk.Button(row, text="Clear fit", command=self.clear_fit).pack(side="left")
             ttk.Button(row, text="Export fit CSV",
                        command=self.export_fit).pack(side="left", padx=(8, 0))
+            srow = ttk.Frame(f); srow.pack(fill="x", pady=(2, 0))
+            self.smooth_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(srow, text="smooth (moving average)",
+                            variable=self.smooth_var,
+                            command=self.replot_1d).pack(side="left")
+            ttk.Label(srow, text="window (points):").pack(side="left", padx=(8, 0))
+            self.smooth_win = ttk.Entry(srow, width=5)
+            self.smooth_win.insert(0, "5")
+            self.smooth_win.pack(side="left", padx=(2, 6))
+            self.smooth_win.bind("<Return>", lambda e: self.replot_1d())
+            ttk.Label(srow, text="(applies to the plot and the fit; ODMR & pulsed)",
+                      foreground="#777").pack(side="left", padx=(8, 0))
+            orow = ttk.Frame(f); orow.pack(fill="x", pady=(2, 0))
+            ttk.Label(orow, text="ODMR dips:").pack(side="left")
+            self.odmr_ndip = ttk.Combobox(orow, state="readonly", width=3,
+                                          values=["1", "2"])
+            self.odmr_ndip.set("1"); self.odmr_ndip.pack(side="left", padx=(2, 8))
+            self.odmr_ndip.bind("<<ComboboxSelected>>", lambda e: self.fit_odmr())
+            ttk.Label(orow, text="bg poly:").pack(side="left")
+            self.odmr_bgdeg = ttk.Combobox(orow, state="readonly", width=3,
+                                           values=["0", "1", "2", "3"])
+            self.odmr_bgdeg.set("0"); self.odmr_bgdeg.pack(side="left", padx=(2, 8))
+            self.odmr_bgdeg.bind("<<ComboboxSelected>>", lambda e: self.fit_odmr())
+            ttk.Label(orow, text="center(s) [x-units]:").pack(side="left")
+            self.odmr_centers = ttk.Entry(orow, width=16)
+            self.odmr_centers.pack(side="left", padx=(2, 6))
+            self.odmr_centers.bind("<Return>", lambda e: self.fit_odmr())
+            ttk.Button(orow, text="Fit ODMR dips",
+                       command=self.fit_odmr).pack(side="left", padx=(4, 0))
+            ttk.Label(orow, text="(blank = auto guess; edit + Enter to guide)",
+                      foreground="#777").pack(side="left", padx=(6, 0))
             self.fit_text = tk.Text(f, height=8, wrap="none", font=("TkFixedFont", 9))
             self.fit_text.pack(fill="both", expand=True, pady=(8, 0))
             self._last_fit = None
@@ -2129,6 +2537,7 @@ def main(argv=None):
                              ("X profile", lambda: self.roi_profile("x")),
                              ("Y profile", lambda: self.roi_profile("y")),
                              ("ROI stats", self.roi_stats),
+                             ("Fit 2-D Gaussian", self.fit_image_gaussian),
                              ("Clear ROI", self.clear_roi)]:
                 ttk.Button(row2, text=txt, command=cmd).pack(side="left", padx=(6, 0))
 
@@ -2155,6 +2564,90 @@ def main(argv=None):
                        command=self._clear_cut_fits).pack(side="left")
             self.cross_fit_lbl = ttk.Label(xfit, text="", foreground="#036")
             self.cross_fit_lbl.pack(side="left", padx=(8, 0))
+
+            irow = ttk.Frame(f); irow.pack(fill="x", pady=(2, 0))
+            ttk.Label(irow, text="line-out width (px):").pack(side="left")
+            self.lineout_w = ttk.Entry(irow, width=5)
+            self.lineout_w.insert(0, "1")
+            self.lineout_w.pack(side="left", padx=(2, 12))
+            self.lineout_w.bind("<Return>", lambda e: self.redraw_image())
+            self.img_bg_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(irow, text="subtract background (image)",
+                            variable=self.img_bg_var,
+                            command=self.redraw_image).pack(side="left")
+            ttk.Label(irow, text=" from:").pack(side="left")
+            self.img_bg_mode = ttk.Combobox(irow, state="readonly", width=20,
+                values=["auto (exclude bright)", "all pixels",
+                        "outside 2-D Gaussian", "outside ROI"])
+            self.img_bg_mode.current(0)
+            self.img_bg_mode.pack(side="left", padx=(2, 8))
+            self.img_bg_mode.bind("<<ComboboxSelected>>", lambda e: self.redraw_image())
+            ttk.Label(irow, text="bg =").pack(side="left")
+            self.img_bg_entry = ttk.Entry(irow, width=12)
+            self.img_bg_entry.pack(side="left", padx=(2, 6))
+            self.img_bg_entry.bind("<Return>", lambda e: self.redraw_image())
+            ttk.Button(irow, text="guess", command=self._guess_img_bg).pack(side="left")
+
+            srow2 = ttk.Frame(f); srow2.pack(fill="x", pady=(2, 0))
+            self.img_smooth_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(srow2, text="smooth background (keep 2-D Gaussian sharp)",
+                            variable=self.img_smooth_var,
+                            command=self.redraw_image).pack(side="left")
+            ttk.Label(srow2, text="sigma (px):").pack(side="left", padx=(8, 0))
+            self.img_smooth_sigma = ttk.Entry(srow2, width=5)
+            self.img_smooth_sigma.insert(0, "1.5")
+            self.img_smooth_sigma.pack(side="left", padx=(2, 6))
+            self.img_smooth_sigma.bind("<Return>", lambda e: self.redraw_image())
+            ttk.Label(srow2, text="Gaussian circle radius (\u00d7FWHM):"
+                      ).pack(side="left", padx=(12, 0))
+            self.gauss_radius = ttk.Entry(srow2, width=5)
+            self.gauss_radius.insert(0, "1.5")
+            self.gauss_radius.pack(side="left", padx=(2, 6))
+            self.gauss_radius.bind("<Return>", lambda e: self.redraw_image())
+
+            prow = ttk.Frame(f); prow.pack(fill="x", pady=(2, 0))
+            self.rowbg_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(prow, text="subtract per-row polynomial",
+                            variable=self.rowbg_var,
+                            command=self.redraw_image).pack(side="left")
+            ttk.Label(prow, text="degree:").pack(side="left", padx=(4, 0))
+            self.rowbg_deg = ttk.Combobox(prow, state="readonly", width=4,
+                                          values=["0", "1", "2", "3", "4"])
+            self.rowbg_deg.set("1")
+            self.rowbg_deg.pack(side="left", padx=(2, 14))
+            self.rowbg_deg.bind("<<ComboboxSelected>>", lambda e: self.redraw_image())
+            self.denoise_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(prow, text="denoise", variable=self.denoise_var,
+                            command=self.redraw_image).pack(side="left")
+            self.denoise_method = ttk.Combobox(prow, state="readonly", width=13,
+                                               values=["average", "FFT low-pass"])
+            self.denoise_method.set("average")
+            self.denoise_method.pack(side="left", padx=(2, 4))
+            self.denoise_method.bind("<<ComboboxSelected>>", lambda e: self.redraw_image())
+            ttk.Label(prow, text="strength:").pack(side="left")
+            self.denoise_param = ttk.Entry(prow, width=5)
+            self.denoise_param.insert(0, "1.5")
+            self.denoise_param.pack(side="left", padx=(2, 6))
+            self.denoise_param.bind("<Return>", lambda e: self.redraw_image())
+            ttk.Label(prow, text="(avg: blur \u03c3 px; FFT: keep-fraction 0-1)",
+                      foreground="#777").pack(side="left", padx=(4, 0))
+
+            csrow = ttk.Frame(f); csrow.pack(fill="x", pady=(4, 0))
+            ttk.Button(csrow, text="Fit 2-D Gaussian: all frames (sweep)",
+                       command=self.fit_sweep).pack(side="left")
+            ttk.Label(csrow, text="plot:").pack(side="left", padx=(10, 0))
+            self.sweep_plot_combo = ttk.Combobox(csrow, state="readonly", width=26,
+                values=["images (scroll & verify)",
+                        "Gaussian integral (A\u00b72\u03c0\u03c3\u00b2)",
+                        "peak pixel (max)", "sigma (px)", "center x (px)",
+                        "center y (px)", "amplitude (counts)", "background (counts)",
+                        "ROI mean (counts)", "fit R\u00b2"])
+            self.sweep_plot_combo.set("images (scroll & verify)")
+            self.sweep_plot_combo.pack(side="left", padx=(2, 6))
+            self.sweep_plot_combo.bind("<<ComboboxSelected>>",
+                                       lambda e: self._plot_sweep_quantity())
+            ttk.Label(csrow, text="(ODMR camera sweep: draw an ROI around the NV, "
+                      "then Fit all frames)", foreground="#777").pack(side="left", padx=(6, 0))
 
             self.movie_row = ttk.Frame(f); self.movie_row.pack(fill="x", pady=(8, 0))
             ttk.Label(self.movie_row, text="frame:").pack(side="left")
@@ -2430,6 +2923,8 @@ def main(argv=None):
             self.averaging = find_averaging(self.tree_data)
             self.multiharp = find_multiharp(self.tree_data)
             self.confocal = find_confocal(self.tree_data)
+            self.camera_sweep = find_camera_sweep(self.tree_data)
+            self._sweep_fits = None
             self._sweep = sweep_frame_info(self.tree_data)
             self._update_modality_combo()
             self._update_dataset_combo()
@@ -2656,8 +3151,8 @@ def main(argv=None):
                 self._plot_from_node(np.squeeze(val).astype(float),
                                      self.tree.item(iid, "text").split("   ")[0])
             elif kind == "image":
-                self.show_image(np.squeeze(val).astype(float),
-                                title=self.tree.item(iid, "text").split("   ")[0])
+                nm = self.tree.item(iid, "text").split("   ")[0]
+                self.show_image(np.squeeze(val).astype(float), title=nm, name=nm)
             elif kind == "stack":
                 self.show_stack(np.squeeze(val).astype(float),
                                 title=self.tree.item(iid, "text").split("   ")[0])
@@ -2669,6 +3164,13 @@ def main(argv=None):
                                     "image, or a stack (or a scalar to inspect).")
 
         def _plot_from_node(self, yarr, name):
+            # CW ODMR sweep channels -> use the dedicated trimmed / zoom-stable view
+            chans = getattr(self, "odmr_channels", None) or {}
+            leaf = str(name).split("/")[-1]
+            for disp, tok in chans.items():
+                if leaf == tok or name == tok:
+                    self.show_cw_odmr(disp)
+                    return
             self._rerender = lambda y=yarr, nm=name: self._plot_from_node(y, nm)
             xchoice = self.xaxis_combo.get() or "index"
             xmap = getattr(self, "_xaxis_map", {"index": np.arange(len(yarr))})
@@ -2797,7 +3299,7 @@ def main(argv=None):
 
         def replot_1d(self):
             if self.view_kind == "1d" and self.x is not None:
-                self.draw_1d()
+                self.draw_1d(keep_lims=getattr(self, "_odmr_view", False))
 
         # -------------------------------------------------- auto first view --
         def _auto_view(self):
@@ -2807,6 +3309,9 @@ def main(argv=None):
             if self.camera_scan:                 # laser / white-light camera scan
                 self.show_camera_scan()
                 self.nb.select(3)
+                return
+            if self.camera_sweep:                # ODMR camera sweep (image per freq)
+                self.show_camera_sweep()
                 return
             info = detect_default_view(self.tree_data)
             mode = info["mode"]
@@ -2880,6 +3385,7 @@ def main(argv=None):
         def set_1d(self, x, y, xlabel="", ylabel="", title="", yerr=None):
             self._stop_play()
             self.view_kind = "1d"
+            self._odmr_view = False
             self.curves = None                    # single-curve mode
             self.x = np.asarray(x, float).ravel()
             self.y = np.asarray(y, float).ravel()
@@ -2958,11 +3464,15 @@ def main(argv=None):
                 else:
                     self.ax.plot(cx, yv, fmt, ms=4, lw=1.3, color=color, label=label)
 
+            self._t1d_label = ""
             if self.curves:                        # overlay of several curves
                 for i, (cx, cy, lab) in enumerate(self.curves):
-                    plot_curve(cx, cy, palette[i % len(palette)], lab)
+                    ty, _tl = self._transform_1d(cx, cy)
+                    plot_curve(cx, ty, palette[i % len(palette)], lab)
+                    self._t1d_label = _tl
             else:                                  # single curve
-                plot_curve(self.x, self.y, "tab:blue", self.ylabel or "data",
+                ty, self._t1d_label = self._transform_1d(self.x, self.y)
+                plot_curve(self.x, ty, "tab:blue", self.ylabel or "data",
                            err=self.cur_yerr)
             if self._last_fit is not None:
                 fitd = self._last_fit
@@ -2970,7 +3480,9 @@ def main(argv=None):
                              label=f"fit (R\u00b2={fitd['r2']:.4f})")
             self.ax.set_xlabel(self.xlabel)
             self.ax.set_ylabel(self.ylabel)
-            self.ax.set_title(getattr(self, "title", ""), fontsize=10)
+            _tl = getattr(self, "_t1d_label", "")
+            self.ax.set_title(getattr(self, "title", "")
+                              + (f"   [{_tl}]" if _tl else ""), fontsize=10)
             if self.logy_var.get():
                 try:
                     self.ax.set_yscale("log")
@@ -2979,6 +3491,9 @@ def main(argv=None):
             self.ax.grid(True, alpha=0.3)
             for x0, x1, color, alpha in getattr(self, "extra_spans", []):
                 self.ax.axvspan(x0, x1, color=color, alpha=alpha, zorder=0)
+            if getattr(self, "bg_fit_var", None) and self.bg_fit_var.get():
+                for lo, hi in self._region_ranges():   # regions excluded from BG avg
+                    self.ax.axvspan(lo, hi, color="tab:green", alpha=0.12, zorder=0)
             for xv, color in getattr(self, "extra_vlines", []):
                 if np.isfinite(xv):
                     self.ax.axvline(xv, color=color, ls="--", lw=1.2)
@@ -2998,6 +3513,17 @@ def main(argv=None):
             self.sel_lbl.configure(
                 text=f"x ∈ [{self.sel_x0:.6g}, {self.sel_x1:.6g}]   "
                      f"({int(span_mask(self.x, self.sel_x0, self.sel_x1).sum())} pts)")
+            # while background subtraction is on, a drag defines the current BG region
+            if (getattr(self, "bg_fit_var", None) and self.bg_fit_var.get()
+                    and hasattr(self, "bg_region_list")):
+                i = self._cur_region_index()
+                if 0 <= i < len(self.bg_region_list):
+                    self.bg_region_list[i] = [self.sel_x0, self.sel_x1]
+                    self.edge1_entry.delete(0, "end")
+                    self.edge1_entry.insert(0, f"{self.sel_x0:.6g}")
+                    self.edge2_entry.delete(0, "end")
+                    self.edge2_entry.insert(0, f"{self.sel_x1:.6g}")
+                    self.replot_1d()
 
         def clear_selection(self):
             self.sel_x0 = self.sel_x1 = None
@@ -3047,7 +3573,8 @@ def main(argv=None):
                                            "plot a 1-D dataset first.")
                 return
             name = self.model_combo.get()
-            x, y = self.x, self._norm_apply(self.y)
+            yt, tlbl = self._transform_1d(self.x, self.y)   # bg + smoothing
+            x, y = self.x, self._norm_apply(yt)             # then normalisation
             if self.fit_sel_var.get() and self.sel_x0 is not None:
                 m = span_mask(x, self.sel_x0, self.sel_x1)
                 x, y = x[m], y[m]
@@ -3059,15 +3586,324 @@ def main(argv=None):
             if not res["ok"]:
                 self.fit_text.insert("end", f"Fit failed on {scope}:\n{res['error']}")
                 return
+            if tlbl:
+                res = dict(res)
+                res["summary"] = res["summary"] + "\n[" + tlbl + "]"
             self._last_fit = res
             self.fit_text.insert("end", f"[{scope}]\n" + res["summary"])
-            self.draw_1d()
+            self.draw_1d(keep_lims=True)
 
         def clear_fit(self):
             self._last_fit = None
             self.fit_text.delete("1.0", "end")
             if self.view_kind == "1d":
                 self.draw_1d()
+
+        def fit_odmr(self):
+            """Guided ODMR dip fit: polynomial background + 1 or 2 Lorentzian dips
+            using the center guess(es). Blank centers -> auto; the found centers
+            are written back so you can nudge them and re-fit."""
+            if self.view_kind != "1d" or self.x is None:
+                messagebox.showinfo("ODMR fit", "Plot a 1-D ODMR trace first (an "
+                                    "ODMR channel, or a camera-sweep quantity).")
+                return
+            yt, tlbl = self._transform_1d(self.x, self.y)
+            x, y = self.x, self._norm_apply(yt)
+            if self.fit_sel_var.get() and self.sel_x0 is not None:
+                mm = span_mask(x, self.sel_x0, self.sel_x1)
+                x, y = x[mm], y[mm]
+            try:
+                n = int(self.odmr_ndip.get())
+            except Exception:
+                n = 1
+            try:
+                bgd = int(self.odmr_bgdeg.get())
+            except Exception:
+                bgd = 0
+            txt = self.odmr_centers.get().strip()
+            centers = ([float(t) for t in re.split(r"[,;]", txt) if t.strip()]
+                       if txt else None)
+            res = fit_odmr_dips(np.asarray(x, float), np.asarray(y, float),
+                                n, bgd, centers)
+            self.fit_text.delete("1.0", "end")
+            if not res.get("ok"):
+                self.fit_text.insert("end", "ODMR fit failed:\n"
+                                     + res.get("error", "?"))
+                return
+            if not txt:                       # show the auto centers for nudging
+                self.odmr_centers.delete(0, "end")
+                self.odmr_centers.insert(0, ", ".join(f"{c:.5g}"
+                                                      for c in res["centers"]))
+            if tlbl:
+                res = dict(res); res["summary"] += "\n[" + tlbl + "]"
+            self._last_fit = res
+            self.fit_text.insert("end", res["summary"])
+            self.draw_1d(keep_lims=True)
+
+        def _transform_1d(self, x, y):
+            """Monomial background subtraction + smoothing for a 1-D trace, used by
+            BOTH the plot and the fit so they always agree. Returns (y_out, label)."""
+            x = np.asarray(x, float); y = np.asarray(y, float); label = ""
+            if getattr(self, "bg_fit_var", None) and self.bg_fit_var.get():
+                regs = self._region_ranges()
+                txt = self.bg_fit_entry.get().strip() if hasattr(self, "bg_fit_entry") else ""
+                if regs:
+                    bg = background_1d(x, y, regs, "outside")   # average OUTSIDE regions
+                    y = y - bg
+                    label = f"bg {bg:.4g} (outside {len(regs)} reg)"
+                elif txt:
+                    b = eval_monomial(txt, x)
+                    if b is not None:
+                        y = y - b; label = f"bg={txt}"
+                else:
+                    bg = guess_background_1d(x, y)
+                    y = y - bg; label = f"bg {bg:.4g} (auto)"
+            if getattr(self, "smooth_var", None) and self.smooth_var.get():
+                w = self._smooth_window()
+                if w > 1:
+                    y = _moving_average(y, w)
+                    label += (" | " if label else "") + f"smooth {w}"
+            return y, label
+
+        def _region_ranges(self):
+            """List of (lo, hi) for BG regions that have both edges set."""
+            out = []
+            for a, b in getattr(self, "bg_region_list", []):
+                if a is not None and b is not None:
+                    out.append((min(a, b), max(a, b)))
+            return out
+
+        def _cur_region_index(self):
+            try:
+                return max(0, self.region_sel.current())
+            except Exception:
+                return 0
+
+        def _on_region_sel(self):
+            i = self._cur_region_index()
+            if 0 <= i < len(self.bg_region_list):
+                a, b = self.bg_region_list[i]
+                self.edge1_entry.delete(0, "end")
+                self.edge2_entry.delete(0, "end")
+                if a is not None:
+                    self.edge1_entry.insert(0, f"{a:.6g}")
+                if b is not None:
+                    self.edge2_entry.insert(0, f"{b:.6g}")
+
+        def _on_edge_change(self):
+            i = self._cur_region_index()
+            if not (0 <= i < len(self.bg_region_list)):
+                return
+
+            def val(entry):
+                t = entry.get().strip()
+                try:
+                    return float(t)
+                except Exception:
+                    return None
+            self.bg_region_list[i] = [val(self.edge1_entry), val(self.edge2_entry)]
+            if self.view_kind == "1d":
+                self.replot_1d()
+
+        def _add_region(self):
+            self.bg_region_list.append([None, None])
+            names = [f"region {k + 1}" for k in range(len(self.bg_region_list))]
+            self.region_sel.configure(values=names)
+            self.region_sel.current(len(names) - 1)
+            self._on_region_sel()
+
+        def _del_region(self):
+            i = self._cur_region_index()
+            if len(self.bg_region_list) <= 1:
+                self.bg_region_list = [[None, None]]
+            elif 0 <= i < len(self.bg_region_list):
+                self.bg_region_list.pop(i)
+            names = [f"region {k + 1}" for k in range(len(self.bg_region_list))]
+            self.region_sel.configure(values=names)
+            self.region_sel.current(min(i, len(names) - 1))
+            self._on_region_sel()
+            if self.view_kind == "1d":
+                self.replot_1d()
+
+        def _smooth_window(self):
+            try:
+                return max(1, int(round(float(self.smooth_win.get()))))
+            except Exception:
+                return 1
+
+        def _gauss_k(self):
+            """2-D Gaussian circle radius as a multiple of FWHM (semi-axis = k*FWHM)."""
+            try:
+                return max(0.1, float(self.gauss_radius.get()))
+            except Exception:
+                return 1.5
+
+        def _process_image(self, img):
+            """Per-row polynomial background subtraction (systematic noise) then
+            denoise (white noise: spatial average or FFT low-pass). Applied to the
+            shown image and to every camera-sweep fit, so they always agree."""
+            img = np.asarray(img, float)
+            if img.ndim != 2:
+                return img
+            notes = []
+            if getattr(self, "rowbg_var", None) and self.rowbg_var.get():
+                try:
+                    d = int(self.rowbg_deg.get())
+                except Exception:
+                    d = 1
+                img = subtract_row_poly(img, d)
+                notes.append(f"row poly deg {d}")
+            if getattr(self, "denoise_var", None) and self.denoise_var.get():
+                meth = (self.denoise_method.get()
+                        if hasattr(self, "denoise_method") else "average")
+                try:
+                    p = float(self.denoise_param.get())
+                except Exception:
+                    p = 1.5
+                if meth.startswith("FFT"):
+                    img = fft_lowpass(img, p if 0 < p <= 1 else 0.3)
+                    notes.append("FFT low-pass")
+                else:
+                    try:
+                        from scipy.ndimage import gaussian_filter
+                        fill = (float(np.nanmedian(img[np.isfinite(img)]))
+                                if np.isfinite(img).any() else 0.0)
+                        img = gaussian_filter(np.nan_to_num(img, nan=fill),
+                                              sigma=max(0.1, p))
+                        notes.append(f"avg \u03c3={p:g}px")
+                    except Exception:
+                        pass
+            if notes:
+                cur = getattr(self, "_bg_status", "")
+                self._bg_status = ((cur + "   |   ") if cur else "") + ", ".join(notes)
+            return img
+
+        def _image_smooth(self, data, xv, yv):
+            """Blur the background (outside the 2-D Gaussian spot) with the given
+            sigma while keeping the spot itself sharp."""
+            try:
+                sigma = float(self.img_smooth_sigma.get())
+            except Exception:
+                sigma = 1.0
+            if sigma <= 0:
+                return data
+            try:
+                from scipy.ndimage import gaussian_filter
+                fill = float(np.nanmedian(data[np.isfinite(data)])) if np.isfinite(data).any() else 0.0
+                blurred = gaussian_filter(np.nan_to_num(data, nan=fill), sigma=sigma)
+            except Exception:
+                return data
+            g = self._img_gauss
+            if g and g.get("ok"):
+                X, Y = np.meshgrid(np.asarray(xv, float), np.asarray(yv, float))
+                k = self._gauss_k()
+                rx = max(k * g["fwhm_x"], 1e-9); ry = max(k * g["fwhm_y"], 1e-9)
+                inside = (((X - g["x0"]) / rx) ** 2 + ((Y - g["y0"]) / ry) ** 2) <= 1.0
+                return np.where(inside, data, blurred)   # spot sharp, background smooth
+            return blurred
+
+        def _bg_for_fit(self, x, y):
+            """Background for a 1-D fit -> (on, bg_at_x, bg_fn, label). bg_fn(x')
+            gives the background at new x' (for the fit curve)."""
+            if not (getattr(self, "bg_fit_var", None) and self.bg_fit_var.get()):
+                return False, 0.0, (lambda xx: 0.0), ""
+            regs = parse_regions(self.bg_regions.get()) if hasattr(self, "bg_regions") else []
+            mode = self.bg_region_mode.get() if hasattr(self, "bg_region_mode") else "auto"
+            if regs and mode != "auto":
+                which = "outside" if mode.startswith("outside") else "inside"
+                c = background_1d(x, y, regs, which)
+                lbl = f"background \u2248 {c:.6g} ({which} {len(regs)} region(s))"
+                return True, c, (lambda xx, cc=c: np.full_like(np.asarray(xx, float), cc)), lbl
+            txt = self.bg_fit_entry.get().strip()
+            if txt:
+                b = eval_monomial(txt, x)
+                if b is None:
+                    return False, 0.0, (lambda xx: 0.0), f"(bad bg '{txt}', ignored)"
+                return True, b, (lambda xx, t=txt: eval_monomial(t, xx)), f"background = {txt}"
+            g = guess_background_1d(x, y)
+            self.bg_fit_entry.delete(0, "end")
+            self.bg_fit_entry.insert(0, f"{g:.6g}")
+            return (True, g, (lambda xx, c=g: np.full_like(np.asarray(xx, float), c)),
+                    f"background \u2248 {g:.6g} (auto-averaged)")
+
+        def _guess_bg_fit(self):
+            """Fill the background box with an auto-guess from the current data."""
+            if self.view_kind == "1d" and self.x is not None:
+                g = guess_background_1d(self.x, self._norm_apply(self.y))
+            elif self.view_kind in ("image", "stack") and self._disp_data is not None:
+                sub = self._disp_data
+                if self.sel_box is not None:
+                    c0, c1, r0, r1 = self._box_to_pixels(self.sel_box)
+                    sub = sub[r0:r1, c0:c1]
+                g = guess_background_2d(sub)
+            else:
+                messagebox.showinfo("Background", "Plot or select some data first.")
+                return
+            self.bg_fit_entry.delete(0, "end")
+            self.bg_fit_entry.insert(0, f"{g:.6g}")
+            if self.view_kind == "1d":
+                self.replot_1d()
+
+        def _guess_img_bg(self):
+            """Fill the 2-D Gaussian background box with an auto-guess (average of
+            the non-bright pixels) from the current ROI, or the whole image."""
+            if self.view_kind not in ("image", "stack") or self._disp_data is None:
+                messagebox.showinfo("Background", "Open an image first.")
+                return
+            sub = self._disp_data
+            if self.sel_box is not None:
+                c0, c1, r0, r1 = self._box_to_pixels(self.sel_box)
+                sub = sub[r0:r1, c0:c1]
+            g = guess_background_2d(sub)
+            self.img_bg_entry.delete(0, "end")
+            self.img_bg_entry.insert(0, f"{g:.6g}")
+            if self.img_bg_var.get() and self.view_kind in ("image", "stack"):
+                self.redraw_image()
+
+        def _image_bg_value(self, data, xv, yv):
+            """Constant background for the image, per the 'from' mode. A number in
+            the box overrides. Modes: all pixels / auto (exclude bright) / outside
+            2-D Gaussian (k=1.5 x FWHM) / outside ROI box."""
+            txt = self.img_bg_entry.get().strip()
+            if txt:
+                try:
+                    return float(txt)
+                except ValueError:
+                    pass
+            mode = (self.img_bg_mode.get() if hasattr(self, "img_bg_mode")
+                    else "auto (exclude bright)")
+            fin = np.isfinite(data)
+            if mode == "all pixels":
+                v = data[fin]
+                return float(np.mean(v)) if v.size else 0.0
+            if (mode == "outside 2-D Gaussian" and self._img_gauss
+                    and self._img_gauss.get("ok")):
+                g = self._img_gauss
+                X, Y = np.meshgrid(np.asarray(xv, float), np.asarray(yv, float))
+                k = self._gauss_k()
+                rx = max(k * g["fwhm_x"], 1e-9)     # exclusion radius = k x FWHM
+                ry = max(k * g["fwhm_y"], 1e-9)
+                inside = (((X - g["x0"]) / rx) ** 2
+                          + ((Y - g["y0"]) / ry) ** 2) <= 1.0
+                pts = data[(~inside) & fin]
+                if pts.size:
+                    return float(np.mean(pts))
+            if mode == "outside ROI" and self.sel_box is not None:
+                c0, c1, r0, r1 = self._box_to_pixels(self.sel_box)
+                mask = np.ones(data.shape, bool)
+                mask[r0:r1, c0:c1] = False
+                pts = data[mask & fin]
+                if pts.size:
+                    return float(np.mean(pts))
+            return guess_background_2d(data)   # auto (exclude bright) / fallback
+
+        def _lineout_width(self):
+            """Line-out averaging band width in pixels (>=1) from the entry box."""
+            try:
+                w = int(round(float(self.lineout_w.get())))
+            except Exception:
+                w = 1
+            return max(1, w)
 
         def export_fit(self):
             if not self._last_fit:
@@ -3411,6 +4247,228 @@ def main(argv=None):
         def on_odmr_channel(self):
             self.show_cw_odmr(self.odmr_combo.get())
 
+        def _current_navg(self):
+            """Number of averages recorded for the current file (1 if unknown)."""
+            for nm in ("n_averages", "averages", "num_averages", "navg", "n_avg"):
+                v = _as_num_vec(find_node(self.tree_data, nm))
+                if v is not None and v.size:
+                    try:
+                        nv = int(round(float(v.flat[0])))
+                        if nv >= 1:
+                            return nv
+                    except Exception:
+                        pass
+            return 1
+
+        def combine_odmr_dialog(self):
+            """Pick specific runs from several ODMR files and average them."""
+            win = tk.Toplevel(self.root)
+            win.title("Combine ODMR runs across files")
+            win.geometry("640x380")
+            self._combine_rows = []
+            top = ttk.Frame(win, padding=8); top.pack(fill="x")
+            ttk.Label(top, text="Channel:").pack(side="left")
+            chan = ttk.Combobox(top, state="readonly", width=18,
+                                values=["forward", "reverse (backward)", "averaged"])
+            chan.set("averaged"); chan.pack(side="left", padx=(4, 12))
+            rows = ttk.Frame(win)                       # (created below the canvas)
+            ttk.Button(top, text="Add file(s)\u2026",
+                       command=lambda: self._combine_add_files(rows)).pack(side="left")
+            ttk.Label(win, foreground="#555", padding=(8, 0),
+                      text="For each file, list the run numbers to use (1-based, "
+                           "comma-separated), e.g. 1  or  1,3").pack(anchor="w")
+            canv = tk.Canvas(win, height=210, highlightthickness=0)
+            canv.pack(fill="both", expand=True, padx=8)
+            rows = ttk.Frame(canv)
+            canv.create_window((0, 0), window=rows, anchor="nw")
+            rows.bind("<Configure>",
+                      lambda e: canv.configure(scrollregion=canv.bbox("all")))
+            bot = ttk.Frame(win, padding=8); bot.pack(fill="x")
+            self._combine_status = ttk.Label(bot, text="", foreground="#036")
+            self._combine_status.pack(side="left")
+            ttk.Button(bot, text="Combine & plot",
+                       command=lambda: self._combine_run(chan.get())).pack(side="right")
+            # seed with the currently-loaded file if it is an ODMR sweep
+            if getattr(self, "odmr_channels", None) and self.tree_data is not None:
+                self._combine_add_tree(rows, getattr(self, "loaded_path",
+                                                     "current file"), self.tree_data)
+
+        def _combine_add_files(self, rows):
+            paths = filedialog.askopenfilenames(
+                title="Add ODMR file(s)",
+                filetypes=[("HDF5", "*.h5 *.hdf5 *.he5"), ("All", "*.*")])
+            for p in paths:
+                try:
+                    tree = load_hdf5_tree(p)
+                except Exception as e:
+                    messagebox.showerror("Combine", f"Could not load\n{p}\n\n{e}")
+                    continue
+                self._combine_add_tree(rows, p, tree)
+
+        def _combine_add_tree(self, rows, path, tree):
+            mat = odmr_run_matrix(tree, "forward")
+            if mat is None:
+                mat = odmr_run_matrix(tree, "averaged")
+            navg = mat.shape[0] if mat is not None else 0
+            fr = ttk.Frame(rows); fr.pack(fill="x", pady=1)
+            ttk.Label(fr, text=os.path.basename(str(path)), width=32,
+                      anchor="w").pack(side="left")
+            ttk.Label(fr, text=f"(runs 1..{navg})", foreground="#777",
+                      width=12).pack(side="left", padx=(2, 6))
+            ttk.Label(fr, text="use:").pack(side="left")
+            ent = ttk.Entry(fr, width=10); ent.insert(0, "1")
+            ent.pack(side="left", padx=(2, 6))
+            row = {"path": path, "tree": tree, "entry": ent, "frame": fr, "navg": navg}
+            ttk.Button(fr, text="\u2715", width=2,
+                       command=lambda: self._combine_del(row)).pack(side="left")
+            self._combine_rows.append(row)
+
+        def _combine_del(self, row):
+            try:
+                row["frame"].destroy()
+            except Exception:
+                pass
+            if row in self._combine_rows:
+                self._combine_rows.remove(row)
+
+        def _combine_run(self, channel):
+            specs = []
+            for row in self._combine_rows:
+                runs = []
+                for tok in row["entry"].get().replace(";", ",").split(","):
+                    tok = tok.strip()
+                    if tok:
+                        try:
+                            runs.append(int(float(tok)))
+                        except Exception:
+                            pass
+                if runs:
+                    specs.append((row["tree"], runs))
+            if not specs:
+                messagebox.showinfo("Combine",
+                                    "Add at least one file and enter run numbers.")
+                return
+            try:
+                f, trace, nruns, labels = combine_odmr_runs(specs, channel)
+            except Exception as e:
+                messagebox.showerror("Combine", str(e))
+                return
+            self._combine_status.configure(text=f"averaged {nruns} runs")
+            self._plot_combined_odmr(f, trace, nruns, ", ".join(labels))
+
+        def _plot_combined_odmr(self, f, trace, nruns, label):
+            f = np.asarray(f, float); trace = np.asarray(trace, float)
+            keep = np.isfinite(f) & (f > 0) & np.isfinite(trace) & (trace != 0)
+            if keep.sum() >= 2:
+                f, trace = f[keep], trace[keep]
+            ghz = np.nanmax(f) > 1e6
+            xf = f / 1e9 if ghz else f
+            xl = "frequency (GHz)" if ghz else "frequency"
+            yerr = poisson_error(trace) / np.sqrt(max(1, nruns))
+            self._odmr_view = False
+            self._rerender = None
+            self.set_1d(xf, trace, xlabel=xl, ylabel="counts", yerr=yerr,
+                        title=f"Combined ODMR ({nruns} runs: {label})  "
+                              f"(err \u00f7\u221a{nruns})")
+            if xf.size:
+                self._odmr_view = True
+                self._odmr_xrange = (float(np.min(xf)), float(np.max(xf)))
+                self.ax.set_xlim(*self._odmr_xrange)
+                self.canvas.draw_idle()
+            self.model_combo.set("Lorentzian dip (ODMR)")
+            self.nb.select(1)
+
+        def show_camera_sweep(self):
+            """Show the per-frequency camera images as a scrollable movie (one
+            frame per frequency); any per-frame 2-D Gaussian fit is overlaid."""
+            cs = self.camera_sweep
+            if not cs:
+                return
+            self.show_stack(np.asarray(cs["images"], float),
+                            title="ODMR camera sweep",
+                            zcoords=np.asarray(cs["freqs"], float),
+                            zlabel="f", zunit="GHz", name="camera_sweep")
+
+        def fit_sweep(self):
+            """Fit a 2-D Gaussian in the ROI (or whole frame) of EVERY camera-sweep
+            image, store the per-frequency parameters, and overlay each frame's fit
+            so you can scroll through and confirm the NV was picked."""
+            cs = self.camera_sweep
+            if not cs:
+                messagebox.showinfo("Camera sweep",
+                                    "Load an ODMR camera-sweep file first.")
+                return
+            imgs = cs["images"]
+            box = self.sel_box
+            if box is not None and self._disp_data is not None:
+                c0, c1, r0, r1 = self._box_to_pixels(box)
+            else:
+                h, w = np.asarray(imgs[0]).shape[:2]
+                c0, c1, r0, r1 = 0, w, 0, h
+            fits = []
+            for im in imgs:
+                im = self._process_image(np.asarray(im, float))   # same cleaning as display
+                r1c, c1c = min(r1, im.shape[0]), min(c1, im.shape[1])
+                sub = im[r0:r1c, c0:c1c]
+                res = fit_gaussian_2d(sub, np.arange(c0, c1c), np.arange(r0, r1c),
+                                      circular=True)
+                if res.get("ok"):
+                    v = sub[np.isfinite(sub)]
+                    res["roi_mean"] = float(np.mean(v)) if v.size else float("nan")
+                    res["peak"] = float(np.nanmax(sub)) if sub.size else float("nan")
+                    res["integral"] = float(res["amp"] * 2.0 * np.pi
+                                            * res["sigma_x"] * res["sigma_y"])
+                fits.append(res)
+            self._sweep_fits = fits
+            self._sweep_freqs = np.asarray(cs["freqs"], float)
+            nok = sum(1 for f in fits if f.get("ok"))
+            self.show_camera_sweep()                 # display images + overlay
+            try:
+                self.sweep_plot_combo.set("images (scroll & verify)")
+            except Exception:
+                pass
+            messagebox.showinfo(
+                "Camera sweep",
+                f"Fitted {nok}/{len(fits)} frames "
+                + (f"in ROI cols {c0}\u2013{c1}, rows {r0}\u2013{r1}."
+                   if box is not None else "(whole frame \u2014 draw an ROI to target "
+                   "the NV).")
+                + "\n\nScroll the movie to check the overlay, then pick a quantity "
+                  "in 'plot:' to see it vs frequency.")
+
+        def _plot_sweep_quantity(self, which=None):
+            """Plot a fitted parameter vs frequency, or re-show the image movie."""
+            which = which or (self.sweep_plot_combo.get()
+                              if hasattr(self, "sweep_plot_combo") else "sigma (px)")
+            if which.startswith("images"):
+                self.show_camera_sweep()
+                return
+            if not self._sweep_fits:
+                messagebox.showinfo("Camera sweep",
+                                    "Run 'Fit 2-D Gaussian: all frames' first.")
+                return
+            keymap = {"sigma (px)": "sigma", "center x (px)": "x0",
+                      "center y (px)": "y0", "amplitude (counts)": "amp",
+                      "Gaussian integral (A\u00b72\u03c0\u03c3\u00b2)": "integral",
+                      "peak pixel (max)": "peak",
+                      "background (counts)": "bg", "ROI mean (counts)": "roi_mean",
+                      "fit R\u00b2": "r2"}
+            key = keymap.get(which, "sigma")
+            f = self._sweep_freqs
+            vals = np.array([(fit.get(key, np.nan) if fit.get("ok") else np.nan)
+                             for fit in self._sweep_fits], float)
+            f = np.asarray(f, float)
+            m = np.isfinite(f) & np.isfinite(vals) & (f > 0)   # drop zero-padding
+            fx = f[m]
+            self._rerender = lambda w=which: self._plot_sweep_quantity(w)
+            self.set_1d(fx, vals[m], xlabel="frequency (GHz)",
+                        ylabel=which, title=f"camera sweep: {which} vs frequency")
+            if fx.size:                                        # always show min..max freq
+                self._odmr_view = True
+                self._odmr_xrange = (float(np.min(fx)), float(np.max(fx)))
+                self.ax.set_xlim(*self._odmr_xrange)
+                self.canvas.draw_idle()
+
         def show_cw_odmr(self, channel=None):
             """Plot a CW ODMR sweep channel (forward / reverse / averaged) vs
             frequency, with background subtraction applied to that channel."""
@@ -3427,18 +4485,43 @@ def main(argv=None):
                 return
             leaf = cpath.split("/")[-1] if cpath else token
             f = np.squeeze(freqs).astype(float)
-            c = self._bg_apply(leaf, np.squeeze(counts).astype(float))
-            n = min(len(f), len(c))
+            craw = np.squeeze(counts).astype(float)
+            n = min(len(f), len(craw))
+            f, craw = f[:n], craw[:n]
+            keep = np.isfinite(f) & (f > 0) & np.isfinite(craw) & (craw != 0)
+            if keep.sum() >= 2:              # drop padded (zero) sweep points
+                f, craw = f[keep], craw[keep]
+            c = self._bg_apply(leaf, craw)
             ghz = np.nanmax(f) > 1e6
             xl = "frequency (GHz)" if ghz else "frequency"
-            xf = f[:n] / 1e9 if ghz else f[:n]
+            xf = f / 1e9 if ghz else f
             try:
                 self.odmr_combo.set(channel)
             except Exception:
                 pass
+            prev = tuple(self.ax.get_xlim()) if getattr(self, "_odmr_view", False) else None
             self._rerender = lambda ch=channel: self.show_cw_odmr(ch)
-            self.set_1d(xf, c[:n], xlabel=xl, ylabel="counts",
-                        title=f"CW ODMR sweep \u2014 {channel}")
+            navg = self._current_navg()
+            # error on the MEAN of navg averaged runs: sqrt(counts) / sqrt(navg)
+            yerr = poisson_error(craw) / np.sqrt(max(1, navg))
+            self.set_1d(xf, c, xlabel=xl, ylabel="counts", yerr=yerr,
+                        title=f"CW ODMR sweep \u2014 {channel}"
+                              + (f"  (err \u00f7\u221a{navg})" if navg > 1 else ""))
+            if xf.size:
+                full = (float(np.min(xf)), float(np.max(xf)))
+                span = (full[1] - full[0]) or 1.0
+                self._odmr_view = True
+                # keep only a genuine zoom-IN within the sweep; otherwise snap to the
+                # real sweep range -> no more padded 0-to-3 zoom-out on channel switch
+                if (prev is not None
+                        and prev[0] >= full[0] - 0.02 * span
+                        and prev[1] <= full[1] + 0.02 * span
+                        and (prev[1] - prev[0]) < 0.999 * span):
+                    self._odmr_xrange = prev
+                else:
+                    self._odmr_xrange = full
+                self.ax.set_xlim(*self._odmr_xrange)
+                self.canvas.draw_idle()
             self.model_combo.set("Lorentzian dip (ODMR)")
             self.nb.select(1)
 
@@ -3465,7 +4548,8 @@ def main(argv=None):
             if self.camera_scan and modality in self.camera_scan["modalities"]:
                 self.show_camera_scan(modality)
 
-        def show_stack(self, frames, title="", confocal=False, zcoords=None, name=""):
+        def show_stack(self, frames, title="", confocal=False, zcoords=None, name="",
+                       zlabel="z", zunit=None):
             self._stop_play()
             self.view_kind = "stack"
             self.cur_frame_meta = getattr(self, "_pending_meta", None)
@@ -3474,6 +4558,8 @@ def main(argv=None):
             self.cur_image_name = name
             self.frame_idx = 0
             self._is_confocal = bool(confocal)
+            self._frame_coord_label = zlabel
+            self._frame_coord_unit = zunit
             self.frame_z = (np.asarray(zcoords, float)
                             if zcoords is not None else None)
             self.sel_box = None
@@ -3495,12 +4581,12 @@ def main(argv=None):
                 img = self.cur_image
             if img is None:
                 return None
-            if not (self.bg_on and self.bg_tree is not None):
+            img = np.asarray(img, float)
+            if self.bg_on and self.bg_tree is not None:      # background-FILE subtraction
+                img, self._bg_status = self._bg_image(img)
+            else:
                 self._bg_status = ""
-                return img
-            out, status = self._bg_image(np.asarray(img, float))
-            self._bg_status = status
-            return out
+            return img
 
         def _match_frame(self, cand, a):
             """A background array reshaped to match image `a`: exact shape, or a
@@ -3550,6 +4636,23 @@ def main(argv=None):
             ny, nx = shape[0], shape[1]
             src = getattr(self, "coord_src", None)
             src = src.get() if src is not None else "auto"
+            # ODMR sweep per-run map (all_counts_forward / all_counts_reverse):
+            # x = frequency, y = run number, colour scale = counts
+            nm = getattr(self, "cur_image_name", "") or ""
+            if "all_counts" in nm and src != "pixels":
+                _, freqs = get_by_name(self.tree_data, "frequencies", "freq_list",
+                                       "freq_axis", want=("1d",))
+                if freqs is not None:
+                    f = np.squeeze(freqs).astype(float)
+                    ghz = np.nanmax(f) > 1e6
+                    fv = f / 1e9 if ghz else f
+                    fl = "frequency (GHz)" if ghz else "frequency"
+                    runs = np.arange(1, ny + 1, dtype=float)
+                    if f.size == nx:  # rows = runs, cols = frequency
+                        return fv, runs, fl, "run #", "runs \u00d7 frequency"
+                    if f.size == ny:  # rows = frequency, cols = runs
+                        return (np.arange(1, nx + 1, dtype=float), fv,
+                                "run #", fl, "frequency \u00d7 runs (use transpose)")
             if self._is_confocal and self.confocal and src != "pixels":
                 xv, yv, xl, yl, note = confocal_axes(self.confocal, nx, ny, src)
                 return np.asarray(xv, float), np.asarray(yv, float), xl, yl, note
@@ -3559,8 +4662,11 @@ def main(argv=None):
         def _z_label(self):
             if (self.view_kind == "stack" and self.frame_z is not None
                     and 0 <= self.frame_idx < len(self.frame_z)):
-                unit = self.confocal.get("unit", "µm") if self.confocal else "µm"
-                return f"   z = {self.frame_z[self.frame_idx]:.3f} {unit}"
+                lab = getattr(self, "_frame_coord_label", "z") or "z"
+                unit = getattr(self, "_frame_coord_unit", None)
+                if unit is None:
+                    unit = self.confocal.get("unit", "µm") if self.confocal else "µm"
+                return f"   {lab} = {self.frame_z[self.frame_idx]:.4g} {unit}"
             return ""
 
         def _box_to_pixels(self, box):
@@ -3611,6 +4717,21 @@ def main(argv=None):
             self._disp_data = data
             self.img_x, self.img_y = xv, yv
             self.img_xlabel, self.img_ylabel = xlabel, ylabel
+            data = self._process_image(data)     # per-row poly bg + denoise (visible)
+            self._disp_data = data
+            if getattr(self, "img_bg_var", None) and self.img_bg_var.get():
+                _c = self._image_bg_value(data, xv, yv)
+                data = data - _c
+                self._disp_data = data
+                self._bg_status = ((self._bg_status + "   |   ")
+                                   if getattr(self, "_bg_status", "") else "") \
+                    + f"bg {_c:.6g} subtracted ({self.img_bg_mode.get()})"
+            if getattr(self, "img_smooth_var", None) and self.img_smooth_var.get():
+                data = self._image_smooth(data, xv, yv)
+                self._disp_data = data
+                self._bg_status = ((self._bg_status + "   |   ")
+                                   if getattr(self, "_bg_status", "") else "") \
+                    + "background smoothed"
             active = not xlabel.endswith("(pixels)")
             if active:
                 dx = (xv[1] - xv[0]) if xv.size > 1 else 1.0
@@ -3680,7 +4801,11 @@ def main(argv=None):
                     cx, cy = self._cross_xy
                     col = int(np.clip(np.searchsorted(xv, cx), 0, data.shape[1] - 1))
                     row = int(np.clip(np.searchsorted(yv, cy), 0, data.shape[0] - 1))
-                    xcut = data[row, :]; ycut = data[:, col]
+                    w = self._lineout_width()
+                    r0 = max(0, row - w // 2); r1 = min(data.shape[0], row + w // 2 + 1)
+                    c0b = max(0, col - w // 2); c1b = min(data.shape[1], col + w // 2 + 1)
+                    xcut = np.nanmean(data[r0:r1, :], axis=0)   # avg over w rows
+                    ycut = np.nanmean(data[:, c0b:c1b], axis=1)  # avg over w cols
                     self._cross_cuts = {
                         "x": (np.asarray(xv, float), np.asarray(xcut, float)),
                         "y": (np.asarray(yv, float), np.asarray(ycut, float)),
@@ -3688,6 +4813,11 @@ def main(argv=None):
                         "ylabel": ylabel, "pos": (cx, cy)}
                     self.ax.axvline(cx, color="cyan", lw=0.9)
                     self.ax.axhline(cy, color="cyan", lw=0.9)
+                    if w > 1:
+                        for rr in (r0, min(r1 - 1, data.shape[0] - 1)):
+                            self.ax.axhline(yv[rr], color="cyan", lw=0.5, ls=":")
+                        for cc in (c0b, min(c1b - 1, data.shape[1] - 1)):
+                            self.ax.axvline(xv[cc], color="cyan", lw=0.5, ls=":")
                     if self.ax_top is not None:
                         self.ax_top.plot(xv, xcut, "-", lw=1.1, color="tab:blue")
                         self.ax_top.set_ylabel("counts", fontsize=8)
@@ -3713,6 +4843,40 @@ def main(argv=None):
                 if self.sel_box is not None:
                     x0, x1, y0, y1 = self.sel_box
                     self.ax.add_patch(plt_rect(x0, y0, x1 - x0, y1 - y0))
+
+            g = getattr(self, "_img_gauss", None)
+            if g and g.get("ok"):
+                xl = sorted(self.ax.get_xlim());
+                yl = sorted(self.ax.get_ylim())
+                if xl[0] <= g["x0"] <= xl[1] and yl[0] <= g["y0"] <= yl[1]:
+                    th = np.linspace(0, 2 * np.pi, 120)
+                    ct, st = np.cos(g["theta"]), np.sin(g["theta"])
+                    hx, hy = g["fwhm_x"] / 2.0, g["fwhm_y"] / 2.0
+                    ex = g["x0"] + hx * np.cos(th) * ct - hy * np.sin(th) * st
+                    ey = g["y0"] + hx * np.cos(th) * st + hy * np.sin(th) * ct
+                    self.ax.plot(ex, ey, "-", color="magenta", lw=1.4,
+                                 label=f"2-D Gauss FWHM={g['fwhm']:.3g}")
+                    k = self._gauss_k()
+                    kx, ky = k * g["fwhm_x"], k * g["fwhm_y"]
+                    ex2 = g["x0"] + kx * np.cos(th) * ct - ky * np.sin(th) * st
+                    ey2 = g["y0"] + kx * np.cos(th) * st + ky * np.sin(th) * ct
+                    self.ax.plot(ex2, ey2, "--", color="magenta", lw=1.0, alpha=0.7,
+                                 label=f"bg/smooth r={k:g}\u00d7FWHM")
+                    self.ax.plot([g["x0"]], [g["y0"]], "+", color="magenta",
+                                 ms=12, mew=1.8)
+                    self.ax.legend(fontsize=7, loc="upper right")
+
+            sf = getattr(self, "_sweep_fits", None)   # camera-sweep per-frame fit
+            if (sf and self.view_kind == "stack"
+                    and self.cur_image_name == "camera_sweep"
+                    and 0 <= self.frame_idx < len(sf) and sf[self.frame_idx].get("ok")):
+                gg = sf[self.frame_idx]
+                th = np.linspace(0, 2 * np.pi, 100)
+                hx, hy = gg["fwhm_x"] / 2.0, gg["fwhm_y"] / 2.0
+                self.ax.plot(gg["x0"] + hx * np.cos(th), gg["y0"] + hy * np.sin(th),
+                             "-", color="magenta", lw=1.4)
+                self.ax.plot([gg["x0"]], [gg["y0"]], "+", color="magenta",
+                             ms=12, mew=1.8)
 
             if not marginal:
                 self.fig.tight_layout()
@@ -3787,6 +4951,48 @@ def main(argv=None):
             messagebox.showinfo(f"Stats — {scope}", msg)
 
         # -------------------------------------------------------- crosshair --
+        def fit_image_gaussian(self):
+            """Fit a 2-D (circular) Gaussian to the ROI, or the whole image if no
+            ROI is drawn, and mark the centre + FWHM ellipse on the plot."""
+            if self.view_kind not in ("image", "stack"):
+                messagebox.showinfo("2-D Gaussian", "Open an image first (confocal "
+                                                    "scan, camera frame, or an all_counts map).")
+                return
+            data = self._disp_data if self._disp_data is not None \
+                else self._current_image_data()
+            if data is None:
+                return
+            xv = self.img_x if self.img_x is not None else np.arange(data.shape[1])
+            yv = self.img_y if self.img_y is not None else np.arange(data.shape[0])
+            if self.sel_box is not None:
+                c0, c1, r0, r1 = self._box_to_pixels(self.sel_box)
+                sub, sx, sy, scope = data[r0:r1, c0:c1], xv[c0:c1], yv[r0:r1], "ROI"
+            else:
+                sub, sx, sy, scope = data, xv, yv, "whole image"
+            # the displayed image is already monomial-subtracted (see the Image
+            # tab checkbox), so just fit it directly.
+            res = fit_gaussian_2d(sub, sx, sy, circular=True)  # circular=False -> elliptical
+
+            if not res.get("ok"):
+                self._img_gauss = None
+                self.redraw_image()
+                messagebox.showinfo("2-D Gaussian",
+                                    "Fit failed: " + res.get("error", "unknown"))
+                return
+            self._img_gauss = res
+            u = (self.img_xlabel.split("(")[-1].rstrip(")")
+                 if "(" in self.img_xlabel else "px")
+            self.redraw_image()
+            messagebox.showinfo(
+                f"2-D Gaussian fit \u2014 {scope}",
+                f"centre x0 = {res['x0']:.6g} {u}\n"
+                f"centre y0 = {res['y0']:.6g} {u}\n"
+                f"sigma     = {res['sigma']:.6g} {u}\n"
+                f"FWHM      = {res['fwhm']:.6g} {u}\n"
+                f"amplitude = {res['amp']:.6g} counts\n"
+                f"background = {res['bg']:.6g} counts\n"
+                f"R\u00b2        = {res['r2']:.4f}")
+
         def _toggle_crosshair(self):
             if not self.crosshair_var.get():
                 self._cross_xy = None
@@ -3872,8 +5078,10 @@ def main(argv=None):
                                     "place it first \u2014 then the line-outs can be fit.")
                 return
             xarr, yarr = self._cross_cuts[which]
+            xarr = np.asarray(xarr, float)
+            yarr = np.asarray(yarr, float)
             name = self.cross_model.get()
-            res = fit_model(name, np.asarray(xarr, float), np.asarray(yarr, float))
+            res = fit_model(name, xarr, yarr)
             if not res.get("ok"):
                 self.cross_fit_lbl.configure(
                     text=f"{which}-fit failed: {res.get('error', 'no convergence')}")
@@ -3899,6 +5107,7 @@ def main(argv=None):
         def _clear_cut_fits(self):
             self._cross_fit_x = None
             self._cross_fit_y = None
+            self._img_gauss = None          # also clear the 2-D Gaussian overlay
             self.cross_fit_lbl.configure(text="")
             if self.view_kind in ("image", "stack"):
                 self.redraw_image()
