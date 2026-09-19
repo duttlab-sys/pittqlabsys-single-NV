@@ -64,7 +64,7 @@ class ODMRPulsedExperiment(Experiment):
         ]),
         Parameter('microwave', [
             Parameter('enable', True, bool, 'enable MICROWAVE'),
-            Parameter('frequency range', [2.73632e9], list, 'Microwave frequency in Hz', units='Hz'),
+            Parameter('frequency range', [2.7983e9], list, 'Microwave frequency in Hz', units='Hz'),
             Parameter('power', 12, float, 'Microwave power in dBm', units='dBm')
         ]),
         Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
@@ -73,7 +73,7 @@ class ODMRPulsedExperiment(Experiment):
             Parameter('power', 1.0, float, 'Green Laser power in mW', units='mW'),
             Parameter('wavelength', 532.0, float, 'Green Laser wavelength in nm', units='nm')
         ]),
-        Parameter('Filter Wheel OD', 3,
+        Parameter('Filter Wheel OD', 1,
                   [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('delays', [
             Parameter('green_laser_delay', 0.0, float, 'green_laser_delay in ns', units='ns'),
@@ -84,14 +84,60 @@ class ODMRPulsedExperiment(Experiment):
         ]),
         Parameter('adwin', [
             Parameter('count_time', 300, float, 'Photon counting time in ns', units='ns'),
-            Parameter('reset_time', 0, float, 'Reset time between counts in ns', units='ns')]),
+            Parameter('reset_time', 5320, float, 'Reset time between counts in ns', units='ns'),
+            Parameter('readout_start_ns', 6000, float,
+                      'Trigger -> readout-pulse onset in ns (same for every tau)', units='ns'),
+            Parameter('trigger_duration', 150, float, 'Trigger pulse width in ns', units='ns'),
+            Parameter('gate_align_offset_ns', 2000, float,
+                      'One-time scope calibration offset for the fixed gate in ns', units='ns')]),
         Parameter('iq_calibration', [
             Parameter('calibration_file', '', str,
                       'Path to iq_calibration_results.json (empty = use default location)'),
-            Parameter('apply_q_correction', True, bool,
+            Parameter('apply_q_correction', False, bool,
                       'Scale Q channel amplitude by calibrated factor'),
             Parameter('q_amplitude_correction', 0.89, float,
                       'Q channel scale factor (overridden by calibration file if found)'),
+        ]),
+        Parameter('Multiharp Data Collection', [
+            Parameter('enable', True, bool,
+                      'Route the run through the MultiHarp tagger (off = plain averaged run)'),
+            Parameter('mode', "rabi_mw_tagged",
+                      ["rabi_mw_tagged", "rabi_vs_spcm", "readout_vs_spcm",
+                       "init_vs_trigger", "adwin_readout_vs_spcm"],
+                      'MultiHarp correlation case'),
+            Parameter("start_input", [
+                Parameter('channel', 1, [0, 1, 2, 3, 4],
+                          "choose which channel should act as the start input"),
+                Parameter('level_mV', 500, int, "choose trigger level")
+            ]),
+            Parameter("stop_input", [
+                Parameter('channel', 4, [0, 1, 2, 3, 4],
+                          "choose which channel should act as the stop input"),
+                Parameter('level_mV', 320, int, "choose trigger level")
+            ]),
+            Parameter("mw_input", [
+                Parameter('enable', True, bool, 'enable MW rise tagging'),
+                Parameter('channel', 2, [0, 1, 2, 3, 4],
+                          "choose which channel should act as the mw_input"),
+                Parameter('level_mV', 350, int, "choose trigger level")
+            ]),
+            Parameter("mw_fall_input", [
+                Parameter('enable', True, bool, 'enable MW fall tagging (width mode)'),
+                Parameter('channel', 3, [0, 1, 2, 3, 4],
+                          "choose which channel should act as the mw_fall_input"),
+                Parameter('level_mV', 350, int, "choose trigger level")]),
+            Parameter("trigger_input", [
+                Parameter('enable', True, bool, 'enable trigger cross-check tagging'),
+                Parameter('channel', 0, [0, 1, 2, 3, 4],
+                          "choose which channel should act as the trigger_input"),
+                Parameter('level_mV', 300, int, "choose trigger level")
+            ]),
+            Parameter('rabi_tau_values_ns', [
+                Parameter('enable', True, bool,
+                          'pass tau values explicitly instead of letting the tagger infer them'),
+                Parameter('start', 4, int, 'first tau value in ns'),
+                Parameter('stop', 3000, int, 'last tau value in ns'),
+                Parameter('steps', 64, int, 'number of tau steps'), ])
         ]),
         Parameter('scan', [
             Parameter('preview_points', 1, int, 'Number of scan points to preview'),
@@ -103,6 +149,15 @@ class ODMRPulsedExperiment(Experiment):
                       'Number of full runs to average term-by-term (1 = original behavior)'),
             Parameter('optimize_between_runs', True, bool,
                       'Re-optimize confocal position between runs (never in the middle of a run)'),
+            Parameter('optimization_mode', "convergence", ["convergence", "fit"],
+                      'Re-optimization_mode for confocal position'),
+            Parameter('opt_max_steps', 20, int,
+                      'convergence mode only: max steps to climb per axis (safety cap so a '
+                      'noisy axis cannot walk off forever)'),
+            Parameter('opt_improve_frac', 0.02, float,
+                      'convergence mode only: a step must raise counts by more than this '
+                      'fraction (0.02 = 2%) to be accepted, so it climbs real signal '
+                      'instead of chasing shot noise'),
             Parameter('opt_xstep', 0.1, float, 'Optimization x step', units='um'),
             Parameter('opt_ystep', 0.1, float, 'Optimization y step', units='um'),
             Parameter('opt_zstep', 0.1, float, 'Optimization z step', units='um'),
@@ -156,7 +211,8 @@ class ODMRPulsedExperiment(Experiment):
         # Setup logging
         self.logger = logging.getLogger(__name__)
         self.test_mode = mode  # <-- None/"" = real, "testing" = MultiHarp
-        self.timing_result = None  # <-- filled in testing mode
+        self.timing_result = None  # <-- filled by the MultiHarp path (non-rabi cases)
+        self.rabi_result = None  # <-- filled by the MultiHarp path (rabi cases)
         self.repeat_count = None
         self.number_of_iterations = 0
         self.config_path = config_path or self.get_config_path(
@@ -603,6 +659,14 @@ class ODMRPulsedExperiment(Experiment):
         self.green_laser_power = self.settings['green_laser']['power']
         self.green_laser_wavelength = self.settings['green_laser']['wavelength']
 
+        # ADwin / gate timing -- read from the GUI every Start click (no more
+        # editing the __main__ block). These feed configure_gates_v5 and save_hdf5.
+        self.count_time = self.settings['adwin']['count_time']
+        self.reset_time = self.settings['adwin']['reset_time']
+        self.readout_start_ns = self.settings['adwin']['readout_start_ns']
+        self.trigger_duration = self.settings['adwin']['trigger_duration']
+        self.gate_align_offset_ns = self.settings['adwin']['gate_align_offset_ns']
+
         # Output paths
         self.output_dir = self.get_output_dir("odmr_pulsed_output")
         self.logger.info("ODMR Pulsed Experiment initialized")
@@ -636,8 +700,57 @@ class ODMRPulsedExperiment(Experiment):
             return
         # Run experiment
         self.logger.info("Running experiment...")
-        results = self.run_experiment_averaged(self.settings['microwave']['frequency range'])
-        self.data = results
+        freqs = self.settings['microwave']['frequency range']
+        mh = self.settings['Multiharp Data Collection']
+
+        if mh['enable']:
+            # Route the run through the MultiHarp tagger, built entirely from the
+            # GUI settings. This mirrors the old __main__ "Multiharp Rabi" block
+            # so nothing there needs editing anymore.
+            from multiharp_timing_tester import (
+                MultiHarpTimingTester, ChannelConfig, EDGE_RISING, EDGE_FALLING,
+            )
+
+            tester_kwargs = dict(
+                case=mh['mode'],
+                start_input=mh['start_input']['channel'],
+                start_cfg=ChannelConfig(level_mV=mh['start_input']['level_mV'], edge=EDGE_RISING),
+                stop_input=mh['stop_input']['channel'],
+                stop_cfg=ChannelConfig(level_mV=mh['stop_input']['level_mV'], edge=EDGE_RISING),
+            )
+            # MW rise tagging (3rd input)
+            if mh['mw_input']['enable']:
+                tester_kwargs['mw_input'] = mh['mw_input']['channel']
+                tester_kwargs['mw_cfg'] = ChannelConfig(
+                    level_mV=mh['mw_input']['level_mV'], edge=EDGE_RISING)
+            # MW fall tagging (4th input -> WIDTH mode: tau = fall - rise)
+            if mh['mw_fall_input']['enable']:
+                tester_kwargs['mw_fall_input'] = mh['mw_fall_input']['channel']
+                tester_kwargs['mw_fall_cfg'] = ChannelConfig(
+                    level_mV=mh['mw_fall_input']['level_mV'], edge=EDGE_FALLING)
+            # ADwin-trigger cross-check input
+            if mh['trigger_input']['enable']:
+                tester_kwargs['trig_input'] = mh['trigger_input']['channel']
+                tester_kwargs['trig_cfg'] = ChannelConfig(
+                    level_mV=mh['trigger_input']['level_mV'], edge=EDGE_RISING)
+            # tau axis: pass it explicitly (the tagger warns against inferring it -- units trap)
+            tau = mh['rabi_tau_values_ns']
+            if tau['enable']:
+                tester_kwargs['rabi_tau_values_ns'] = np.linspace(
+                    tau['start'], tau['stop'], int(tau['steps']))
+
+            tester = MultiHarpTimingTester(**tester_kwargs)
+            out = tester.run_with_experiment(
+                self, freqs, run_method="run_experiment_averaged")
+            # rabi cases return {'odmr','rabi',...}; other cases return {'odmr','timing'}
+            self.rabi_result = out.get("rabi")
+            self.timing_result = out.get("timing")
+            results = out["odmr"]
+            self.data = results
+        else:
+            results = self.run_experiment_averaged(freqs)
+            self.data = results
+
         self.save_hdf5()
         if results['success']:
             self.logger.info("Experiment completed successfully!")
@@ -669,7 +782,7 @@ class ODMRPulsedExperiment(Experiment):
             count_time=self.count_time,
             counter_delay=self.counter_delay,
             end_time=self.e_t,
-            frequency_range=self.data['frequencies'],
+            frequency_range=self.settings['microwave']['frequency range'],
             green_laser_delay=self.green_laser_delay,
             green_laser_power=self.green_laser_power,
             green_laser_wavelength=self.green_laser_wavelength,
@@ -684,7 +797,6 @@ class ODMRPulsedExperiment(Experiment):
             sequence_text=self.sequence_text,
             sequence_duration=self.sequence_duration,
             start_time=self.s_t,
-            success=self.data["success"],
             trigger_delay=self.trigger_delay,
             adwin_file=self.adwin_file,
             adwin_reached_the_end=self.adwin_reached_the_end,
@@ -1093,7 +1205,10 @@ class ODMRPulsedExperiment(Experiment):
                 # if 'sg384' in self.devices:
                 self.sg384.set_frequency(freq)
                 self.sg384.set_power(self.microwave_power)
+                print(f"setting frequency: {freq / 1e9:.3f} GHz")
+                print(f"settng power: {self.microwave_power}")
                 if self.settings["microwave"]["enable"]:
+                    print("enabling output")
                     self.sg384.enable_output()
                 self.microwave_frequency = freq
                 self.logger.info(f"Set SG384 to {freq / 1e9:.3f} GHz, {self.microwave_power} dBm")
@@ -1118,6 +1233,30 @@ class ODMRPulsedExperiment(Experiment):
         except Exception as e:
             self.logger.error(f"Experiment failed: {e}")
             return {'success': False, 'error': str(e)}
+
+    def _save_adwin_partial(self, results: Dict[str, Any], run_idx: int,
+                            averages: int) -> None:
+        """Write the ADwin count arrays completed so far to a single .npz so a
+        crash during a long averaged run never loses the data. Overwritten after
+        every average (always reflects runs 1..run_idx). Pure NumPy, no h5py; the
+        final save_hdf5() is still the authoritative output. Best-effort: the
+        caller wraps this in try/except so a save hiccup can't stop the run."""
+        out_dir = getattr(self, "output_dir", None) or os.getcwd()
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "adwin_partial_latest.npz")
+        # temp name ends in .npz so np.savez writes it verbatim (it otherwise
+        # appends .npz); os.replace is atomic on the same filesystem.
+        tmp = os.path.join(out_dir, "adwin_partial_latest.writing.npz")
+        payload = {k: np.asarray(v) for k, v in results.items()
+                   if k.startswith(('signal_', 'reference_', 'total_'))}
+        payload['runs_completed'] = np.int64(run_idx)
+        payload['averages_planned'] = np.int64(averages)
+        payload['frequencies'] = np.asarray(results.get('frequencies', []), dtype=float)
+        # write to a temp file then replace, so the .npz is never half-written if a
+        # crash lands mid-save.
+        np.savez(tmp, **payload)
+        os.replace(tmp, path)
+        self.logger.info(f"[partial] ADwin runs 1..{run_idx}/{averages} saved to {path}")
 
     def run_experiment_averaged(self, frequency_range: Optional[List[float]] = None) -> Dict[str, Any]:
         """
@@ -1185,6 +1324,15 @@ class ODMRPulsedExperiment(Experiment):
             results[f'reference_{run_idx}'] = r
             results[f'total_{run_idx}'] = t
 
+            # ---- crash-safe incremental save: after EACH average, write all runs
+            # completed so far to disk. A crash mid-averaging (or a MultiHarp/
+            # analysis crash afterwards) then never loses a multi-hour run. This is
+            # insurance only; the final save_hdf5() remains the authoritative output.
+            try:
+                self._save_adwin_partial(results, run_idx, averages)
+            except Exception as e:
+                self.logger.error(f"partial save after run {run_idx} failed (continuing): {e}")
+
         # Term-by-term average across runs (float; fractional averages are correct).
         signal_avg = np.mean(np.stack(signal_runs, axis=0), axis=0)
         ref_avg = np.mean(np.stack(ref_runs, axis=0), axis=0)
@@ -1210,21 +1358,33 @@ class ODMRPulsedExperiment(Experiment):
 
     def _optimize_axis(self, axis: str, step: float) -> None:
         """
-        3-point quadratic-fit maximization on one nanodrive axis ('x'/'y'/'z').
+        Maximize counts on one nanodrive axis ('x'/'y'/'z'), using either a
+        3-point quadratic fit ("fit") or a hill-climb ("convergence"), selected
+        by settings['averaging']['optimization_mode'].
 
 
-        Step back 2x first to remove backlash, sample minus/old/plus, parabola-fit.
-        The parabola vertex is trusted ONLY when the fit is concave-down (a < 0, a
-        real maximum) AND the vertex lands inside the sampled span; otherwise the
-        "vertex" is a minimum or a wild extrapolation, so we fall back to the best
-        point we actually measured. Out-of-range moves (ARGUMENT_ERROR) are skipped.
+        fit:
+            Step back 2x first to remove backlash, sample minus/old/plus, then
+            parabola-fit. The vertex is trusted ONLY when the fit is concave-down
+            (a < 0, a real maximum) AND the vertex lands inside the sampled span;
+            otherwise fall back to the best point actually measured.
+
+
+        convergence:
+            Sample the current spot plus two + steps, pick a climbing direction,
+            then keep stepping while each step raises counts by more than
+            opt_improve_frac, up to opt_max_steps. Land on the best point seen.
+            Moves as little as possible (less stage drift) and requires a real
+            improvement, not a shot-noise flicker, before accepting a step.
+
+
+        Out-of-range moves (ARGUMENT_ERROR) are skipped.
         """
         nd = self.nd
         pos_key = f'{axis}_pos'
         opt = self.settings['averaging']
         settle_time = float(opt['opt_settle_time'])
         damping_ratio = float(opt['opt_damping_ratio'])
-
 
         def move(target) -> bool:
             try:
@@ -1233,52 +1393,100 @@ class ODMRPulsedExperiment(Experiment):
                 return True
             except Exception as e:
                 if "ARGUMENT_ERROR" in str(e):
+                    print(f"Skipping {axis} move (out of range): {e}")
                     return False
                 raise
-
 
         def read_pos():
             return nd.read_probes(pos_key)
 
+        if opt['optimization_mode'] == "fit":
+            # Back off two steps to take out backlash, then sample minus / old / plus.
+            move(read_pos() - 2 * step)
+            samples = []  # (position, count_rate)
+            for _ in range(3):
+                if move(read_pos() + step):
+                    samples.append((read_pos(), self._read_opt_counts()))
 
-        # Back off two steps to take out backlash, then sample minus / old / plus.
-        move(read_pos() - 2 * step)
-        samples = []  # (position, count_rate)
-        for _ in range(3):
-            if move(read_pos() + step):
-                samples.append((read_pos(), self._read_opt_counts()))
-
-
-        if len(samples) < 3:
-            return
-
-
-        coords = np.array([p for p, _ in samples], dtype=float)
-        counts = np.array([c for _, c in samples], dtype=float)
-        a, b, _c = np.polyfit(coords, counts, 2)
-
-
-        best_pos, best_counts = max(samples, key=lambda pc: pc[1])
-        lo, hi = float(coords.min()), float(coords.max())
-
-
-        # Only trust the vertex for a concave-down parabola whose vertex is in range.
-        use_vertex = False
-        vertex = None
-        if a < 0:
-            vertex = float(-b / (2 * a))
-            if lo <= vertex <= hi:
-                use_vertex = True
-
-
-        if use_vertex:
-            if not move(vertex):
+            if len(samples) < 3:
+                print(f"Skipping {axis}-optimization: insufficient valid points.")
                 return
-            counts_at_vertex = self._read_opt_counts()
-            if best_counts > counts_at_vertex:
-                move(vertex + damping_ratio * (best_pos - vertex))
+
+            coords = np.array([p for p, _ in samples], dtype=float)
+            counts = np.array([c for _, c in samples], dtype=float)
+            a, b, _c = np.polyfit(coords, counts, 2)
+
+            best_pos, best_counts = max(samples, key=lambda pc: pc[1])
+            lo, hi = float(coords.min()), float(coords.max())
+
+            # Only trust the vertex for a concave-down parabola whose vertex is in range.
+            vertex = None
+            use_vertex = False
+            if a < 0:
+                vertex = float(-b / (2 * a))
+                if lo <= vertex <= hi:
+                    use_vertex = True
+
+            if use_vertex:
+                if not move(vertex):
+                    return
+                counts_at_vertex = self._read_opt_counts()
+                # If a sampled point actually beat the vertex, damp toward it.
+                if best_counts > counts_at_vertex:
+                    move(vertex + damping_ratio * (best_pos - vertex))
+            else:
+                # Unreliable fit (a >= 0, or vertex outside the sampled span):
+                # go to the best point we physically measured.
+                print(f"{axis}: unreliable parabola (a={a:.3g}); using best sampled point.")
+                move(best_pos)
+
+
+        elif opt['optimization_mode'] == "convergence":
+            max_steps = int(opt['opt_max_steps'])
+            improve_frac = float(opt['opt_improve_frac'])
+
+            def better(new, ref):
+                # new must beat ref by more than improve_frac (relative) to count.
+                return new > ref * (1.0 + improve_frac)
+
+            # Opener: sample the current spot, then two steps in +.
+            samples = []  # (position, count_rate)
+            samples.append((read_pos(), self._read_opt_counts()))
+            for _ in range(2):
+                if move(read_pos() + step):
+                    samples.append((read_pos(), self._read_opt_counts()))
+            if len(samples) < 3:
+                print(f"Skipping {axis}-optimization: insufficient valid points.")
+                return
+            best_pos, best_counts = max(samples, key=lambda pc: pc[1])
+            c_start = samples[0][1]  # counts at the original position
+            c_far = samples[-1][1]  # counts at the furthest + point
+            # Pick a climbing direction from the opener:
+            #   + : the furthest point is best and clearly beats the start -> keep going +
+            #   - : the original start is best -> + was downhill, reverse
+            #   0 : the peak is bracketed in the middle (we already overshot) -> just
+            #       land on the best of the three below.
+            direction = 0
+            if best_pos == samples[-1][0] and better(c_far, c_start):
+                direction = +1
+            elif best_pos == samples[0][0]:
+                direction = -1
+                move(samples[0][0])  # return to start before heading - (takes up + backlash)
+            steps_taken = 0
+            while direction != 0 and steps_taken < max_steps:
+                if not move(read_pos() + direction * step):
+                    break  # hit the range limit
+                c_new = self._read_opt_counts()
+                if better(c_new, best_counts):
+                    best_pos, best_counts = read_pos(), c_new
+                    steps_taken += 1
+                else:
+                    break  # stopped improving -> we just stepped past the peak
+            move(best_pos)  # land on the best point we actually measured
+            print(f"{axis}: converged at {best_pos:.3f} um, ~{best_counts:.0f} cts/s "
+                  f"(+{steps_taken} step(s) past opener).")
         else:
-            move(best_pos)
+            raise NotImplementedError
 
     def _optimize_position(self) -> None:
         """
@@ -1677,13 +1885,13 @@ readout pulse on channel 3 at 502000ns, square, 2000ns, 1.0"
         HS{1,6} matches what a ref paper found best for short traces; flip to n_left=6, n_right=1 to reverse which side is steep.
         """
         sequence_text = """
-sequence: name=rabi, type=rabi, duration=12900ns, sample_rate=1GHz, repeat_count=100000
-variable pulse_duration, start=4ns, stop=500ns, steps=64
+sequence: name=RABI, type=RABI, duration=14300ns, sample_rate=1GHz, repeat_count=33333
+variable pulse_duration, start=4ns, stop=3000ns, steps=64
 init pulse on channel 4 at 0ns, square, 2000ns, 1.0
-MW pulse on channel 1 at 2900ns, square, pulse_duration, 1.0
-marker, reference_MW_1 on channel 1 at 2900ns, pulse_duration
-readout pulse on channel 4 at 5900ns, square, 7000ns, 1.0
-marker, reference_readout_1 on channel 4 at 5900ns, 7000ns
+MW pulse on channel 1 at 3000ns, square, pulse_duration, 1.0
+readout pulse on channel 4 at 6071ns, square, 8229ns, 1.0
+marker, reference_MW_1 on channel 1 at 3000ns, pulse_duration
+marker, reference_readout_1 on channel 4 at 6071ns, 8229ns
         """
         return sequence_text.strip()
 
@@ -1894,11 +2102,11 @@ if __name__ == "__main__":
     else:
         print("Failed to generate AWG sequences")"""
 
-    # full experiment part
+    """# full experiment part
     experiment = ODMRPulsedExperiment(name="test_odmr")
 
     # Set parameters
-    experiment.set_microwave_parameters(2.73632e9, 12.0, 0.0)
+    experiment.set_microwave_parameters(2.79354e9, 12.0, 0.0)
     experiment.set_green_laser_parameters(1.0, 532)
     experiment.set_delay_parameters(0.0, 0.0, 0.0)
     # Create and load example sequence
@@ -1922,7 +2130,7 @@ if __name__ == "__main__":
     experiment.hardware_calibrator.update_calibration_delays(overrides)
 
     experiment.microwave_power = experiment.settings['microwave']['power']
-    #experiment.settings['microwave']['frequency range'] = [2.84e9, 2.8425e9, 2.845e9, 2.8475e9, 2.85e9, 2.8525e9, 2.855e9, 2.8575e9, 2.86e9, 2.8625e9, 2.865e9, 2.8675e9, 2.87e9, 2.8725e9, 2.875e9, 2.8775e9, 2.88e9, 2.8825e9, 2.885e9, 2.8875e9, 2.89e9, 2.8925e9, 2.895e9, 2.8975e9, 2.9e9]
+    #experiment.settings['microwave']['frequency range'] = [2.77e9, 2.771e9, 2.772e9, 2.773e9, 2.774e9, 2.775e9, 2.776e9, 2.777e9, 2.778e9, 2.779e9, 2.78e9, 2.781e9, 2.782e9, 2.783e9, 2.784e9, 2.785e9, 2.786e9, 2.787e9, 2.788e9, 2.789e9, 2.79e9, 2.791e9, 2.792e9, 2.793e9, 2.794e9, 2.795e9, 2.796e9, 2.797e9, 2.798e9, 2.799e9, 2.8e9, 2.801e9, 2.802e9, 2.803e9, 2.804e9, 2.805e9, 2.806e9, 2.807e9, 2.808e9, 2.809e9, 2.81e9, 2.811e9, 2.812e9, 2.813e9, 2.814e9, 2.815e9, 2.816e9, 2.817e9, 2.818e9]
     experiment.mw_delay = experiment.settings['delays']['mw_delay']
     experiment.green_laser_delay = experiment.settings['delays']['green_laser_delay']
     experiment.counter_delay = experiment.settings['delays']['counter_delay']
@@ -1955,11 +2163,11 @@ if __name__ == "__main__":
     else:
         experiment.logger.info(f"Failed to load sequence from {source}")
 
-    experiment.count_time = 340  # then 390 then 415
-    experiment.reset_time = 6320
+    experiment.count_time = 300  # then 390 then 415
+    experiment.reset_time = 5320 # was 6320: decreasing it to make ref away from laser falling edge
     experiment.readout_start_ns = 6000
     experiment.trigger_duration = 150
-    experiment.gate_align_offset_ns = 1800 #1650
+    experiment.gate_align_offset_ns = 2000 #1650
     # Run experiment
     print("running exp")
     experiment.logger.info("Running experiment...")
@@ -1975,7 +2183,8 @@ if __name__ == "__main__":
     else:
         experiment.logger.info(f"Experiment failed: {results['error']}")
     #experiment.show_sequence_preview(10)
-    experiment.logger.info("\nODMR Pulsed Experiment ready!")
+    experiment.logger.info("\nODMR Pulsed Experiment ready!")"""
+
     """# Multiharp tester:
     experiment = ODMRPulsedExperiment(name="test_odmr", mode="testing")  # drop mode= for a real run
     # Set parameters
@@ -2058,11 +2267,10 @@ if __name__ == "__main__":
     experiment.save_hdf5()
     experiment.cleanup()"""
 
-
-    """#Multiharp Rabi:
+    #Multiharp Rabi:
     experiment = ODMRPulsedExperiment(name="test_odmr", mode="testing")  # drop mode= for a real run
     # Set parameters
-    experiment.set_microwave_parameters(2.86041e9, 12.0, 0.0)
+    experiment.set_microwave_parameters(2.7983e9, 12.0, 0.0)
     experiment.set_green_laser_parameters(1.0, 532)
     experiment.set_delay_parameters(0.0, 0.0, 0.0)
 
@@ -2114,31 +2322,33 @@ if __name__ == "__main__":
     else:
         experiment.logger.info(f"Failed to load sequence from {source}")
 
-    experiment.count_time = 340  # then 390 then 415
-    experiment.reset_time = 6320
+    experiment.count_time = 300  # then 390 then 415
+    experiment.reset_time = 5320 # was 6320: decreasing it to make ref away from laser falling edge
     experiment.readout_start_ns = 6000
     experiment.trigger_duration = 150
-    experiment.gate_align_offset_ns = 1800  # 1650
+    experiment.gate_align_offset_ns = 2000 #1650
     # Run experiment
     print("running exp")
     experiment.logger.info("Running experiment...")
-    from multiharp_timing_tester import MultiHarpTimingTester, ChannelConfig, EDGE_RISING, EDGE_FALLING
     import numpy as np
+    from multiharp_timing_tester import MultiHarpTimingTester, ChannelConfig, EDGE_RISING, EDGE_FALLING
 
     tester = MultiHarpTimingTester(
-        case="rabi_mw_tagged", start_input=1, stop_input=4,
-        mw_input=2, mw_fall_input=3,
-        rabi_sig_offset_ns=950, rabi_sig_width_ns=300,  # onset, past the ~900 ns rise
-        rabi_ref_offset_ns=5000, rabi_ref_width_ns=300,
-        rabi_tau_values_ns=np.linspace(4, 3000, 64),
-        decode_chunk_records=50_000_000,  # lower to ~20M if RAM is tight
+    case = "rabi_mw_tagged",
+    start_input = 1, start_cfg = ChannelConfig(level_mV=500, edge=EDGE_RISING), # readout marker (~720 mV)
+    stop_input = 4, stop_cfg = ChannelConfig(level_mV=320, edge=EDGE_RISING), # SPCM (~640 mV)
+    mw_input = 2, mw_cfg = ChannelConfig(level_mV=350, edge=EDGE_RISING), # MW rise (~700 mV)
+    mw_fall_input = 3, mw_fall_cfg = ChannelConfig(level_mV=350, edge=EDGE_FALLING),  # MW fall
+    trig_input = 0, trig_cfg = ChannelConfig(level_mV=300, edge=EDGE_RISING),  # DO28 (~610 mV)
+    rabi_tau_values_ns = np.linspace(4, 3000, 64),  # pass explicitly — do NOT let it infer (units trap)
     )
-    out = tester.run_rabi_with_experiment(experiment, raw_records_path = r"D:\Data\rabi_raw.npy")
-
-    results = out["odmr"]
-    experiment.data = results
+    out = tester.run_with_experiment(
+        experiment, experiment.settings['microwave']['frequency range'],
+        run_method="run_experiment_averaged")  # FIX 1: actually run 'averages' times and average
+    rabi = out["rabi"]
+    experiment.data = out["odmr"]  # FIX 2: hand the ADwin result to save_hdf5 (it saves self.data)
     experiment.save_hdf5()
-    experiment.cleanup()"""
+    experiment.cleanup()
 
     #1. Run IQCalibrationExperiment  →  writes iq_calibration_results.json
     #2. Run ODMRPulsedExperiment     →  reads iq_calibration_results.json at start
