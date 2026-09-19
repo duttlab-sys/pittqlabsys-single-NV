@@ -3269,11 +3269,11 @@ class ProteusDevice(Device):
         # Create a Task Table
         self.driver.set_task_table_length(4)
         self.driver.inst.send_scpi_cmd(':TASK:COMP:SEL 1')
-        self.driver.inst.send_scpi_cmd(':TASK:COMP:TYPE:STAR')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:TYPE STAR')
         self.driver.inst.send_scpi_cmd(':TASK:COMP:SEGM 1')
         self.driver.inst.send_scpi_cmd(':TASK:COMP:NEXT1 2')
         self.driver.inst.send_scpi_cmd(':TASK:COMP:SEL 2')
-        self.driver.inst.send_scpi_cmd(':TASK:COMP:TYPE:SEQ')
+        self.driver.inst.send_scpi_cmd(':TASK:COMP:TYPE SEQ')
         self.driver.inst.send_scpi_cmd(':TASK:COMP:SEGM 2')
         self.driver.inst.send_scpi_cmd(':TASK:COMP:NEXT1 1')
         self.driver.inst.send_scpi_cmd(':TASK:COMP:SEQ 1')
