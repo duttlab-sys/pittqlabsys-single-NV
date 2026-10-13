@@ -1413,12 +1413,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 
                 gui_logger.info(f"Saving experiment {name_tag} (time: {time_tag}) to {path}")
                 experiment.update({'tag' : name_tag, 'path': path})
-                experiment.save_data()
-                experiment.save_image_to_disk()
-                experiment.save_aqs()
-                experiment.save_log()
-                experiment.save_data_to_matlab()
-                gui_logger.info(f"Experiment {name_tag} saved successfully")
+                if experiment.settings["save_data_old_way"] == True:
+                    experiment.save_data()
+                    experiment.save_image_to_disk()
+                    experiment.save_aqs()
+                    experiment.save_log()
+                    experiment.save_data_to_matlab()
+                    gui_logger.info(f"Experiment {name_tag} saved successfully")
 
         def delete_data():
             """

@@ -404,8 +404,10 @@ def find_averaging(tree):
     channels = ("signal", "reference", "total")
     runs = {}
     for ch in channels:
-        idx = [(int(m.group(1)), nm) for nm in flat
-               if (m := re.fullmatch(rf"{ch}_(\d+)", nm))]
+        idx = [(int(m.group(1)), nm)
+               for nm in flat
+               for m in [re.fullmatch(rf"{ch}_(\d+)", nm)]
+               if m]
         idx.sort()
         if idx:
             runs[ch] = [flat[nm] for _, nm in idx]
@@ -422,6 +424,48 @@ def find_averaging(tree):
 def poisson_error(y):
     """Shot-noise (Poisson) 1-sigma error for a counts array: sqrt(N)."""
     return np.sqrt(np.abs(np.asarray(y, float)))
+
+
+def _au_baseline(y):
+    """Robust 'bright' baseline of a 1-D trace: median of its upper half. Used to
+    normalise to arbitrary units with the baseline at 1.0."""
+    y = np.asarray(y, float)
+    fin = y[np.isfinite(y)]
+    if fin.size == 0:
+        return 1.0
+    med = np.nanmedian(fin)
+    hi = fin[fin >= med]
+    base = np.nanmedian(hi) if hi.size else med
+    if not np.isfinite(base) or base == 0:
+        base = float(np.nanmax(np.abs(fin))) or 1.0
+    return float(base)
+
+
+def normalize_au(y):
+    """Normalise so the baseline (bright level) is 1.0 -> a 10%-contrast feature
+    sits at 0.9 (the arbitrary-units convention used in NV papers)."""
+    return np.asarray(y, float) / _au_baseline(y)
+
+
+def _noise_sd(y):
+    """Robust per-point noise level of a 1-D trace, from the median absolute
+    successive difference. It measures the actual scatter and is insensitive to a
+    smooth trend and to a few real features (e.g. an ODMR dip). Returned as a
+    constant array so it can be used directly as an error bar. This is the honest
+    uncertainty of the (already-averaged) data -- NOT sqrt of a ratio/normalised
+    value, which is meaningless."""
+    y = np.asarray(y, float)
+    fin = y[np.isfinite(y)]
+    if fin.size < 3:
+        sd = float(np.nanstd(fin)) if fin.size else 0.0
+    else:
+        d = np.abs(np.diff(fin))
+        sd = 1.4826 * float(np.median(d)) / np.sqrt(2.0)      # robust Gaussian sigma
+        if not np.isfinite(sd) or sd == 0:
+            sd = float(np.nanstd(np.diff(fin))) / np.sqrt(2.0)
+    if not np.isfinite(sd) or sd <= 0:
+        sd = float(np.nanstd(fin)) if fin.size else 1.0
+    return np.full(np.shape(y), sd if sd > 0 else 1.0, float)
 
 
 def stack_runs(runs):
@@ -1100,6 +1144,8 @@ def detect_pulsed_mode(seq_text, has_freq_array):
         return "echo"
     if typ in ("odmr", "pulsed_odmr", "podmr") or has_freq_array:
         return "odmr"
+    if typ in ("t1", "t1_relaxation", "relaxation") or (typ and typ.startswith("t1")):
+        return "t1"
     if "amplitude" in varname:
         return "rabi_amp"
     if "duration" in varname or "width" in varname or typ == "rabi":
@@ -1127,7 +1173,7 @@ def parse_sequence_text(text):
         return None
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     info = {"name": None, "type": None, "duration_ns": None,
-            "sample_rate": None, "variables": [], "pulses": []}
+            "sample_rate": None, "variables": [], "pulses": [], "markers": []}
     for ln in lines:
         low = ln.lower()
         if low.startswith("sequence:"):
@@ -1161,6 +1207,20 @@ def parse_sequence_text(text):
                         {"name": m.group("name"), "channel": int(m.group("ch")),
                          "at": parts[0], "shape": parts[1],
                          "width": parts[2], "amp": parts[3]})
+        elif "marker" in low or re.search(r"\bmkr\b", low):
+            m = re.match(r"(?P<name>\S+)\s+(?:marker|mkr)\s+(?:on\s+channel\s+)?"
+                         r"(?P<n>\d+)\s+at\s+(?P<rest>.+)$", ln, re.I)
+            if m:
+                parts = [q.strip() for q in m.group("rest").split(",")]
+                if len(parts) >= 4:                 # START, shape, WIDTH, amp
+                    w, a = parts[2], parts[3]
+                elif len(parts) >= 2:               # START, WIDTH
+                    w, a = parts[1], "1.0"
+                else:
+                    w, a = "50", "1.0"
+                info["markers"].append(
+                    {"name": m.group("name"), "marker": int(m.group("n")),
+                     "at": parts[0], "width": w, "amp": a})
     return info
 
 
@@ -1232,13 +1292,29 @@ def sequence_pulse_geometry(parsed, scan_index=0):
         pulses.append({"name": p["name"], "channel": p["channel"],
                        "start_ns": float(start_ns),
                        "width_ns": float(max(width_ns, 0.0)), "amp": float(amp)})
+    markers = []
+    for p in parsed.get("markers", []):
+        try:
+            start_ns = _eval_seq_expr(p["at"], subs_time) * 1e9
+            width_ns = _eval_seq_expr(p["width"], subs_time) * 1e9
+        except Exception:
+            continue
+        try:
+            amp = _eval_seq_expr(p["amp"], subs_amp)
+        except Exception:
+            amp = 1.0
+        markers.append({"name": p["name"], "marker": p["marker"],
+                        "start_ns": float(start_ns),
+                        "width_ns": float(max(width_ns, 0.0)), "amp": float(amp)})
     channels = sorted({p["channel"] for p in pulses})
+    marker_nums = sorted({m["marker"] for m in markers})
     t_max = max((p["start_ns"] + p["width_ns"] for p in pulses), default=0.0)
+    t_max = max(t_max, max((m["start_ns"] + m["width_ns"] for m in markers), default=0.0))
     if parsed.get("duration_ns"):
         t_max = max(t_max, parsed["duration_ns"])
     return {"var_name": var_name, "var_value": var_val, "var_unit": var_unit,
-            "scan_index": idx, "steps": steps, "pulses": pulses,
-            "channels": channels, "t_max_ns": t_max}
+            "scan_index": idx, "steps": steps, "pulses": pulses, "markers": markers,
+            "channels": channels, "marker_nums": marker_nums, "t_max_ns": t_max}
 
 
 # =============================================================================
@@ -1598,12 +1674,245 @@ def suggest_models(mode):
         "rabi_amp":  ["Damped cosine (Rabi)"],
         "ramsey":  ["Ramsey (Gaussian×cos)"],
         "echo":    ["Stretched exp (echo)"],
+        "t1":      ["Exponential decay", "Exponential rise"],
     }.get(mode, [])
     for p in reversed(pref):
         if p in order:
             order.remove(p)
             order.insert(0, p)
     return order
+
+
+# =============================================================================
+# Configurable pulsed fitters for Ramsey (optional 14N/15N hyperfine + a
+# selectable decay envelope) and Hahn echo (selectable envelope + optional
+# 13C Larmor collapse/revival modulation).  Kept at module level so they stay
+# importable and unit-testable without a GUI.  Frequencies are in cycles per
+# x-unit (i.e. GHz when the time axis is in ns, which is what build_time_axis
+# returns), so a detuning of 1 MHz == 1e-3 here.
+# =============================================================================
+
+# Axial hyperfine splitting between ADJACENT ms=0<->ms=-1 lines:
+#   14N (I=1)   -> 3 lines spaced by ~2.16 MHz
+#   15N (I=1/2) -> 2 lines spaced by ~3.03 MHz
+HF_SPLIT_MHZ = {"n14": 2.16, "n15": 3.03}
+# 13C gyromagnetic ratio -> Larmor frequency.  10.7084 MHz/T = 1.07084 kHz/G,
+# expressed here as cycles-per-ns per gauss so it matches a ns time axis.
+GAMMA_C13_GHZ_PER_G = 1.07084e-6
+
+_ENV_FIXED_P = {"gauss": 2.0, "exp": 1.0}      # "stretch" -> p is a free param
+_ENV_NAME = {"gauss": "Gaussian (p=2)", "exp": "exponential (p=1)"}
+
+
+def _ramsey_line_sum(xx, f, phi, lines, a):
+    """Sum of cosine fringes for the chosen nuclear-spin model, normalised so the
+    peak amplitude stays ~1.  a = adjacent-line splitting in cycles per x-unit."""
+    tp = 2 * np.pi
+    if lines == "n14":                         # 3 lines at f-a, f, f+a
+        return (np.cos(tp * (f - a) * xx + phi)
+                + np.cos(tp * f * xx + phi)
+                + np.cos(tp * (f + a) * xx + phi)) / 3.0
+    if lines == "n15":                         # 2 lines at f-a/2, f+a/2
+        return (np.cos(tp * (f - 0.5 * a) * xx + phi)
+                + np.cos(tp * (f + 0.5 * a) * xx + phi)) / 2.0
+    return np.cos(tp * f * xx + phi)           # single line
+
+
+def _curve_fit_dense(func, x, y, p0, bounds, pnames, n_dense=800):
+    """curve_fit wrapper that also returns a dense fit curve, R^2 and 1-sigma
+    parameter errors.  Shaped so the GUI can treat it like fit_model()'s output."""
+    order = np.argsort(x)
+    xs, ys = x[order], y[order]
+    kw = dict(p0=p0, maxfev=100000)
+    if bounds is not None:
+        kw["bounds"] = bounds
+    popt, pcov = curve_fit(func, xs, ys, **kw)
+    perr = (np.sqrt(np.abs(np.diag(pcov))) if pcov is not None
+            else np.full(len(popt), np.nan))
+    xd = np.linspace(xs.min(), xs.max(), n_dense)
+    return {"popt": popt, "perr": perr, "pnames": pnames,
+            "x_dense": xd, "y_dense": func(xd, *popt),
+            "r2": r_squared(ys, func(xs, *popt))}
+
+
+def _param_block(pnames, popt, perr):
+    out = ["", "parameters:"]
+    for nm, val, err in zip(pnames, popt, perr):
+        out.append(f"  {nm:>5} = {val:.6g}"
+                   + (f"  \u00b1 {err:.3g}" if np.isfinite(err) else ""))
+    return out
+
+
+def fit_ramsey_configurable(x, y, lines="single", envelope="stretch",
+                            split_mhz=None, x_in_ns=True, n_dense=800):
+    """Fit a Ramsey fringe with a selectable nuclear-spin model and envelope.
+      lines    : 'single' | 'n14' (3 lines) | 'n15' (2 lines)
+      envelope : 'gauss' (p=2) | 'exp' (p=1) | 'stretch' (p free, 0.3..5)
+      split_mhz: adjacent-line hyperfine splitting in MHz (defaults to the
+                 standard value for the chosen isotope; ignored for 'single').
+    Returns a dict (title/summary/xf/yf/r2) compatible with _pulsed_fit, or None
+    if there are too few points."""
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    m = np.isfinite(x) & np.isfinite(y)
+    x, y = x[m], y[m]
+    if len(x) < 5:
+        return None
+    if lines in ("n14", "n15"):
+        smhz = HF_SPLIT_MHZ[lines] if split_mhz is None else float(split_mhz)
+        a = smhz * 1e-3                        # MHz -> cycles/ns (GHz)
+    else:
+        a = 0.0
+    f0 = _osc_freq_seed(x, y)
+    A0 = 0.5 * (np.nanmax(y) - np.nanmin(y)) or 1e-9
+    C0 = float(np.nanmean(y))
+    T0 = max(_span(x) / 2.0, 1e-9)
+    pfix = _ENV_FIXED_P.get(envelope)          # None => fit p
+
+    if pfix is None:
+        def func(xx, C, A, f, phi, T, p):
+            return C + A * _ramsey_line_sum(xx, f, phi, lines, a) \
+                * np.exp(-(np.abs(xx) / T) ** p)
+        pnames = ["C", "A", "f", "phi", "T", "p"]
+        p0 = [C0, A0, f0, 0.0, T0, 1.5]
+        bounds = ([-np.inf, 0, 0, -np.pi, 1e-9, 0.3],
+                  [np.inf, np.inf, np.inf, np.pi, np.inf, 5.0])
+    else:
+        def func(xx, C, A, f, phi, T):
+            return C + A * _ramsey_line_sum(xx, f, phi, lines, a) \
+                * np.exp(-(np.abs(xx) / T) ** pfix)
+        pnames = ["C", "A", "f", "phi", "T"]
+        p0 = [C0, A0, f0, 0.0, T0]
+        bounds = ([-np.inf, 0, 0, -np.pi, 1e-9],
+                  [np.inf, np.inf, np.inf, np.pi, np.inf])
+    try:
+        r = _curve_fit_dense(func, x, y, p0, bounds, pnames, n_dense)
+    except Exception as e:
+        return {"title": "Ramsey fit", "summary": f"fit did not converge: {e}",
+                "xf": None, "yf": None, "r2": float("nan"), "failed": True}
+
+    popt, perr = r["popt"], r["perr"]
+    d = dict(zip(pnames, popt))
+    f, T = d["f"], d["T"]
+    p = d.get("p", pfix)
+    env_name = _ENV_NAME.get(envelope, f"stretched (p={p:.3f})")
+    line_name = {"n14": "14N hyperfine (3 lines)",
+                 "n15": "15N hyperfine (2 lines)"}.get(lines, "single fringe")
+    xunit = "ns" if x_in_ns else "x-units"
+    summ = [f"lines: {line_name}", f"envelope: {env_name}"]
+    if x_in_ns:
+        summ += [f"detuning f = {f * 1e3:.6g} MHz",
+                 f"period 1/f = {1.0 / f:.6g} ns" if f else "period = inf"]
+    else:
+        summ += [f"detuning f = {f:.6g} /x-unit",
+                 f"period 1/f = {1.0 / f:.6g} x-units" if f else "period = inf"]
+    summ.append(f"T2* = {T:.6g} {xunit}")
+    if lines in ("n14", "n15"):
+        summ.append(f"assumed {lines[1:]}N adjacent splitting = "
+                    f"{(a * 1e3):.4g} MHz (held fixed)")
+    summ += _param_block(pnames, popt, perr)
+    return {"title": "Ramsey fit (built-in, configurable)",
+            "summary": "\n".join(summ), "xf": r["x_dense"], "yf": r["y_dense"],
+            "r2": r["r2"]}
+
+
+def fit_echo_configurable(x, y, envelope="stretch", revivals=False,
+                          b_gauss=None, x_in_ns=True, n_dense=1200):
+    """Fit a Hahn-echo decay with a selectable envelope and optional 13C
+    collapse/revival modulation.
+      envelope : 'gauss' (p=2) | 'exp' (p=1) | 'stretch' (p free, 0.3..5)
+      revivals : if True, multiply the decay by exp(-k*sin^4(pi*f_rev*x)), which
+                 is ~1 at x = n/f_rev (revivals) and dips in between (collapses).
+                 f_rev is a free parameter, seeded from the 13C Larmor frequency
+                 when b_gauss is given.  Revival times n/f_rev are returned in
+                 'vlines' for the caller to mark.
+    IMPORTANT: pass x as the TOTAL free-evolution time (2*tau) so the fitted
+    decay constant T is the true coherence time T2.
+    Returns a dict (title/summary/xf/yf/r2/vlines) or None if too few points."""
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    m = np.isfinite(x) & np.isfinite(y)
+    x, y = x[m], y[m]
+    if len(x) < 5:
+        return None
+    order = np.argsort(x); x, y = x[order], y[order]
+    rising = np.mean(y[:3]) < np.mean(y[-3:])
+    A0 = (np.nanmin(y) - np.nanmax(y)) if rising else (np.nanmax(y) - np.nanmin(y))
+    C0 = float(np.nanmedian(y))
+    T0 = max(_span(x) / 2.0, 1e-9)
+    pfix = _ENV_FIXED_P.get(envelope)
+
+    dx = float(np.median(np.diff(x))) if len(x) > 1 else 1.0
+    f_nyq = (0.5 / dx) if dx > 0 else np.inf
+    f_lo = 1.0 / (_span(x) * 5.0)
+    if b_gauss and x_in_ns:
+        f_rev0 = GAMMA_C13_GHZ_PER_G * float(b_gauss)
+    else:
+        f_rev0 = 4.0 / _span(x)                 # ~4 revivals across the range
+    f_rev0 = float(np.clip(f_rev0, f_lo, 0.9 * f_nyq))
+
+    def env(xx, T, p):
+        return np.exp(-(np.abs(xx) / T) ** p)
+
+    def mod(xx, f_rev, k):
+        return np.exp(-k * np.sin(np.pi * f_rev * xx) ** 4)
+
+    free_p = pfix is None
+    if free_p and revivals:
+        def func(xx, C, A, T, p, f_rev, k):
+            return C + A * env(xx, T, p) * mod(xx, f_rev, k)
+        pnames = ["C", "A", "T", "p", "f_rev", "k"]
+        p0 = [C0, A0, T0, 1.5, f_rev0, 3.0]
+        bounds = ([-np.inf, -np.inf, 1e-9, 0.3, f_lo, 0.0],
+                  [np.inf, np.inf, np.inf, 5.0, 0.9 * f_nyq, 60.0])
+    elif free_p and not revivals:
+        def func(xx, C, A, T, p):
+            return C + A * env(xx, T, p)
+        pnames = ["C", "A", "T", "p"]
+        p0 = [C0, A0, T0, 1.5]
+        bounds = ([-np.inf, -np.inf, 1e-9, 0.3],
+                  [np.inf, np.inf, np.inf, 5.0])
+    elif (not free_p) and revivals:
+        def func(xx, C, A, T, f_rev, k):
+            return C + A * env(xx, T, pfix) * mod(xx, f_rev, k)
+        pnames = ["C", "A", "T", "f_rev", "k"]
+        p0 = [C0, A0, T0, f_rev0, 3.0]
+        bounds = ([-np.inf, -np.inf, 1e-9, f_lo, 0.0],
+                  [np.inf, np.inf, np.inf, 0.9 * f_nyq, 60.0])
+    else:
+        def func(xx, C, A, T):
+            return C + A * env(xx, T, pfix)
+        pnames = ["C", "A", "T"]
+        p0 = [C0, A0, T0]
+        bounds = ([-np.inf, -np.inf, 1e-9], [np.inf, np.inf, np.inf])
+    try:
+        r = _curve_fit_dense(func, x, y, p0, bounds, pnames, n_dense)
+    except Exception as e:
+        return {"title": "Echo fit", "summary": f"fit did not converge: {e}",
+                "xf": None, "yf": None, "r2": float("nan"), "failed": True,
+                "vlines": []}
+
+    popt, perr = r["popt"], r["perr"]
+    d = dict(zip(pnames, popt))
+    p = d.get("p", pfix)
+    env_name = _ENV_NAME.get(envelope, f"stretched (p={p:.3f})")
+    xunit = "ns" if x_in_ns else "x-units"
+    summ = [f"envelope: {env_name}", f"T2 = {d['T']:.6g} {xunit}"]
+    vlines = []
+    if revivals:
+        f_rev = d["f_rev"]
+        period = (1.0 / f_rev) if f_rev else float("inf")
+        summ.append(f"13C revival period = {period:.6g} {xunit}"
+                    + (f"   (f_rev = {f_rev * 1e3:.4g} MHz)" if x_in_ns else ""))
+        if x_in_ns and f_rev > 0:
+            summ.append(f"-> implied B \u2248 {f_rev / GAMMA_C13_GHZ_PER_G:.5g} G"
+                        f"  (from 13C Larmor)")
+        summ.append(f"collapse depth k = {d['k']:.3g}")
+        if np.isfinite(period) and period > 0:
+            xmax = float(np.max(x))
+            vlines = [i * period for i in range(1, int(xmax / period) + 1)]
+    summ += _param_block(pnames, popt, perr)
+    return {"title": "Echo fit (built-in, configurable)",
+            "summary": "\n".join(summ), "xf": r["x_dense"], "yf": r["y_dense"],
+            "r2": r["r2"], "vlines": vlines}
 
 
 # =============================================================================
@@ -2149,6 +2458,66 @@ def fit_odmr_dips(x, y, n_dips=1, bg_degree=0, centers=None):
             "summary": summary}
 
 
+def rabi_fft(t, y, pad=4):
+    """Amplitude spectrum of a detrended time trace. t in ns -> frequency in MHz.
+    Returns {'freq_mhz', 'amp', 'peaks'} where peaks lists the strongest
+    oscillation components (Rabi frequency, plus any others = beating)."""
+    t = np.asarray(t, float); y = np.asarray(y, float)
+    g = np.isfinite(t) & np.isfinite(y)
+    t, y = t[g], y[g]
+    if t.size < 8:
+        return None
+    o = np.argsort(t); t, y = t[o], y[o]
+    dt = float(np.median(np.diff(t)))
+    if dt <= 0:
+        return None
+    yv = y - np.polyval(np.polyfit(t, y, 1), t)        # remove DC + linear drift
+    yv = yv * np.hanning(len(yv))
+    n = int(2 ** np.ceil(np.log2(max(8, len(yv) * max(1, int(pad))))))
+    amp = np.abs(np.fft.rfft(yv, n=n))
+    freq_mhz = np.fft.rfftfreq(n, d=dt) * 1000.0       # 1/ns = GHz -> MHz
+    peaks = []
+    for i in range(1, amp.size - 1):
+        if amp[i] > amp[i - 1] and amp[i] >= amp[i + 1] and freq_mhz[i] > 0:
+            peaks.append((float(freq_mhz[i]), float(amp[i])))
+    peaks.sort(key=lambda pk: -pk[1])
+    return {"freq_mhz": freq_mhz, "amp": amp, "peaks": peaks[:5]}
+
+
+def t1_wait_axis(seq_text, n):
+    """Init->readout wait time (ns) per scan point for a T1 sequence, computed
+    from the pulse geometry.  This is the physical relaxation delay whether the
+    sweep increases it (init at t0 - tau) or decreases it (init at t0 + tau), so
+    the exponential fit returns T1 either way.  Returns (wait, label) or (None,
+    None)."""
+    parsed = parse_sequence_text(seq_text)
+    if not parsed or not parsed.get("pulses"):
+        return None, None
+    waits = []
+    for i in range(n):
+        geo = sequence_pulse_geometry(parsed, i)
+        if not geo or not geo["pulses"]:
+            return None, None
+        ps = geo["pulses"]
+        init = next((p for p in ps if "init" in p["name"].lower()), None)
+        read = next((p for p in ps if ("read" in p["name"].lower()
+                                       or p["name"].lower() in ("ro", "readout"))), None)
+        if init is None or read is None:
+            srt = sorted(ps, key=lambda q: q["start_ns"])
+            init, read = srt[0], srt[-1]
+        waits.append(read["start_ns"] - (init["start_ns"] + init["width_ns"]))
+    w = np.abs(np.asarray(waits, float))        # the delay is a positive time
+    # Sanity: a real T1 wait spans a meaningful range (>= ~1 ns). If the sequence
+    # 'at' expressions mix units so the geometry yields an absurd/degenerate wait
+    # (e.g. ~1e-11 ns), give up here so the caller falls back to the swept tau.
+    if (w.size == 0 or not np.all(np.isfinite(w))
+            or np.nanmax(w) < 1.0 or (np.nanmax(w) - np.nanmin(w)) < 1.0):
+        return None, None
+    if np.nanmax(w) > 1e4:                       # large -> show microseconds
+        return w / 1e3, "wait time (\u00b5s)"
+    return w, "wait time (ns)"
+
+
 def main(argv=None):
     import sys
     import tkinter as tk
@@ -2220,6 +2589,9 @@ def main(argv=None):
             self.sel_x0 = self.sel_x1 = None       # 1-D span (orange)
             self.sel_box = None                    # 2-D ROI (x0,x1,y0,y1)
             self.cur_yerr = None                   # per-point error for the primary curve
+            self._pulsed_view = False              # keep x-zoom across pulsed re-plots
+            self._pulsed_last = None               # last pulsed view (raw / analyse)
+            self._pulsed_mode_user_set = False     # you picked the experiment mode
             self.extra_spans = []                  # [(x0,x1,color,alpha)] highlights
             self.extra_vlines = []                 # [(x,color)] marker lines
             self.mh = {}                           # manual multiharp regions/levels
@@ -2251,6 +2623,12 @@ def main(argv=None):
             self._bg_status = ""                   # last background-subtraction note
             self.pulsed_mode = "rabi_time"
             self.pulsed_cache = None       # dict(sig, ref, seq_text, has_freq...)
+
+            # offline time-resolved Rabi (MultiHarp): re-pick windows over the
+            # kept arrival histogram and re-derive the Rabi curve, no re-run.
+            self.rabi_runner = None        # OfflineRabiRunner for a loaded .npz/.h5
+            self.rabi = {}                 # UI state: 'sig'/'ref' windows, last result
+            self._RabiRunner = None        # cached OfflineRabiRunner class (lazy import)
 
             self._build_layout()
             self._new_axes()
@@ -2343,6 +2721,8 @@ def main(argv=None):
             self._seq_tab_index = nb.index("end") - 1
             self._build_tab_multiharp(nb)
             self._mh_tab_index = nb.index("end") - 1
+            self._build_tab_rabi(nb)
+            self._rabi_tab_index = nb.index("end") - 1
 
         def _build_tab_plot(self, nb):
             f = ttk.Frame(nb, padding=8)
@@ -2360,9 +2740,9 @@ def main(argv=None):
             ttk.Checkbutton(row, text="log y", variable=self.logy_var,
                             command=self.replot_1d).pack(side="left")
             ttk.Label(row, text="normalise:").pack(side="left", padx=(12, 2))
-            self.norm_var = tk.StringVar(value="none")
-            ttk.Combobox(row, textvariable=self.norm_var, width=16, state="readonly",
-                         values=["none", "divide by max",
+            self.norm_var = tk.StringVar(value="normalized (a.u.)")
+            ttk.Combobox(row, textvariable=self.norm_var, width=18, state="readonly",
+                         values=["normalized (a.u.)", "none", "divide by max",
                                  "subtract selection baseline"]).pack(side="left")
             ttk.Button(row, text="Apply", command=self.replot_1d).pack(side="left", padx=6)
             ttk.Button(row, text="Plot selected together",
@@ -2450,34 +2830,83 @@ def main(argv=None):
             self.pmode_combo = ttk.Combobox(row, state="readonly", width=12,
                                             values=["rabi_time", "rabi_amp",
                                                     "odmr", "ramsey", "echo",
-                                                    "phase"])
+                                                    "t1", "phase"])
             self.pmode_combo.current(0)
             self.pmode_combo.pack(side="left", padx=(2, 10))
+            self.pmode_combo.bind("<<ComboboxSelected>>",
+                                  lambda e: self._on_pmode_change())
             ttk.Label(row, text="dataset:").pack(side="left")
             self.dataset_combo = ttk.Combobox(row, state="disabled", width=11,
                                               values=["averaged"])
             self.dataset_combo.set("averaged")
-            self.dataset_combo.pack(side="left", padx=(2, 10))
+            self.dataset_combo.pack(side="left", padx=(2, 2))
             self.dataset_combo.bind("<<ComboboxSelected>>",
                                     lambda e: self.on_dataset_change())
+            ttk.Button(row, text="◀", width=2,
+                       command=lambda: self._step_dataset(-1)).pack(side="left")
+            ttk.Button(row, text="▶", width=2,
+                       command=lambda: self._step_dataset(1)).pack(side="left", padx=(0, 10))
             ttk.Label(row, text="quantity:").pack(side="left")
             self.pq_combo = ttk.Combobox(row, state="readonly", width=10,
                                          values=["S/R", "(S-R)/R", "signal",
                                                  "reference", "S-R"])
             self.pq_combo.current(0)
             self.pq_combo.pack(side="left", padx=(2, 10))
+            self.pq_combo.bind("<<ComboboxSelected>>",
+                               lambda e: self._pulsed_changed())
             self.drop_dead_var = tk.BooleanVar(value=True)
             ttk.Checkbutton(row, text="drop dead startup pts",
-                            variable=self.drop_dead_var).pack(side="left")
+                            variable=self.drop_dead_var,
+                            command=lambda: self._pulsed_changed()).pack(side="left")
             self.pulsed_sel_var = tk.BooleanVar(value=False)
             ttk.Checkbutton(row, text="fit selection only",
                             variable=self.pulsed_sel_var).pack(side="left", padx=(10, 0))
+
+            # --- model-shape controls (Ramsey / echo) ----------------------
+            row1b = ttk.Frame(f); row1b.pack(fill="x", pady=(6, 0))
+            self.echo_2tau_var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(
+                row1b, text="echo x = 2\u00b7\u03c4 (total \u2192 true T2)",
+                variable=self.echo_2tau_var,
+                command=lambda: self._pulsed_changed(newaxis=True)).pack(side="left")
+            ttk.Label(row1b, text="   Ramsey lines:").pack(side="left")
+            self.ramsey_lines_combo = ttk.Combobox(
+                row1b, state="readonly", width=13,
+                values=["single", "14N (3 lines)", "15N (2 lines)"])
+            self.ramsey_lines_combo.current(0)
+            self.ramsey_lines_combo.pack(side="left", padx=(2, 8))
+            self.ramsey_lines_combo.bind("<<ComboboxSelected>>",
+                                         lambda e: self._pulsed_changed())
+            ttk.Label(row1b, text="envelope:").pack(side="left")
+            self.envelope_combo = ttk.Combobox(
+                row1b, state="readonly", width=17,
+                values=["stretched (free p)", "Gaussian (p=2)",
+                        "exponential (p=1)"])
+            self.envelope_combo.current(0)
+            self.envelope_combo.pack(side="left", padx=(2, 8))
+            self.envelope_combo.bind("<<ComboboxSelected>>",
+                                     lambda e: self._pulsed_changed())
+
+            row1c = ttk.Frame(f); row1c.pack(fill="x", pady=(4, 0))
+            self.echo_revival_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(row1c, text="echo: 13C Larmor collapse/revivals",
+                            variable=self.echo_revival_var,
+                            command=lambda: self._pulsed_changed()).pack(side="left")
+            ttk.Label(row1c, text="   B (G):").pack(side="left")
+            self.echo_bfield_entry = ttk.Entry(row1c, width=7)
+            self.echo_bfield_entry.pack(side="left", padx=(2, 8))
+            self.echo_bfield_entry.bind("<Return>", lambda e: self._pulsed_changed())
+            ttk.Label(row1c, text="(seeds the revival period from the 13C Larmor "
+                      "frequency; leave blank to fit it freely)",
+                      foreground="#777").pack(side="left")
 
             row2 = ttk.Frame(f); row2.pack(fill="x", pady=(6, 0))
             ttk.Button(row2, text="Analyse & fit",
                        command=self.pulsed_analyse).pack(side="left")
             ttk.Button(row2, text="Significance test",
                        command=self.pulsed_significance).pack(side="left", padx=8)
+            ttk.Button(row2, text="FFT (Rabi)",
+                       command=self.pulsed_fft).pack(side="left", padx=(0, 8))
             ttk.Label(row2, text="(quantity + selection apply to both; select a "
                       "span on the Plot tab first)", foreground="#777").pack(side="left")
             self.pulsed_text = tk.Text(f, height=8, wrap="none", font=("TkFixedFont", 9))
@@ -2894,6 +3323,387 @@ def main(argv=None):
                 self.draw_1d()
             self._mh_show_stored()
 
+        # ---------------------------------------------- Rabi (offline runner) --
+        # A MultiHarp time-resolved Rabi run keeps the WHOLE readout: for every
+        # tau step, the full SPCM arrival-time histogram relative to the marker.
+        # That lets us re-pick the signal / reference windows here, offline, and
+        # re-derive the Rabi curve without touching the instrument. The heavy
+        # lifting lives in src/Model/experiments/multiharp_rabi_offline.py; this
+        # tab is just the map + drag-to-select + Plot Rabi around it.
+        def _build_tab_rabi(self, nb):
+            f = ttk.Frame(nb, padding=8)
+            nb.add(f, text="Rabi (offline)")
+
+            r0 = ttk.Frame(f); r0.pack(fill="x")
+            ttk.Button(r0, text="Open Rabi file (.npz / .h5)\u2026",
+                       command=self.open_rabi_dialog).pack(side="left")
+            ttk.Button(r0, text="Show map",
+                       command=self.show_rabi_map).pack(side="left", padx=(6, 0))
+            self.rabi_file_lbl = ttk.Label(r0, text="(no Rabi file loaded)",
+                                           foreground="#555")
+            self.rabi_file_lbl.pack(side="left", padx=12)
+
+            r1 = ttk.Frame(f); r1.pack(fill="x", pady=(8, 0))
+            ttk.Label(r1, text="drag on the map to set the:").pack(side="left")
+            self.rabi_target_var = tk.StringVar(value="signal")
+            ttk.Radiobutton(r1, text="signal", value="signal",
+                            variable=self.rabi_target_var,
+                            command=self._rabi_target_changed
+                            ).pack(side="left", padx=(6, 0))
+            ttk.Radiobutton(r1, text="reference", value="reference",
+                            variable=self.rabi_target_var,
+                            command=self._rabi_target_changed
+                            ).pack(side="left", padx=(4, 0))
+            self.rabi_useref_var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(r1, text="use reference (contrast)",
+                            variable=self.rabi_useref_var).pack(side="left", padx=(16, 0))
+            self.rabi_err_var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(r1, text="shot-noise error bars",
+                            variable=self.rabi_err_var).pack(side="left", padx=(12, 0))
+
+            wf = ttk.LabelFrame(f, text="windows (ns after the marker)", padding=(6, 4))
+            wf.pack(fill="x", pady=(8, 0))
+            sr = ttk.Frame(wf); sr.pack(fill="x")
+            ttk.Label(sr, text="signal:", width=10).pack(side="left")
+            self.rabi_sig_lo = ttk.Entry(sr, width=9); self.rabi_sig_lo.pack(side="left")
+            ttk.Label(sr, text="to").pack(side="left", padx=4)
+            self.rabi_sig_hi = ttk.Entry(sr, width=9); self.rabi_sig_hi.pack(side="left")
+            rr = ttk.Frame(wf); rr.pack(fill="x", pady=(4, 0))
+            ttk.Label(rr, text="reference:", width=10).pack(side="left")
+            self.rabi_ref_lo = ttk.Entry(rr, width=9); self.rabi_ref_lo.pack(side="left")
+            ttk.Label(rr, text="to").pack(side="left", padx=4)
+            self.rabi_ref_hi = ttk.Entry(rr, width=9); self.rabi_ref_hi.pack(side="left")
+            ttk.Button(rr, text="Apply typed windows",
+                       command=self._rabi_apply_entries).pack(side="left", padx=(10, 0))
+
+            r3 = ttk.Frame(f); r3.pack(fill="x", pady=(8, 0))
+            ttk.Label(r3, text="plot quantity:").pack(side="left")
+            self.rabi_quantity_var = tk.StringVar(value="signal (cts/shot)")
+            ttk.Combobox(r3, textvariable=self.rabi_quantity_var, state="readonly",
+                         width=16, values=["signal (cts/shot)", "contrast (S/R)"]
+                         ).pack(side="left", padx=(2, 12))
+            ttk.Button(r3, text="Plot Rabi", command=self.plot_rabi).pack(side="left")
+            ttk.Button(r3, text="Reset windows",
+                       command=self.rabi_clear_windows).pack(side="left", padx=(6, 0))
+
+            ttk.Label(f, text="white = signal window   \u00b7   orange = reference "
+                      "window   \u00b7   pick a target above, then drag a span on the "
+                      "map. ‘Plot Rabi’ sends the curve to the Plot / Fit tabs so you "
+                      "can fit the oscillation.", foreground="#777", wraplength=780
+                      ).pack(anchor="w", pady=(8, 0))
+            self.rabi_text = tk.Text(f, height=10, wrap="word", font=("TkFixedFont", 9))
+            self.rabi_text.pack(fill="both", expand=True, pady=(6, 0))
+
+        def _import_offline_rabi(self):
+            """Import OfflineRabiRunner, tolerating however the app was launched.
+
+            Tries the package path first, then bare module names, then finally a
+            file-path load based on the known repo layout (this file lives at
+            src/View/windows_and_widgets/, the runner at src/Model/experiments/)."""
+            if self._RabiRunner is not None:
+                return self._RabiRunner
+            last_err = None
+            for modname in ("src.Model.experiments.multiharp_rabi_offline",
+                            "Model.experiments.multiharp_rabi_offline",
+                            "multiharp_rabi_offline"):
+                try:
+                    mod = __import__(modname, fromlist=["OfflineRabiRunner"])
+                    self._RabiRunner = mod.OfflineRabiRunner
+                    return self._RabiRunner
+                except Exception as e:
+                    last_err = e
+            try:
+                import importlib.util
+                here = os.path.dirname(os.path.abspath(__file__))
+                cand = os.path.normpath(os.path.join(
+                    here, "..", "..", "Model", "experiments",
+                    "multiharp_rabi_offline.py"))
+                spec = importlib.util.spec_from_file_location(
+                    "multiharp_rabi_offline", cand)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                self._RabiRunner = mod.OfflineRabiRunner
+                return self._RabiRunner
+            except Exception as e:
+                last_err = e
+            raise ImportError(
+                "could not import the offline Rabi runner "
+                "(src/Model/experiments/multiharp_rabi_offline.py). "
+                f"Last error: {last_err}")
+
+        def open_rabi_dialog(self):
+            path = filedialog.askopenfilename(
+                title="Open a MultiHarp time-resolved Rabi file",
+                filetypes=[("Rabi data", "*.npz *.h5 *.hdf5"),
+                           ("NumPy npz", "*.npz"),
+                           ("HDF5", "*.h5 *.hdf5 *.he5 *.hf5"),
+                           ("All files", "*.*")])
+            if path:
+                self.open_rabi_path(path)
+
+        def open_rabi_path(self, path):
+            self._set_status(f"loading Rabi {os.path.basename(path)} …")
+            self.root.update_idletasks()
+            try:
+                Runner = self._import_offline_rabi()
+                runner = Runner.from_file(path)
+            except Exception as e:
+                messagebox.showerror("Rabi (offline)",
+                                     f"Could not load Rabi file:\n{e}")
+                self._set_status("")
+                return
+            self._activate_rabi_runner(runner, os.path.basename(path))
+            self._set_status(f"loaded {os.path.basename(path)}")
+
+        def _activate_rabi_runner(self, runner, label):
+            self.rabi_runner = runner
+            self.rabi = {"sig": runner.default_sig_window()}
+            ref = runner.default_ref_window()
+            if ref:
+                self.rabi["ref"] = ref
+            self._rabi_set_file_label(label)
+            self._rabi_sync_entries()
+            self._rabi_log(runner.summary(), clear=True)
+            self.draw_rabi_map()
+            try:
+                self.nb.select(self._rabi_tab_index)
+            except Exception:
+                pass
+
+        def _rabi_set_file_label(self, text):
+            try:
+                self.rabi_file_lbl.configure(text=text)
+            except Exception:
+                pass
+
+        def _rabi_log(self, text, clear=False):
+            if clear:
+                self.rabi_text.delete("1.0", "end")
+            elif self.rabi_text.get("1.0", "end").strip():
+                self.rabi_text.insert("end", "\n")
+            self.rabi_text.insert("end", text)
+            self.rabi_text.see("end")
+
+        def _rabi_target_changed(self):
+            # redraw so the selector colour + title track the active target
+            if self.view_kind == "rabi_map":
+                self.draw_rabi_map()
+
+        def _rabi_sync_entries(self):
+            def put(entry, val):
+                entry.delete(0, "end")
+                if val is not None:
+                    entry.insert(0, f"{val:.1f}")
+            sig = self.rabi.get("sig")
+            ref = self.rabi.get("ref")
+            put(self.rabi_sig_lo, sig[0] if sig else None)
+            put(self.rabi_sig_hi, sig[1] if sig else None)
+            put(self.rabi_ref_lo, ref[0] if ref else None)
+            put(self.rabi_ref_hi, ref[1] if ref else None)
+
+        def _rabi_apply_entries(self):
+            if self.rabi_runner is None:
+                messagebox.showinfo("Rabi (offline)",
+                                    "Open a time-resolved Rabi file first.")
+                return
+
+            def read(a, b):
+                try:
+                    lo, hi = float(a.get()), float(b.get())
+                except ValueError:
+                    return None
+                return (min(lo, hi), max(lo, hi))
+            sig = read(self.rabi_sig_lo, self.rabi_sig_hi)
+            ref = read(self.rabi_ref_lo, self.rabi_ref_hi)
+            if sig:
+                self.rabi["sig"] = sig
+            if ref:
+                self.rabi["ref"] = ref
+            else:
+                self.rabi.pop("ref", None)
+            self._rabi_sync_entries()
+            self._rabi_log("windows applied from the typed values")
+            self.draw_rabi_map()
+
+        def rabi_clear_windows(self):
+            r = self.rabi_runner
+            if r is None:
+                return
+            self.rabi["sig"] = r.default_sig_window()
+            ref = r.default_ref_window()
+            if ref:
+                self.rabi["ref"] = ref
+            else:
+                self.rabi.pop("ref", None)
+            self._rabi_sync_entries()
+            self._rabi_log("windows reset to the values stored at acquisition")
+            self.draw_rabi_map()
+
+        def _rabi_make_span(self):
+            tgt = self.rabi_target_var.get()
+            fc = "white" if tgt == "signal" else "orange"
+            try:
+                return SpanSelector(self.ax, self._on_rabi_span, "horizontal",
+                                    useblit=True, interactive=True,
+                                    drag_from_anywhere=True,
+                                    props=dict(alpha=0.25, facecolor=fc))
+            except TypeError:
+                return SpanSelector(self.ax, self._on_rabi_span, "horizontal",
+                                    useblit=True,
+                                    rectprops=dict(alpha=0.25, facecolor=fc))
+
+        def _rabi_draw_windows(self):
+            sig = self.rabi.get("sig")
+            ref = self.rabi.get("ref")
+            tr = self.ax.get_xaxis_transform()   # x in data coords, y in axes coords
+            if sig:
+                s0, s1 = sig
+                self.ax.axvspan(s0, s1, color="white", alpha=0.16, zorder=3)
+                self.ax.axvline(s0, color="white", lw=1.4, zorder=4)
+                self.ax.axvline(s1, color="white", lw=1.4, ls="--", zorder=4)
+                self.ax.text(0.5 * (s0 + s1), 0.98, "signal", color="white",
+                             ha="center", va="top", fontsize=8, transform=tr, zorder=5)
+            if ref:
+                r0, r1 = ref
+                self.ax.axvspan(r0, r1, color="orange", alpha=0.15, zorder=3)
+                self.ax.axvline(r0, color="orange", lw=1.4, zorder=4)
+                self.ax.axvline(r1, color="orange", lw=1.4, ls="--", zorder=4)
+                self.ax.text(0.5 * (r0 + r1), 0.98, "reference", color="orange",
+                             ha="center", va="top", fontsize=8, transform=tr, zorder=5)
+
+        def draw_rabi_map(self):
+            r = self.rabi_runner
+            if r is None:
+                return
+            self._stop_play()
+            self._kill_selectors()
+            self.fig.clear()
+            self.ax = self.fig.add_subplot(111)
+            self.ax_top = self.ax_right = None
+            self.span = None; self.rect = None; self.imobj = None; self.cbar = None
+            self.view_kind = "rabi_map"
+            self.curves = None
+            per_shot, edges, y, is_idx = r.per_shot_map()
+            try:
+                cmap = self.cmap_combo.get()
+            except Exception:
+                cmap = "viridis"
+            # origin upper + this extent puts tau[0] at the top, matching the
+            # acquisition-side map (multiharp_timing_tester._plot_rabi_map).
+            extent = [edges[0], edges[-1], y[-1], y[0]]
+            self.imobj = self.ax.imshow(per_shot, aspect="auto", extent=extent,
+                                        origin="upper", interpolation="nearest",
+                                        cmap=cmap)
+            self.cbar = self.fig.colorbar(self.imobj, ax=self.ax,
+                                          fraction=0.046, pad=0.04)
+            self.cbar.set_label("SPCM counts / shot")
+            self.ax.set_xlabel(f"SPCM arrival time after {r.reference_label}  [ns]")
+            self.ax.set_ylabel("tau step index" if is_idx
+                               else "MW pulse duration \u03c4 (ns)")
+            tgt = self.rabi_target_var.get()
+            self.ax.set_title("Time-resolved Rabi map \u2014 drag to set the "
+                              f"{tgt.upper()} window   "
+                              "(white = signal, orange = reference)", fontsize=10)
+            self._rabi_draw_windows()
+            self.span = self._rabi_make_span()
+            self.fig.tight_layout()
+            self.canvas.draw_idle()
+
+        def show_rabi_map(self):
+            if self.rabi_runner is None:
+                messagebox.showinfo("Rabi (offline)",
+                                    "Open a time-resolved Rabi file first "
+                                    "(.npz or .h5).")
+                return
+            self.draw_rabi_map()
+            try:
+                self.nb.select(self._rabi_tab_index)
+            except Exception:
+                pass
+
+        def _on_rabi_span(self, x0, x1):
+            if x1 == x0:
+                return
+            lo, hi = float(min(x0, x1)), float(max(x0, x1))
+            tgt = self.rabi_target_var.get()
+            self.rabi["sig" if tgt == "signal" else "ref"] = (lo, hi)
+            self._rabi_sync_entries()
+            self._rabi_log(f"{tgt} window set to [{lo:.1f}, {hi:.1f}] ns")
+            self.draw_rabi_map()
+
+        def plot_rabi(self):
+            r = self.rabi_runner
+            if r is None:
+                messagebox.showinfo("Rabi (offline)",
+                                    "Open a time-resolved Rabi file first "
+                                    "(.npz or .h5).")
+                return
+            sig = self.rabi.get("sig")
+            if sig is None:
+                messagebox.showinfo("Rabi (offline)",
+                                    "Set a SIGNAL window first \u2014 pick ‘signal’ "
+                                    "above and drag on the map (or type it and click "
+                                    "‘Apply typed windows’).")
+                return
+            use_ref = bool(self.rabi_useref_var.get())
+            ref = self.rabi.get("ref") if use_ref else None
+            res = r.compute(sig, ref)
+            tau, is_idx = res["tau_ns"], res["tau_is_index"]
+
+            want_contrast = self.rabi_quantity_var.get().startswith("contrast")
+            have_contrast = (ref is not None
+                             and np.isfinite(res.get("contrast", np.nan)).any())
+            if want_contrast and have_contrast:
+                y, yerr = res["contrast"], res["contrast_sem"]
+                ylabel = "contrast  (signal / reference)"
+                qlabel = "contrast S/R"
+            else:
+                if want_contrast and not have_contrast:
+                    self._rabi_log("(no usable reference window \u2014 plotting the "
+                                   "signal instead; set a reference and tick ‘use "
+                                   "reference’)")
+                y, yerr = res["signal_mean"], res["signal_sem"]
+                ylabel = "SPCM counts / shot  (signal window)"
+                qlabel = "signal cts/shot"
+            xlabel = ("tau step index" if is_idx
+                      else "MW pulse duration \u03c4 (ns)")
+            su = res["sig_window_used_ns"]
+            title = (f"MultiHarp Rabi (offline)  \u2014  {qlabel}  \u2014  "
+                     f"signal [{su[0]:.0f}, {su[1]:.0f}] ns")
+
+            # hand the curve to the shared 1-D engine so selection / fitting /
+            # export / normalise all work on it exactly like any other trace.
+            self.errbar_var.set(bool(self.rabi_err_var.get()))
+            self.rabi["last"] = res
+            self.set_1d(tau, y, xlabel=xlabel, ylabel=ylabel, title=title, yerr=yerr)
+            try:
+                keys = list(MODELS.keys())
+                self.model_combo.current(keys.index("Damped cosine (Rabi)"))
+            except Exception:
+                pass
+
+            npts = int(np.isfinite(y).sum())
+            dropped = int(np.count_nonzero(res["shots_per_tau"] <= 0))
+            lines = [f"Plotted {qlabel} vs "
+                     f"{'tau index' if is_idx else 'tau (ns)'}  ({npts} points"
+                     + (f", {dropped} tau step(s) had no shots" if dropped else "")
+                     + ").",
+                     f"  signal window used : [{su[0]:.1f}, {su[1]:.1f}] ns"]
+            if ref is not None and "ref_window_used_ns" in res:
+                ru = res["ref_window_used_ns"]
+                lines.append(f"  reference window   : [{ru[0]:.1f}, {ru[1]:.1f}] ns")
+            md = res.get("modulation_depth", float("nan"))
+            if np.isfinite(md):
+                lines.append(f"  modulation depth   : {md:.3f}   "
+                             f"[(max\u2212min)/(max+min) of {res['best_metric']}]")
+            lines += [
+                "",
+                "The curve is now on the Plot & Fit tabs. To fit the oscillation:",
+                "  \u2022 open ‘Fit’ (model preset to ‘Damped cosine (Rabi)’) and hit Fit, or",
+                "  \u2022 drag a range on ‘Plot & selection’ and tick ‘fit selection only’.",
+                "Click ‘Show map’ to come back and re-pick the windows."]
+            self._rabi_log("\n".join(lines), clear=True)
+
         # ------------------------------------------------------------ files --
         def open_dialog(self):
             path = filedialog.askopenfilename(
@@ -2925,11 +3735,25 @@ def main(argv=None):
             self.confocal = find_confocal(self.tree_data)
             self.camera_sweep = find_camera_sweep(self.tree_data)
             self._sweep_fits = None
+            self._pulsed_mode_user_set = False     # new file -> re-detect the mode
             self._sweep = sweep_frame_info(self.tree_data)
             self._update_modality_combo()
             self._update_dataset_combo()
             self._update_odmr_combo()
             self._populate_tree()
+            # Time-resolved Rabi files carry a full arrival-time histogram so the
+            # signal/reference windows can be re-picked offline.  Detect that and
+            # jump straight to the Rabi map instead of the generic auto-view.
+            if find_field(self.tree_data, "arrival_hist") is not None:
+                try:
+                    Runner = self._import_offline_rabi()
+                    runner = Runner.from_file(path)
+                except Exception:
+                    runner = None
+                if runner is not None:
+                    self._activate_rabi_runner(runner, os.path.basename(path))
+                    self._set_status("loaded")
+                    return
             self._auto_view()
             self._set_status("loaded")
 
@@ -3386,6 +4210,7 @@ def main(argv=None):
             self._stop_play()
             self.view_kind = "1d"
             self._odmr_view = False
+            self._pulsed_view = False
             self.curves = None                    # single-curve mode
             self.x = np.asarray(x, float).ravel()
             self.y = np.asarray(y, float).ravel()
@@ -3410,6 +4235,8 @@ def main(argv=None):
                 return
             self._stop_play()
             self.view_kind = "1d"
+            self._odmr_view = False
+            self._pulsed_view = False
             self.curves = curves
             cx, cy, _ = curves[0]
             n = min(len(cx), len(cy))
@@ -3429,6 +4256,8 @@ def main(argv=None):
         def _norm_apply(self, y, x=None):
             x = self.x if x is None else x
             mode = self.norm_var.get()
+            if mode == "normalized (a.u.)":
+                return normalize_au(y)
             if mode == "divide by max":
                 m = np.nanmax(np.abs(y))
                 return y / m if m else y
@@ -3454,8 +4283,18 @@ def main(argv=None):
                 yv = self._norm_apply(cy, cx)
                 if show_err:
                     if err is None:
-                        err = poisson_error(cy)            # generic shot noise
-                    if self.norm_var.get() == "divide by max":
+                        err = _noise_sd(cy)                # robust noise from the data
+                    err = np.asarray(err, float)
+                    if getattr(self, "smooth_var", None) and self.smooth_var.get():
+                        w = self._smooth_window()          # W-pt moving avg -> err/sqrt(W)
+                        if w > 1:
+                            if err.ndim == 0:
+                                err = np.full(np.shape(cy), float(err))
+                            err = err / np.sqrt(w)
+                    if self.norm_var.get() == "normalized (a.u.)":
+                        base = _au_baseline(cy)
+                        err = err / base if base else err
+                    elif self.norm_var.get() == "divide by max":
                         m = np.nanmax(np.abs(cy))
                         err = err / m if m else err
                     self.ax.errorbar(cx, yv, yerr=err, fmt=fmt, ms=4, lw=1.3,
@@ -3479,7 +4318,13 @@ def main(argv=None):
                 self.ax.plot(fitd["x_dense"], fitd["y_dense"], "-k", lw=1.6,
                              label=f"fit (R\u00b2={fitd['r2']:.4f})")
             self.ax.set_xlabel(self.xlabel)
-            self.ax.set_ylabel(self.ylabel)
+            _nm = self.norm_var.get()
+            if _nm == "normalized (a.u.)":
+                self.ax.set_ylabel("normalized signal (a.u.)")
+            elif _nm == "divide by max":
+                self.ax.set_ylabel((self.ylabel or "signal") + " (norm.)")
+            else:
+                self.ax.set_ylabel(self.ylabel)
             _tl = getattr(self, "_t1d_label", "")
             self.ax.set_title(getattr(self, "title", "")
                               + (f"   [{_tl}]" if _tl else ""), fontsize=10)
@@ -3547,6 +4392,8 @@ def main(argv=None):
                 self.draw_1d()
             elif self.view_kind in ("image", "stack"):
                 self.redraw_image()
+            elif self.view_kind == "rabi_map":
+                self.draw_rabi_map()
 
         def selection_stats(self):
             if self.view_kind != "1d":
@@ -3927,25 +4774,36 @@ def main(argv=None):
                     sig = rs["signal"][k]; sig_err = poisson_error(sig)
                 if rs.get("reference") and k < len(rs["reference"]):
                     ref = rs["reference"][k]; ref_err = poisson_error(ref)
-            if sig is None or ref is None:
-                _, sig = get_by_name(self.tree_data, "signal_counts", "signal",
-                                     want=("1d", "image"))
-                _, ref = get_by_name(self.tree_data, "reference_counts", "reference",
-                                     want=("1d", "image"))
-                if sig is None or ref is None:
-                    self.pulsed_cache = None
-                    return
-                sig = np.squeeze(np.asarray(sig, float))
-                ref = np.squeeze(np.asarray(ref, float))
-                if sig.ndim == 2:
-                    sig = sig[0]
-                if ref.ndim == 2:
-                    ref = ref[0]
-                sr = av["runs"] if av else {}
-                sig_err = (error_on_mean(sr["signal"]) if sr.get("signal")
-                           and len(sr["signal"]) >= 2 else poisson_error(sig))
-                ref_err = (error_on_mean(sr["reference"]) if sr.get("reference")
-                           and len(sr["reference"]) >= 2 else poisson_error(ref))
+            if sig is None or ref is None:      # 'averaged' dataset
+                rs = av["runs"] if av else {}
+                if (rs.get("signal") and len(rs["signal"]) >= 2
+                        and rs.get("reference") and len(rs["reference"]) >= 2):
+                    # TRUE mean of all individual runs (robust: ignores a stale or
+                    # mislabelled stored average that could equal run 1)
+                    sig = np.mean(np.vstack([np.asarray(r, float)
+                                             for r in rs["signal"]]), axis=0)
+                    ref = np.mean(np.vstack([np.asarray(r, float)
+                                             for r in rs["reference"]]), axis=0)
+                else:
+                    _, sg = get_by_name(self.tree_data, "signal_counts", "signal_avg",
+                                        "signal", want=("1d", "image"))
+                    _, rf = get_by_name(self.tree_data, "reference_counts",
+                                        "reference_avg", "reference", want=("1d", "image"))
+                    if sg is None or rf is None:
+                        self.pulsed_cache = None
+                        return
+                    sig = np.squeeze(np.asarray(sg, float))
+                    ref = np.squeeze(np.asarray(rf, float))
+                    if sig.ndim == 2:
+                        sig = sig[0]
+                    if ref.ndim == 2:
+                        ref = ref[0]
+                # error ON THE MEAN of N averages: shot noise / sqrt(N)
+                navg = self._current_navg()
+                if navg <= 1 and rs.get("signal"):
+                    navg = len(rs["signal"])
+                sig_err = poisson_error(sig) / np.sqrt(max(1, navg))
+                ref_err = poisson_error(ref) / np.sqrt(max(1, navg))
             sig = np.asarray(sig, float); ref = np.asarray(ref, float)
             sig = self._bg_apply("signal_counts", sig)      # background subtraction
             ref = self._bg_apply("reference_counts", ref)
@@ -3958,8 +4816,9 @@ def main(argv=None):
                                      ref_err=ref_err[:n], seq=seq, n=n,
                                      has_freq=(farr is not None), freq=farr, dataset=ds)
             mode = detect_pulsed_mode(seq, farr is not None)
-            self.pulsed_mode = mode
-            self.pmode_combo.set(mode)
+            if not getattr(self, "_pulsed_mode_user_set", False):
+                self.pmode_combo.set(mode)         # auto-detect only until you pick one
+            self.pulsed_mode = self.pmode_combo.get()
 
         def _update_dataset_combo(self):
             """Populate the averaged/run selector. Enabled only when the file
@@ -3973,10 +4832,40 @@ def main(argv=None):
             self.dataset_combo.configure(values=vals, state="readonly")
             self.dataset_combo.set("averaged")
 
+        def _step_dataset(self, d):
+            """Step the dataset selector by d (-1 = previous, +1 = next), clamp to
+            the ends, update the dropdown display, and re-plot (keeping the zoom)."""
+            vals = list(self.dataset_combo["values"])
+            if len(vals) <= 1:
+                return
+            i = self.dataset_combo.current()
+            i = 0 if i < 0 else i
+            j = max(0, min(len(vals) - 1, i + d))
+            if j == i:
+                return
+            self.dataset_combo.current(j)          # updates the dropdown text
+            self.on_dataset_change()               # re-plot (zoom preserved)
+
         def on_dataset_change(self):
-            self._prepare_pulsed()
-            if self.pulsed_cache:
-                self.pulsed_plot_raw()
+            self._pulsed_changed(reprepare=True)
+
+        def _on_pmode_change(self):
+            """You picked the experiment mode -> keep it (don't let sequence-text
+            auto-detect override it) and re-plot on the new axis."""
+            self._pulsed_mode_user_set = True
+            self._pulsed_changed(newaxis=True)
+
+        def _pulsed_changed(self, reprepare=False, newaxis=False):
+            """Re-render the pulsed view after a control change: re-prepare the
+            data when needed, drop the kept zoom when the x-axis type changes, and
+            re-run whichever view (raw or analysed) was last shown."""
+            if newaxis:
+                self._pulsed_view = False
+            if reprepare:
+                self._prepare_pulsed()
+            if not self.pulsed_cache:
+                return
+            (getattr(self, "_pulsed_last", None) or self.pulsed_plot_raw)()
 
         def _pulsed_axis(self, mode):
             c = self.pulsed_cache
@@ -3998,20 +4887,102 @@ def main(argv=None):
                     if len(fr) == n:
                         return fr, "frequency (GHz)"
                     return np.linspace(fr[0], fr[-1], n), "frequency (GHz)"
-                return np.arange(n, float), "scan point"
+                return np.arange(n, dtype=float), "scan point"
+            if mode == "t1":
+                w, lab = t1_wait_axis(c["seq"], n)
+                if w is not None:
+                    return w, lab
+                x, lab = build_time_axis(c["seq"], n)      # fall back to the swept tau
+                return x, (lab if lab.startswith("tau") else "wait time (ns)")
             if mode == "phase":
                 return build_phase_axis(c["seq"], n)
             if mode == "rabi_amp":
                 return build_amp_axis(c["seq"], n)
-            return build_time_axis(c["seq"], n)
+            x, lab = build_time_axis(c["seq"], n)
+            # Echo: the swept tau is the HALF-delay (pi/2 - tau - pi - tau - pi/2),
+            # so the total free-evolution time is 2*tau.  Plotting 2*tau makes the
+            # fitted decay constant the true T2.  Only applied to a real time axis
+            # (not the scan-point fallback), and can be turned off if the stored
+            # variable already holds the total time.
+            if (mode == "echo" and lab.startswith("tau")
+                    and getattr(self, "echo_2tau_var", None) is not None
+                    and self.echo_2tau_var.get()):
+                x = 2.0 * x
+                lab = "2\u00b7\u03c4  total free evolution (ns)"
+            return x, lab
+
+        def _keepx_target(self, xdata, prev):
+            """Target x-limits: the tight data range [min, max] by default (so a
+            0..600 ns tau axis shows 0..600), but keep a genuine zoom-IN the user
+            set so we neither zoom out (margins) nor stay zoomed in."""
+            xf = np.asarray(xdata, float)
+            xf = xf[np.isfinite(xf)]
+            if xf.size == 0:
+                return None
+            full = (float(np.min(xf)), float(np.max(xf)))
+            span = (full[1] - full[0]) or 1.0
+            if (prev is not None and prev[0] >= full[0] - 0.02 * span
+                    and prev[1] <= full[1] + 0.02 * span
+                    and (prev[1] - prev[0]) < 0.999 * span):
+                return prev
+            return full
+
+        def pulsed_fft(self):
+            """FFT of the current pulsed time trace -> oscillation spectrum (MHz),
+            to read off the Rabi frequency and spot beating (extra frequencies)."""
+            if not self.pulsed_cache:
+                self._prepare_pulsed()
+            if not self.pulsed_cache:
+                messagebox.showinfo("FFT", "No pulsed data loaded.")
+                return
+            c = self.pulsed_cache
+            mode = self.pmode_combo.get()
+            if mode == "odmr":
+                messagebox.showinfo("FFT", "FFT is for time-domain data "
+                                    "(Rabi / Ramsey / echo), not frequency-swept ODMR.")
+                return
+            x, _xl = self._pulsed_axis(mode)
+            xn = np.asarray(x, float)
+            if np.nanmax(np.abs(xn)) < 1e-3:            # looks like seconds -> ns
+                xn = xn * 1e9
+            y, ylabel = self._pulsed_quantity(c["sig"], c["ref"])
+            res = rabi_fft(xn, y)
+            if res is None or not res["peaks"]:
+                messagebox.showinfo("FFT", "Could not compute a spectrum "
+                                    "(too few points or no oscillation).")
+                return
+            self._odmr_view = False
+            self._pulsed_view = False
+            self._last_fit = None
+            self._rerender = self.pulsed_fft
+            self.set_1d(res["freq_mhz"], res["amp"], xlabel="frequency (MHz)",
+                        ylabel="FFT amplitude", title=f"pulsed FFT  [{ylabel}]")
+            f0 = res["peaks"][0][0]
+            self.ax.axvline(f0, color="tab:red", ls="--", lw=1.0)
+            hi = res["freq_mhz"][-1]
+            self.ax.set_xlim(0, min(hi, 6 * f0) if f0 > 0 else hi)
+            self.canvas.draw_idle()
+            lines = [f"FFT of pulsed time trace  [{ylabel}]"]
+            if f0 > 0:
+                lines.append(f"  Rabi frequency \u2248 {f0:.4g} MHz  "
+                             f"(period {1000.0 / f0:.4g} ns)")
+            lines.append("  strongest components (MHz : amplitude):")
+            for fm, a in res["peaks"]:
+                lines.append(f"    {fm:9.4g}  :  {a:.3g}")
+            if len(res["peaks"]) >= 2 and res["peaks"][1][1] > 0.3 * res["peaks"][0][1]:
+                lines.append("  -> a second strong peak suggests beating / >1 frequency.")
+            self.pulsed_text.delete("1.0", "end")
+            self.pulsed_text.insert("end", "\n".join(lines))
 
         def pulsed_plot_raw(self):
             self._rerender = self.pulsed_plot_raw
+            self._pulsed_last = self.pulsed_plot_raw
             if not self.pulsed_cache:
                 self._prepare_pulsed()
             if not self.pulsed_cache:
                 messagebox.showinfo("Pulsed", "No signal/reference arrays found.")
                 return
+            prev = tuple(self.ax.get_xlim()) if getattr(self, "_pulsed_view", False) else None
             c = self.pulsed_cache
             mode = self.pmode_combo.get()
             x, xlabel = self._pulsed_axis(mode)
@@ -4019,14 +4990,16 @@ def main(argv=None):
                 x = x / 1e9
             q = self.pq_combo.get()
             y, ylabel = self._pulsed_quantity(c["sig"], c["ref"])
-            yerr = None
-            if self.errbar_var.get():
-                se = c.get("sig_err"); re_ = c.get("ref_err")
-                yerr = quantity_error(q, c["sig"], c["ref"],
-                                      se if se is not None else poisson_error(c["sig"]),
-                                      re_ if re_ is not None else poisson_error(c["ref"]))
+            # error bar = the data's own noise (robust), which already reflects the
+            # averaging -- a propagated sqrt(counts) on a ratio/normalised trace is
+            # meaningless (it put sqrt(1)=1 bars on an ~1.0 signal).
+            yerr = _noise_sd(y) if self.errbar_var.get() else None
             self.set_1d(x, y, xlabel=xlabel, ylabel=ylabel, yerr=yerr,
                         title=f"pulsed: {mode}   [{ylabel}]   \u00b7 {c.get('dataset','averaged')}")
+            self._pulsed_view = True
+            tx = self._keepx_target(x, prev)         # tight tau range unless zoomed in
+            if tx is not None:
+                self.ax.set_xlim(*tx); self.canvas.draw_idle()
 
         def _pulsed_quantity(self, sig, ref):
             """Return (y, label) for the quantity chosen in the Pulsed tab."""
@@ -4061,18 +5034,22 @@ def main(argv=None):
                 x, sig, ref, se, re_ = x[live], sig[live], ref[live], se[live], re_[live]
             q = self.pq_combo.get()
             y, ylabel = self._pulsed_quantity(sig, ref)
-            yerr = quantity_error(q, sig, ref, se, re_)
+            yerr = _noise_sd(y)              # robust noise of the displayed quantity
             good = np.isfinite(y)
             xg, yg, eg = x[good], y[good], yerr[good]
             xplot = xg / 1e9 if (mode == "odmr" and np.nanmax(xg) > 1e6) else xg
-            xfit, yfit, scope = xg, yg, f"full trace ({len(xg)} pts)"
+            # fit the SAME data the plot shows (transform + normalisation) so the
+            # fit curve overlays correctly under any normalisation (incl. a.u.)
+            yt, _ = self._transform_1d(xg, yg)
+            ynorm = self._norm_apply(yt, xplot)
+            xfit, yfit, scope = xg, ynorm, f"full trace ({len(xg)} pts)"
             if self.pulsed_sel_var.get():
                 if self.sel_x0 is None:
                     scope = "no selection made \u2014 used full trace"
                 else:
                     m = span_mask(xplot, self.sel_x0, self.sel_x1)
                     if int(m.sum()) >= 4:
-                        xfit, yfit = xg[m], yg[m]
+                        xfit, yfit = xg[m], ynorm[m]
                         scope = f"selection ({int(m.sum())} pts)"
                     else:
                         scope = "selection <4 pts \u2014 used full trace"
@@ -4081,14 +5058,16 @@ def main(argv=None):
 
         def pulsed_analyse(self):
             self._rerender = self.pulsed_analyse
+            self._pulsed_last = self.pulsed_analyse
             if not self.pulsed_cache:
                 self._prepare_pulsed()
             if not self.pulsed_cache:
                 messagebox.showinfo("Pulsed", "No signal/reference arrays found.")
                 return
+            prev = tuple(self.ax.get_xlim()) if getattr(self, "_pulsed_view", False) else None
             mode, xlabel, xplot, yg, xfit, yfit, ylabel, scope, yerr = self._pulsed_prep_xy()
             self.pulsed_text.delete("1.0", "end")
-            res = self._pulsed_fit(mode, xfit, yfit)
+            res = self._pulsed_fit(mode, xfit, yfit, xlabel)
             ds = self.pulsed_cache.get("dataset", "averaged")
             self.set_1d(xplot, yg, yerr=yerr,
                         xlabel=("frequency (GHz)" if mode == "odmr" else xlabel),
@@ -4097,20 +5076,117 @@ def main(argv=None):
             if yerr is not None and np.isfinite(yerr).any():
                 errline = f"  \u00b7  median \u03c3 = {np.nanmedian(yerr):.4g}"
             head = f"[{ylabel}  \u00b7  {ds}  \u00b7  {scope}{errline}]\n\n"
-            if res is not None:
+            # 13C revival markers (echo) come back as x positions in plot units
+            self.extra_vlines = [(xv, "#888")
+                                 for xv in (res.get("vlines", []) if res else [])]
+            if res is not None and res.get("yf") is not None:
                 xf = res["xf"] / 1e9 if (mode == "odmr" and np.nanmax(res["xf"]) > 1e6) \
                     else res["xf"]
                 self._last_fit = {"x_dense": xf, "y_dense": res["yf"],
                                   "r2": res.get("r2", float("nan"))}
                 self.draw_1d()
                 self.pulsed_text.insert("end", head + res["summary"])
+            elif res is not None:                       # fit raised -> show reason
+                self.draw_1d()
+                self.pulsed_text.insert("end", head + res.get("summary",
+                                        "fit failed for this mode."))
             else:
                 self.pulsed_text.insert("end", head + "fit failed for this mode.")
+            self._pulsed_view = True
+            tx = self._keepx_target(xplot, prev)     # tight tau range unless zoomed in
+            if tx is not None:
+                self.ax.set_xlim(*tx); self.canvas.draw_idle()
 
-        def _pulsed_fit(self, mode, x, y):
-            """Prefer our plot_pulsed_hdf5 fitters; fall back to the local library.
-            The phase sweep has no counterpart in plot_pulsed_hdf5, so it always
-            uses the built-in single-fringe cosine."""
+        # ---- model-shape control helpers (Ramsey lines / envelope / B) -----
+        def _ramsey_lines_key(self):
+            txt = (self.ramsey_lines_combo.get()
+                   if hasattr(self, "ramsey_lines_combo") else "single")
+            return {"single": "single", "14N (3 lines)": "n14",
+                    "15N (2 lines)": "n15"}.get(txt, "single")
+
+        def _envelope_key(self):
+            txt = (self.envelope_combo.get()
+                   if hasattr(self, "envelope_combo") else "stretched (free p)")
+            return {"stretched (free p)": "stretch", "Gaussian (p=2)": "gauss",
+                    "exponential (p=1)": "exp"}.get(txt, "stretch")
+
+        def _echo_revivals_on(self):
+            return bool(getattr(self, "echo_revival_var", None)
+                        and self.echo_revival_var.get())
+
+        def _echo_2tau_on(self):
+            return bool(getattr(self, "echo_2tau_var", None)
+                        and self.echo_2tau_var.get())
+
+        def _echo_bfield(self):
+            if not hasattr(self, "echo_bfield_entry"):
+                return None
+            s = self.echo_bfield_entry.get().strip()
+            if not s:
+                return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+
+        def _wrap_custom_fit(self, d, extra=""):
+            """Normalise a fit_*_configurable() result into the dict shape the
+            rest of the Pulsed tab expects (xf/yf/r2/summary/vlines)."""
+            if d is None:
+                return None
+            vlines = d.get("vlines", [])
+            if d.get("failed") or d.get("xf") is None:
+                return {"xf": None, "yf": None, "r2": float("nan"),
+                        "summary": d.get("summary", "fit failed"), "vlines": vlines}
+            summary = (d["title"] + "\n\n" + d["summary"]
+                       + f"\n\n  R\u00b2 = {d['r2']:.5f}   (built-in configurable fit)"
+                       + extra)
+            return {"xf": d["xf"], "yf": d["yf"], "r2": d["r2"],
+                    "summary": summary, "vlines": vlines}
+
+        def _pulsed_fit(self, mode, x, y, xlabel=""):
+            """Ramsey and echo use the built-in configurable fitters so the
+            Ramsey-lines / envelope / 13C-revival controls always take effect.
+            Rabi and ODMR still prefer our plot_pulsed_hdf5 fitters (falling back
+            to the local library); phase always uses the built-in cosine."""
+            if mode == "ramsey":
+                d = fit_ramsey_configurable(
+                    x, y, lines=self._ramsey_lines_key(),
+                    envelope=self._envelope_key(), x_in_ns=True)
+                return self._wrap_custom_fit(d)
+            if mode == "echo":
+                d = fit_echo_configurable(
+                    x, y, envelope=self._envelope_key(),
+                    revivals=self._echo_revivals_on(),
+                    b_gauss=self._echo_bfield(), x_in_ns=True)
+                note = ("" if self._echo_2tau_on() else
+                        "\n\n  NOTE: x-axis is \u03c4 (not 2\u03c4), so the T2 above is "
+                        "the inter-pulse decay \u2014 multiply by 2 for the true "
+                        "coherence time, or tick 'echo x = 2\u00b7\u03c4'.")
+                return self._wrap_custom_fit(d, extra=note)
+
+            if mode == "t1":
+                r = fit_model("Exponential decay", x, y)   # C + A*exp(-t/T1), free A
+                if not r["ok"]:
+                    return None
+                i = r["pnames"].index("tau")
+                T1 = abs(float(r["params"][i]))
+                perr = r.get("perr")
+                terr = (abs(float(perr[i])) if (perr is not None and i < len(perr)
+                        and np.isfinite(perr[i])) else None)
+                unit = (xlabel.split("(")[-1].rstrip(")").strip()
+                        if "(" in xlabel else "x-units")
+                ci, ai = r["pnames"].index("C"), r["pnames"].index("A")
+                summary = ("T1 relaxation  (fit: C + A\u00b7exp(-t/T1))\n\n"
+                           + f"T1 = {T1:.4g}"
+                           + (f" \u00b1 {terr:.2g}" if terr else "")
+                           + f" {unit}\n\n"
+                           + f"R\u00b2 = {r['r2']:.4f}\n"
+                           + f"amplitude A = {float(r['params'][ai]):.4g},  "
+                           + f"offset C = {float(r['params'][ci]):.4g}")
+                return {"xf": r["x_dense"], "yf": r["y_dense"], "r2": r["r2"],
+                        "vlines": [], "summary": summary}
+
             if mode != "phase":
                 try:
                     import plot_pulsed_hdf5 as pp
@@ -4118,10 +5194,6 @@ def main(argv=None):
                         d = pp.fit_rabi(x, y, amplitude=False)
                     elif mode == "rabi_amp":
                         d = pp.fit_rabi(x, y, amplitude=True)
-                    elif mode == "ramsey":
-                        d = pp.fit_ramsey(x, y)
-                    elif mode == "echo":
-                        d = pp.fit_echo(x, y)
                     elif mode == "odmr":
                         d = pp.fit_odmr(x, y)
                     else:
@@ -4129,6 +5201,7 @@ def main(argv=None):
                     if d is not None:
                         r2 = r_squared(y, np.interp(x, d["xf"], d["yf"]))
                         return {"xf": d["xf"], "yf": d["yf"], "r2": r2,
+                                "vlines": [],
                                 "summary": d["title"] + "\n\n" + d["summary"] +
                                 f"\n\n  R² = {r2:.5f}   (via plot_pulsed_hdf5.py)"}
                 except Exception:
@@ -4136,10 +5209,8 @@ def main(argv=None):
             # fallback (and always, for phase): local models
             name = {"rabi_time": "Damped cosine (Rabi)",
                     "rabi_amp": "Damped cosine (Rabi)",
-                    "ramsey": "Ramsey (Gaussian×cos)",
-                    "echo": "Stretched exp (echo)",
                     "odmr": "Lorentzian dip (ODMR)",
-                    "phase": "Cosine (phase sweep)"}[mode]
+                    "phase": "Cosine (phase sweep)"}.get(mode, "Damped cosine (Rabi)")
             r = fit_model(name, x, y)
             if not r["ok"]:
                 return None
@@ -4147,7 +5218,7 @@ def main(argv=None):
                     "\n\n  (built-in fit; keep plot_pulsed_hdf5.py next to this "
                     "file for the physics readout)")
             return {"xf": r["x_dense"], "yf": r["y_dense"], "r2": r["r2"],
-                    "summary": r["summary"] + note}
+                    "summary": r["summary"] + note, "vlines": []}
 
         def pulsed_significance(self):
             self._rerender = self.pulsed_significance
@@ -5294,8 +6365,16 @@ def main(argv=None):
             self.draw_sequence()
 
         # a small fixed palette so each channel keeps one colour
-        _SEQ_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd",
-                       "#ff7f0e", "#17becf", "#8c564b", "#e377c2"]
+        _CH_COLORS = {1: "#808080", 2: "#000080", 3: "#ff7f0e", 4: "#2ca02c"}
+        _MKR_COLORS = {1: "#d62728", 2: "#9467bd", 3: "#FFD700", 4: "#FFFDD0"}
+        _SEQ_FALLBACK = ["#1f77b4", "#17becf", "#8c564b", "#e377c2", "#bcbd22"]
+
+        def _seq_color(self, kind, num):
+            table = self._MKR_COLORS if kind == "mkr" else self._CH_COLORS
+            if num in table:
+                return table[num]
+            pal = self._SEQ_FALLBACK
+            return pal[(int(num) - 1) % len(pal)]
 
         def draw_sequence(self):
             parsed = getattr(self, "seq_parsed", None)
@@ -5305,25 +6384,30 @@ def main(argv=None):
             ax = self.ax
             geo = sequence_pulse_geometry(parsed, self.seq_index)
             channels = geo["channels"] or [0]
-            lane = {ch: i for i, ch in enumerate(channels)}
-            ncol = len(self._SEQ_COLORS)
+            markers = geo.get("marker_nums", [])
+            ch_lane = {c: i for i, c in enumerate(channels)}
+            mk_lane = {m: len(channels) + i for i, m in enumerate(markers)}
+            nlanes = len(channels) + len(markers)
             t_max = geo["t_max_ns"] or 1.0
 
             def draw_one(g, alpha, label=True):
-                for p in g["pulses"]:
-                    row = lane.get(p["channel"], 0)
-                    col = self._SEQ_COLORS[row % ncol]
-                    a = p["amp"] if np.isfinite(p["amp"]) else 1.0
-                    h = 0.42 * (a if abs(a) <= 1 else np.sign(a))  # clip to lane
-                    if abs(h) < 0.03:
-                        h = 0.03 * (1 if a >= 0 else -1)
-                    ax.add_patch(_rect(p["start_ns"], row, max(p["width_ns"], 0.5),
-                                       h, col, alpha))
-                    if label:
-                        ax.text(p["start_ns"] + max(p["width_ns"], 0.5) / 2,
-                                row + (0.5 if h >= 0 else -0.5), p["name"],
-                                ha="center", va="bottom" if h >= 0 else "top",
-                                fontsize=7, rotation=0, color=col, clip_on=True)
+                for kind, items, lanemap, key in (
+                        ("ch", g.get("pulses", []), ch_lane, "channel"),
+                        ("mkr", g.get("markers", []), mk_lane, "marker")):
+                    for p in items:
+                        row = lanemap.get(p[key], 0)
+                        col = self._seq_color(kind, p[key])
+                        a = p["amp"] if np.isfinite(p["amp"]) else 1.0
+                        h = 0.42 * (a if abs(a) <= 1 else np.sign(a))  # clip to lane
+                        if abs(h) < 0.03:
+                            h = 0.03 * (1 if a >= 0 else -1)
+                        ax.add_patch(_rect(p["start_ns"], row, max(p["width_ns"], 0.5),
+                                           h, col, alpha))
+                        if label:
+                            ax.text(p["start_ns"] + max(p["width_ns"], 0.5) / 2,
+                                    row + (0.5 if h >= 0 else -0.5), p["name"],
+                                    ha="center", va="bottom" if h >= 0 else "top",
+                                    fontsize=7, rotation=0, color=col, clip_on=True)
 
             if self.seq_overlay_var.get() and geo["steps"] > 1:
                 # faint envelope of every scan point, then the current one solid
@@ -5331,11 +6415,12 @@ def main(argv=None):
                     draw_one(sequence_pulse_geometry(parsed, i), 0.10, label=False)
             draw_one(geo, 0.85, label=True)
 
-            for r in range(len(channels)):
+            for r in range(nlanes):
                 ax.axhline(r, color="#bbb", lw=0.6, zorder=0)
-            ax.set_yticks(range(len(channels)))
-            ax.set_yticklabels([f"ch {c}" for c in channels])
-            ax.set_ylim(-0.8, len(channels) - 0.2)
+            ax.set_yticks(range(nlanes))
+            ax.set_yticklabels([f"ch {c}" for c in channels]
+                               + [f"mkr {m}" for m in markers])
+            ax.set_ylim(-0.8, max(1, nlanes) - 0.2)
             ax.set_xlim(-0.02 * t_max, 1.03 * t_max)
             ax.set_xlabel("time (ns)")
             title = f"sequence: {parsed.get('name') or '?'}"
