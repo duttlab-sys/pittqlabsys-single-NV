@@ -43,13 +43,13 @@ from src.Model.proteus_hardware_calibrator import ProteusHardwareCalibrator
 
 
 # The example sequence from ODMRPulsedExperiment.create_example_odmr_sequence().
-EXAMPLE_ODMR_SEQUENCE = """sequence: name=hahn_echo, type=hahn_echo, duration=10700ns, sample_rate=1GHz, repeat_count=250000
-variable pulse_duration, start=0ns, stop=797ns, steps=128
-init pulse on channel 4 at 0.000001789-2*pulse_duration, square, 2000ns, 1.0
-pi_2_1 pulse on channel 1 at 0.000003789-2*pulse_duration, gaussian, 28ns, 1.0
-pi pulse on channel 1 at 0.000003817-pulse_duration, gaussian, 55ns, 1.0
-pi_2_2 pulse on channel 1 at 3872ns, gaussian, 28ns, 1.0
-readout pulse on channel 4 at 3900ns, square, 6800ns, 1.0"""
+EXAMPLE_ODMR_SEQUENCE = """sequence: name=Echo, type=Echo, duration=32750ns, sample_rate=1GHz, repeat_count=100000
+variable pulse_duration, start=0ns, stop=600ns, steps=64
+init pulse on channel 4 at 0.00002524-2*pulse_duration, square, 2000ns, 1.0
+pi_2 pulse on channel 1 at 0.000029464-2*pulse_duration, square, 22ns, 1.0
+pi pulse on channel 1 at 0.000029486-pulse_duration, square, 44ns, 1.0
+pi_2_2 pulse on channel 1 at 29530ns, square, 22ns, 1.0
+readout pulse on channel 4 at 28526ns, square, 4224ns, 1.0"""
 
 # A ready-made adiabatic-pump DEER-style sequence you can preview to see the
 # Adiabaticity tab populate (chirp pump placed as an I/Q pair on ch 1 / ch 2):
