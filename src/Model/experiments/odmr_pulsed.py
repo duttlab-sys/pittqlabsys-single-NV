@@ -31,6 +31,7 @@ from src.core.struct_hdf5 import MyStruct
 from src.Controller.Proteus_device import ProteusDevice
 from src.Controller.adwin_gold import AdwinGoldDevice
 from src.Controller.mux_control import MUXControlDevice
+from src.Controller.Thorlabs_FW102C_Filter_Wheel import Thorlabs_FW102C
 import numpy as np
 from src.core.adwin_helpers import get_adwin_binary_path
 
@@ -64,7 +65,7 @@ class ODMRPulsedExperiment(Experiment):
         ]),
         Parameter('microwave', [
             Parameter('enable', True, bool, 'enable MICROWAVE'),
-            Parameter('frequency range', [2.7983e9], list, 'Microwave frequency in Hz', units='Hz'),
+            Parameter('frequency range', [2.81839E9], list, 'Microwave frequency in Hz', units='Hz'),
             Parameter('power', 12, float, 'Microwave power in dBm', units='dBm')
         ]),
         Parameter('Laser Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
@@ -73,7 +74,7 @@ class ODMRPulsedExperiment(Experiment):
             Parameter('power', 1.0, float, 'Green Laser power in mW', units='mW'),
             Parameter('wavelength', 532.0, float, 'Green Laser wavelength in nm', units='nm')
         ]),
-        Parameter('Filter Wheel OD', 1,
+        Parameter('Filter Wheel OD', 0,
                   [0, 0.5, 1, 2, 3, 4], 'Filter Wheel OD'),
         Parameter('delays', [
             Parameter('green_laser_delay', 0.0, float, 'green_laser_delay in ns', units='ns'),
@@ -84,12 +85,11 @@ class ODMRPulsedExperiment(Experiment):
         ]),
         Parameter('adwin', [
             Parameter('count_time', 300, float, 'Photon counting time in ns', units='ns'),
-            Parameter('reset_time', 5320, float, 'Reset time between counts in ns', units='ns'),
-            Parameter('readout_start_ns', 6000, float,
-                      'Trigger -> readout-pulse onset in ns (same for every tau)', units='ns'),
-            Parameter('trigger_duration', 150, float, 'Trigger pulse width in ns', units='ns'),
-            Parameter('gate_align_offset_ns', 2000, float,
-                      'One-time scope calibration offset for the fixed gate in ns', units='ns')]),
+            Parameter('reset_time', 2000, float, 'Reset time between counts in ns', units='ns'),
+            Parameter('readout_start_ns', 3002000, float, 'readout_start time in ns', units='ns'),
+            Parameter('trigger_duration', 150, float, 'trigger_duration in ns', units='ns'),
+            Parameter('gate_align_offset_ns', 2000, float, 'gate_align_offset in ns', units='ns'),
+            Parameter('adbasic_file', "odmr_pulsed_statemachine_v6.TB1", str, 'state mchine code')]),
         Parameter('iq_calibration', [
             Parameter('calibration_file', '', str,
                       'Path to iq_calibration_results.json (empty = use default location)'),
@@ -98,56 +98,27 @@ class ODMRPulsedExperiment(Experiment):
             Parameter('q_amplitude_correction', 0.89, float,
                       'Q channel scale factor (overridden by calibration file if found)'),
         ]),
-        Parameter('Multiharp Data Collection', [
-            Parameter('enable', True, bool,
-                      'Route the run through the MultiHarp tagger (off = plain averaged run)'),
-            Parameter('mode', "rabi_mw_tagged",
-                      ["rabi_mw_tagged", "rabi_vs_spcm", "readout_vs_spcm",
-                       "init_vs_trigger", "adwin_readout_vs_spcm"],
-                      'MultiHarp correlation case'),
-            Parameter("start_input", [
-                Parameter('channel', 1, [0, 1, 2, 3, 4],
-                          "choose which channel should act as the start input"),
-                Parameter('level_mV', 500, int, "choose trigger level")
-            ]),
-            Parameter("stop_input", [
-                Parameter('channel', 4, [0, 1, 2, 3, 4],
-                          "choose which channel should act as the stop input"),
-                Parameter('level_mV', 320, int, "choose trigger level")
-            ]),
-            Parameter("mw_input", [
-                Parameter('enable', True, bool, 'enable MW rise tagging'),
-                Parameter('channel', 2, [0, 1, 2, 3, 4],
-                          "choose which channel should act as the mw_input"),
-                Parameter('level_mV', 350, int, "choose trigger level")
-            ]),
-            Parameter("mw_fall_input", [
-                Parameter('enable', True, bool, 'enable MW fall tagging (width mode)'),
-                Parameter('channel', 3, [0, 1, 2, 3, 4],
-                          "choose which channel should act as the mw_fall_input"),
-                Parameter('level_mV', 350, int, "choose trigger level")]),
-            Parameter("trigger_input", [
-                Parameter('enable', True, bool, 'enable trigger cross-check tagging'),
-                Parameter('channel', 0, [0, 1, 2, 3, 4],
-                          "choose which channel should act as the trigger_input"),
-                Parameter('level_mV', 300, int, "choose trigger level")
-            ]),
-            Parameter('rabi_tau_values_ns', [
-                Parameter('enable', True, bool,
-                          'pass tau values explicitly instead of letting the tagger infer them'),
-                Parameter('start', 4, int, 'first tau value in ns'),
-                Parameter('stop', 3000, int, 'last tau value in ns'),
-                Parameter('steps', 64, int, 'number of tau steps'), ])
-        ]),
         Parameter('scan', [
             Parameter('preview_points', 1, int, 'Number of scan points to preview'),
             Parameter('auto_generate_files', True, bool, 'Automatically generate AWG files'),
-            Parameter('output_directory', 'odmr_pulsed_output', str, 'Output directory for AWG files')
+            Parameter('output_directory', 'odmr_pulsed_output', str, 'Output directory for AWG files'),
+            Parameter('bypass_sequence_validation', False, bool,
+                      'If True, skip the sequence preview/confirmation and run immediately')
+        ]),
+        Parameter('tau_advisor', [
+            Parameter('enable', False, bool,
+                      'ask tau advisor to check pulse sequence for tau length and resolution'),
+            Parameter('preset', "single_nv", ["single_nv", "ensemble"], 'provide info about sample for better guidance'),
+            Parameter('b_field_G', 50, int, 'b_field_G'),
+            Parameter('save_path', "tau_preview.png", str,
+                      'save path'),
+            Parameter('rabi_MHz', 50, int, 'rabi frequency in MHz'),
+            Parameter('detuning_MHz', 50, int, 'detuning in MHz')
         ]),
         Parameter('averaging', [
-            Parameter('averages', 10, int,
+            Parameter('averages', 7, int,
                       'Number of full runs to average term-by-term (1 = original behavior)'),
-            Parameter('optimize_between_runs', True, bool,
+            Parameter('optimize_between_runs', False, bool,
                       'Re-optimize confocal position between runs (never in the middle of a run)'),
             Parameter('optimization_mode', "convergence", ["convergence", "fit"],
                       'Re-optimization_mode for confocal position'),
@@ -211,10 +182,13 @@ class ODMRPulsedExperiment(Experiment):
         # Setup logging
         self.logger = logging.getLogger(__name__)
         self.test_mode = mode  # <-- None/"" = real, "testing" = MultiHarp
-        self.timing_result = None  # <-- filled by the MultiHarp path (non-rabi cases)
-        self.rabi_result = None  # <-- filled by the MultiHarp path (rabi cases)
+        self.timing_result = None  #
         self.repeat_count = None
         self.number_of_iterations = 0
+        self.s_t = ''
+        self.e_t = ''
+        self.adwin_reached_the_end = 0
+        self.number_of_sequences_done_by_adwin = 0
         self.config_path = config_path or self.get_config_path(
             "D:\\Duttlab\\Experiments\\AQuISS_default_save_location\\experiments_auto_generated\\ODMRPulsedExperiment.json")
         # Configuration
@@ -233,6 +207,7 @@ class ODMRPulsedExperiment(Experiment):
         self.sg384 = self.devices['sg384']['instance']
         self.mux = self.devices['mux_control']['instance']
         self.filter_wheel = self.devices['filter_wheel']['instance']"""
+        #self.filter_wheel = Thorlabs_FW102C()
         self.proteus = ProteusDevice()
         self.adwin = AdwinGoldDevice()
         self.mux = MUXControlDevice()
@@ -659,14 +634,6 @@ class ODMRPulsedExperiment(Experiment):
         self.green_laser_power = self.settings['green_laser']['power']
         self.green_laser_wavelength = self.settings['green_laser']['wavelength']
 
-        # ADwin / gate timing -- read from the GUI every Start click (no more
-        # editing the __main__ block). These feed configure_gates_v5 and save_hdf5.
-        self.count_time = self.settings['adwin']['count_time']
-        self.reset_time = self.settings['adwin']['reset_time']
-        self.readout_start_ns = self.settings['adwin']['readout_start_ns']
-        self.trigger_duration = self.settings['adwin']['trigger_duration']
-        self.gate_align_offset_ns = self.settings['adwin']['gate_align_offset_ns']
-
         # Output paths
         self.output_dir = self.get_output_dir("odmr_pulsed_output")
         self.logger.info("ODMR Pulsed Experiment initialized")
@@ -698,68 +665,33 @@ class ODMRPulsedExperiment(Experiment):
         else:
             self.logger.info(f"Failed to load sequence from {source}")
             return
+
+        # --- Sequence preview + proceed gate --------------------------------
+        # build_scan_sequences() (inside _preview_and_confirm) runs in SOFTWARE
+        # only -- no instrument I/O. If bypass_sequence_validation is False we
+        # show the preview and wait: hardware is programmed only if the user
+        # clicks "Yes, proceed". On "No"/close we return, leaving every
+        # instrument untouched.
+        if not self.settings['scan']['bypass_sequence_validation']:
+            if not self._preview_and_confirm():
+                self.logger.info("Cancelled at sequence preview; no hardware programmed.")
+                return
+        # --------------------------------------------------------------------
         # Run experiment
         self.logger.info("Running experiment...")
-        freqs = self.settings['microwave']['frequency range']
-        mh = self.settings['Multiharp Data Collection']
-
-        if mh['enable']:
-            # Route the run through the MultiHarp tagger, built entirely from the
-            # GUI settings. This mirrors the old __main__ "Multiharp Rabi" block
-            # so nothing there needs editing anymore.
-            from multiharp_timing_tester import (
-                MultiHarpTimingTester, ChannelConfig, EDGE_RISING, EDGE_FALLING,
-            )
-
-            tester_kwargs = dict(
-                case=mh['mode'],
-                start_input=mh['start_input']['channel'],
-                start_cfg=ChannelConfig(level_mV=mh['start_input']['level_mV'], edge=EDGE_RISING),
-                stop_input=mh['stop_input']['channel'],
-                stop_cfg=ChannelConfig(level_mV=mh['stop_input']['level_mV'], edge=EDGE_RISING),
-            )
-            # MW rise tagging (3rd input)
-            if mh['mw_input']['enable']:
-                tester_kwargs['mw_input'] = mh['mw_input']['channel']
-                tester_kwargs['mw_cfg'] = ChannelConfig(
-                    level_mV=mh['mw_input']['level_mV'], edge=EDGE_RISING)
-            # MW fall tagging (4th input -> WIDTH mode: tau = fall - rise)
-            if mh['mw_fall_input']['enable']:
-                tester_kwargs['mw_fall_input'] = mh['mw_fall_input']['channel']
-                tester_kwargs['mw_fall_cfg'] = ChannelConfig(
-                    level_mV=mh['mw_fall_input']['level_mV'], edge=EDGE_FALLING)
-            # ADwin-trigger cross-check input
-            if mh['trigger_input']['enable']:
-                tester_kwargs['trig_input'] = mh['trigger_input']['channel']
-                tester_kwargs['trig_cfg'] = ChannelConfig(
-                    level_mV=mh['trigger_input']['level_mV'], edge=EDGE_RISING)
-            # tau axis: pass it explicitly (the tagger warns against inferring it -- units trap)
-            tau = mh['rabi_tau_values_ns']
-            if tau['enable']:
-                tester_kwargs['rabi_tau_values_ns'] = np.linspace(
-                    tau['start'], tau['stop'], int(tau['steps']))
-
-            tester = MultiHarpTimingTester(**tester_kwargs)
-            out = tester.run_with_experiment(
-                self, freqs, run_method="run_experiment_averaged")
-            # rabi cases return {'odmr','rabi',...}; other cases return {'odmr','timing'}
-            self.rabi_result = out.get("rabi")
-            self.timing_result = out.get("timing")
-            results = out["odmr"]
-            self.data = results
-        else:
-            results = self.run_experiment_averaged(freqs)
-            self.data = results
-
-        self.save_hdf5()
-        if results['success']:
-            self.logger.info("Experiment completed successfully!")
-            self.logger.info(f"Frequencies scanned: {[f / 1e9 for f in results['frequencies']]} GHz")
-            self.logger.info(
-                f"Signal counts shape: {len(results['signal_counts'])} frequencies x {len(results['signal_counts'][0])} points")
-        else:
-            self.logger.info(f"Experiment failed: {results['error']}")
-        self.cleanup()
+        results = self.run_experiment_averaged(self.settings['microwave']['frequency range'])
+        self.data = results
+        try:
+            self.save_hdf5()
+            if results['success']:
+                self.logger.info("Experiment completed successfully!")
+                self.logger.info(f"Frequencies scanned: {[f / 1e9 for f in results['frequencies']]} GHz")
+                self.logger.info(
+                    f"Signal counts shape: {len(results['signal_counts'])} frequencies x {len(results['signal_counts'][0])} points")
+            else:
+                self.logger.info(f"Experiment failed: {results['error']}")
+        finally:
+            self.cleanup()
         self.show_sequence_preview(10)
         self.logger.info("\nODMR Pulsed Experiment ready!")
 
@@ -1041,6 +973,21 @@ class ODMRPulsedExperiment(Experiment):
         preview_window = SequencePreviewWindow(preview_sequences, self.sequence_description)
         preview_window.show()
 
+    def suggest_tau(self, **kwargs):
+        from tau_advisor import advise_tau
+        text = self.sequence_text
+        return advise_tau(text, **kwargs)
+
+
+    def _preview_and_confirm(self) -> bool:
+        """Build the sequence in SOFTWARE only, then ask before any hardware.
+        Returns True only if the user clicks 'Yes, proceed'."""
+        if not self.build_scan_sequences():
+            self.logger.error("Could not build scan sequences for preview.")
+            return False
+        win = SequencePreviewWindow(self.scan_sequences, self.sequence_description)
+        return win.show_and_confirm()
+
     def set_microwave_parameters(self, frequency: float, power: float, delay: float) -> None:
         """
         this is just for testing: we need to only use json or gui for this
@@ -1129,6 +1076,7 @@ class ODMRPulsedExperiment(Experiment):
         shot_ns = ref_start_ns + Y
         pd_ticks = max(1500, int(round(
             2.0 * shot_ns * tpns)))  # ~2x shot; Event uses half the period, link gets the other half
+        self.pd_ticks_sent = pd_ticks
         pd_us = pd_ticks / tpns / 1000.0
         shot_us = shot_ns / 1000.0
         if getattr(self, "pd_ticks", None) is not None:
@@ -1209,7 +1157,7 @@ class ODMRPulsedExperiment(Experiment):
                 print(f"settng power: {self.microwave_power}")
                 if self.settings["microwave"]["enable"]:
                     print("enabling output")
-                    self.sg384.enable_output()
+                    #self.sg384.enable_output()
                 self.microwave_frequency = freq
                 self.logger.info(f"Set SG384 to {freq / 1e9:.3f} GHz, {self.microwave_power} dBm")
 
@@ -1293,7 +1241,31 @@ class ODMRPulsedExperiment(Experiment):
         results: Dict[str, Any] = {'success': True, 'frequencies': frequency_range}
         signal_runs, ref_runs, total_runs = [], [], []
 
+        # +++ ETA helpers/state
+        def _fmt_dur(seconds: float) -> str:
+            seconds = max(0.0, float(seconds))
+            h, rem = divmod(int(round(seconds)), 3600)
+            m, s = divmod(rem, 60)
+            return (f"{h}h {m:02d}m {s:02d}s" if h else
+                    f"{m}m {s:02d}s" if m else f"{s}s")
+
+        # a-priori estimate (pure acquisition; excludes optimization/AWG-reprogram/
+        # analysis, so it's a lower bound). Available once sequences are built.
+        try:
+            _shots_per_avg = int(self.repeat_count) * int(self.number_of_iterations)
+            _secs_acq_per_avg = _shots_per_avg * float(self.sequence_duration) * 1e-9
+            print(f"[ETA] a-priori: ~{_shots_per_avg:,} shots/avg x {averages} avg "
+                  f"~= {_fmt_dur(_secs_acq_per_avg * averages)} of pure acquisition "
+                  f"(excludes optimization/overhead).")
+        except Exception:
+            pass
+
+        _t_start = time.monotonic()  # +++
+        _per_run = []  # +++
+        self.progress = 0.0
+        self.updateProgress.emit(0)
         for run_idx in range(1, averages + 1):
+            _run_t0 = time.monotonic()  # +++ full per-average wall time (incl. optimize)
             msg = f"=== Average run {run_idx}/{averages} ==="
             self.logger.info(msg)
             print(msg)
@@ -1303,7 +1275,6 @@ class ODMRPulsedExperiment(Experiment):
                 try:
                     self._optimize_position()
                 except Exception as e:
-                    # Optimization is best-effort: log and keep measuring.
                     self.logger.error(f"Optimization before run {run_idx} failed (continuing): {e}")
 
             run = self.run_experiment(frequency_range)
@@ -1324,14 +1295,26 @@ class ODMRPulsedExperiment(Experiment):
             results[f'reference_{run_idx}'] = r
             results[f'total_{run_idx}'] = t
 
-            # ---- crash-safe incremental save: after EACH average, write all runs
-            # completed so far to disk. A crash mid-averaging (or a MultiHarp/
-            # analysis crash afterwards) then never loses a multi-hour run. This is
-            # insurance only; the final save_hdf5() remains the authoritative output.
             try:
                 self._save_adwin_partial(results, run_idx, averages)
             except Exception as e:
                 self.logger.error(f"partial save after run {run_idx} failed (continuing): {e}")
+
+            # +++ ETA update: measured wall-time per average is the honest estimator.
+            _per_run.append(time.monotonic() - _run_t0)
+            _remaining = averages - run_idx
+            _mean = sum(_per_run) / len(_per_run)  # includes optimization + overhead
+            _elapsed = time.monotonic() - _t_start
+            _eta = _mean * _remaining
+            _finish = time.strftime('%H:%M:%S', time.localtime(time.time() + _eta))
+            print(f"[ETA] avg {run_idx}/{averages} took {_fmt_dur(_per_run[-1])} | "
+                  f"elapsed {_fmt_dur(_elapsed)} | mean/avg {_fmt_dur(_mean)} | "
+                  f"~{_fmt_dur(_eta)} left | finish ~{_finish}")
+            # feed the GUI progress bar + "time remaining" label (same mechanism
+            # as odmr_sweep_continuous: base Experiment derives remaining_time
+            # from self.progress once we emit updateProgress).
+            self.progress = 100.0 * run_idx / averages
+            self.updateProgress.emit(int(round(self.progress)))
 
         # Term-by-term average across runs (float; fractional averages are correct).
         signal_avg = np.mean(np.stack(signal_runs, axis=0), axis=0)
@@ -1539,13 +1522,20 @@ class ODMRPulsedExperiment(Experiment):
         except Exception as e:
             self.logger.warning(f"Could not force laser channel high for optimization: {e}")
 
-
         time.sleep(0.2)  # let the stage settle and the counter spin up
-
-
-        # Seed the best-known baseline on the first optimization of this experiment.
+        OPT_MIN_VALID_CPS = 200.0
         current_counts = self._read_opt_counts()
-        if getattr(self, '_opt_best_counts', None) is None:
+        if current_counts < OPT_MIN_VALID_CPS:
+            self.logger.warning(
+                f"[optimize] counter read {current_counts:.0f} cts/s "
+                f"(< {OPT_MIN_VALID_CPS:.0f}). The ADwin optimization counter is seeing "
+                f"~no light. Check that the laser is on. Forcing an optimization pass.")
+            print(f"[optimize] WARNING: {current_counts:.0f} cts/s -- ADwin counter sees "
+                  f"no light (SPCM on the MultiHarp?). Not trusting this as 'healthy'.")
+
+
+        # Only seed the baseline from a believable reading.
+        if getattr(self, '_opt_best_counts', None) is None and current_counts >= OPT_MIN_VALID_CPS:
             self._opt_best_counts = current_counts
             self._opt_best_x = nd.read_probes('x_pos')
             self._opt_best_y = nd.read_probes('y_pos')
@@ -1554,7 +1544,12 @@ class ODMRPulsedExperiment(Experiment):
 
 
         did_optimize = False
-        if reoptimize_only_if_needed and current_counts >= (min_reoptimize_ratio * self._opt_best_counts):
+        counts_healthy = (
+            current_counts >= OPT_MIN_VALID_CPS
+            and self._opt_best_counts is not None
+            and current_counts >= (min_reoptimize_ratio * self._opt_best_counts)
+        )
+        if reoptimize_only_if_needed and counts_healthy:
             print(f"Counts healthy ({current_counts:.0f} >= "
                   f"{min_reoptimize_ratio:.2f} * {self._opt_best_counts:.0f}); "
                   f"skipping re-optimization -- stage NOT moved.")
@@ -1564,6 +1559,7 @@ class ODMRPulsedExperiment(Experiment):
             self._optimize_axis('z', float(opt['opt_zstep']))   # <-- z first
             self._optimize_axis('x', float(opt['opt_xstep']))
             self._optimize_axis('y', float(opt['opt_ystep']))
+
 
 
             # --- retention net (mirrors the confocal-point experiment) ---
@@ -1677,17 +1673,13 @@ class ODMRPulsedExperiment(Experiment):
             # harmless for a wide T1 readout, fatal for a narrow Rabi gate on the onset.
             # v2 splits them into separate Events (gap = bare off-Events) so nothing
             # overruns and the reference can sit ~2 us later in the bright window.
-            SHORT_SEQ_US = 50.0
-            if (self.sequence_duration / 1000.0) < SHORT_SEQ_US:
-                self.adwin_file = 'odmr_pulsed_statemachine_v5.TB1'  # split gates (Rabi)
-            else:
-                self.adwin_file = 'odmr_pulsed_statemachine_v1.TB1'  # (T1 and similar experiments)
+            self.adwin_file = self.settings["adwin"]["adbasic_file"]
 
             if self.adwin_file.endswith('v2.TB1') or self.adwin_file.endswith('v4.TB1'):
                 expected_signature = 7778
             elif self.adwin_file.endswith('v1.TB1'):
                 expected_signature = 7777
-            elif self.adwin_file.endswith('v5.TB1'):
+            elif self.adwin_file.endswith('v5.TB1') or self.adwin_file.endswith('v6.TB1'):
                 expected_signature = 7783
             elif self.adwin_file.endswith('v3.TB1'):
                 expected_signature = 7779
@@ -1758,22 +1750,35 @@ class ODMRPulsedExperiment(Experiment):
             # ---- Wait on the handshake instead of a fixed sleep ----
             # SM fires repeat_count x n_iterations triggers, counts, then sets Par_20 = 1.
             t_start = time.time();
-            t_hb = time.time()
+            t_hb = time.time();
+            t_dbg = 0.0
             last_hb = self.adwin.get_int_var(25)
-            # ~2 Events per iteration, each = Processdelay. Par_71 echoes the real Processdelay.
-            pd_ns = self.adwin.get_int_var(71) / 0.3
+            """print(f"[wait] Par_71(Processdelay)={self.adwin.get_int_var(71)} (configure said 19747), "
+                  f"Par_80(sig)={self.adwin.get_int_var(80)} (expect 7783), "
+                  f"Par_10={self.adwin.get_int_var(10)} (expect 1)")"""
+            pd_ns = self.pd_ticks_sent / 0.3
             expected_sweep_s = 2 * pd_ns * 1e-9 * self.repeat_count * max(1, self.number_of_iterations)
-            timeout_s = max(30.0, expected_sweep_s * 1000.0)
+            timeout_s = max(60.0, expected_sweep_s * 10.0)  # 10x headroom, not 1000x
             while self.adwin.get_int_var(20) == 0:
-                time.sleep(0.05)
-                hb = self.adwin.get_int_var(25)  # heartbeat
+                time.sleep(0.05);
+                now = time.time()
+                hb = self.adwin.get_int_var(25)
                 if hb != last_hb:
-                    last_hb = hb;
-                    t_hb = time.time()
-                elif time.time() - t_hb > 15:
-                    raise RuntimeError(f"ADwin heartbeat frozen (state Par_26={self.adwin.get_int_var(26)})")
-                if time.time() - t_start > timeout_s:
-                    raise TimeoutError("State machine never set Par_20 (done)")
+                    last_hb = hb; t_hb = now
+                elif now - t_hb > 15:
+                    raise RuntimeError(f"heartbeat frozen: state={self.adwin.get_int_var(26)} "
+                                       f"iter={self.adwin.get_int_var(27)} rep={self.adwin.get_int_var(28)} "
+                                       f"capped={self.adwin.get_int_var(74)}")
+                if now - t_dbg > 2.0:
+                    t_dbg = now
+                    """print(f"[wait] state={self.adwin.get_int_var(26)} iter={self.adwin.get_int_var(27)} "
+                          f"rep={self.adwin.get_int_var(28)} capped={self.adwin.get_int_var(74)} "
+                          f"Par_71={self.adwin.get_int_var(71)} hb={hb}")"""
+                if now - t_start > timeout_s:
+                    raise TimeoutError(f"never done: state={self.adwin.get_int_var(26)} "
+                                       f"iter={self.adwin.get_int_var(27)}/{self.number_of_iterations} "
+                                       f"rep={self.adwin.get_int_var(28)}/{self.repeat_count} "
+                                       f"capped={self.adwin.get_int_var(74)} Par_71={self.adwin.get_int_var(71)}")
 
             end_time = datetime.datetime.now()
             self.e_t = end_time.strftime("%m_%d_%Y_%H:%M:%S")
@@ -1883,21 +1888,81 @@ readout pulse on channel 3 at 502000ns, square, 2000ns, 1.0"
         to cancel excitation-time dispersion — do that by setting one pulse's bandwidth negative (it just flips the sweep sign).
         For HS: HS{n_left, n_right} works via offset-independent adiabaticity, which reduces exactly to a symmetric HS at n_left=n_right=1
         HS{1,6} matches what a ref paper found best for short traces; flip to n_left=6, n_right=1 to reverse which side is steep.
+
+        ===
+        sequence: name=rabi, type=rabi, duration=14300ns, sample_rate=1GHz, repeat_count=33333
+        variable pulse_duration, start=4ns, stop=3000ns, steps=64
+        init pulse on channel 4 at 0ns, square, 2000ns, 1.0
+        MW pulse on channel 1 at 3000ns, square, pulse_duration, 0.1
+        readout pulse on channel 4 at 6071ns, square, 8229ns, 1.0
+        marker, reference_MW_1 on channel 1 at 3000ns, pulse_duration
+        marker, reference_readout_1 on channel 4 at 6071ns, 8229ns
+        ===
+        sequence: name=rabi, type=rabi, duration=14300ns, sample_rate=1GHz, repeat_count=33333
+        variable pulse_duration, start=1000ns, stop=1000ns, steps=1
+        init pulse on channel 4 at 0ns, square, 2000ns, 1.0
+        MW pulse on channel 1 at 3000ns, square, pulse_duration, 1.0
+        readout pulse on channel 4 at 6071ns, square, 8229ns, 1.0
+sequence: name=RABI, type=RABI, duration=8988ns, sample_rate=1GHz, repeat_count=1000000
+variable pulse_duration, start=4ns, stop=600ns, steps=64
+init pulse on channel 4 at 0ns, square, 2000ns, 1.0
+MW pulse on channel 1 at 3450ns, square, pulse_duration, 0.3
+readout pulse on channel 4 at 5988ns, square, 3000ns, 1.0
+
+sequence: name=odmr, type=odmr, duration=11128ns, sample_rate=1GHz, repeat_count=100000
+variable pulse_duration, start=110ns, stop=110ns, steps=1
+init pulse on channel 4 at 0.000003112-pulse_duration, square, 2000ns, 1.0
+MW pulse on channel 1 at 0.000007336-pulse_duration, square, pulse_duration, 0.1
+readout pulse on channel 4 at 6310ns, square, 4818ns, 1.0
+
+sequence: name=Rabi, type=Rabi, duration=11128ns, sample_rate=1GHz, repeat_count=100000
+variable pulse_duration, start=0ns, stop=500ns, steps=64
+init pulse on channel 4 at 0.000003112-pulse_duration, square, 2000ns, 1.0
+MW pulse on channel 1 at 0.000007336-pulse_duration, square, pulse_duration, 0.1
+readout pulse on channel 4 at 6310ns, square, 4818ns, 1.0
+
+sequence: name=Echo, type=Echo, duration=32750ns, sample_rate=1GHz, repeat_count=100000
+variable pulse_duration, start=0ns, stop=12500ns, steps=64
+init pulse on channel 4 at 0.000025127-2*pulse_duration, square, 2000ns, 1.0
+pi_2_1 pulse on channel 1 at 0.000029351-2*pulse_duration, square, 22ns, 1.0
+pi pulse on channel 1 at 0.000029373-pulse_duration, square, 43ns, 1.0
+pi_2_2 pulse on channel 1 at 29416ns, square, 22ns, 1.0
+readout pulse on channel 4 at 28412ns, square, 4338ns, 1.0
+init pulse on channel 4 at 0.000025127-2*pulse_duration, square, 2000ns, 1.0
+pi_2_1 pulse on channel 1 at 0.000029351-2*pulse_duration, square, 22ns, 1.0
+pi pulse on channel 1 at 0.000029373-pulse_duration, square, 43ns, 1.0
+pi_2_2 pulse on channel 1 at 29416ns, square, 22ns, 1.0
+
+sequence: name=Echo, type=Echo, duration=32750ns, sample_rate=1GHz, repeat_count=100000
+variable pulse_duration, start=100ns, stop=500ns, steps=64
+readout pulse on channel 4 at 0.000028112+pulse_duration, square, 4038ns, 1.0
+readout pulse on channel 3 at 28412ns, square, 4338ns, 1.0
+sequence: name=Echo, type=Echo, duration=32750ns, sample_rate=1GHz, repeat_count=100000
+variable pulse_duration, start=0ns, stop=6250ns, steps=64
+init pulse on channel 4 at 0.000025131-2*pulse_duration, square, 2000ns, 1.0
+pi_2_1 pulse on channel 1 at 0.000029355-2*pulse_duration, square, 21ns, 1.0
+pi pulse on channel 1 at 0.000029376-pulse_duration, square, 41ns, 1.0
+pi_2_2 pulse on channel 1 at 29417ns, square, 21ns, 1.0
+readout pulse on channel 4 at 28412ns, square, 4338ns, 1.0
+sequence: name=Rabi, type=Rabi, duration=11128ns, sample_rate=1GHz, repeat_count=100000
+variable pulse_duration, start=0ns, stop=200ns, steps=64
+init pulse on channel 4 at 0.000003112-pulse_duration, square, 2000ns, 1.0
+MW pulse on channel 2 at 0.000007336-pulse_duration, square, pulse_duration, 1.0
+readout pulse on channel 4 at 6310ns, square, 4818ns, 1.0
+
+3000048ns
         """
         sequence_text = """
-sequence: name=RABI, type=RABI, duration=14300ns, sample_rate=1GHz, repeat_count=33333
-variable pulse_duration, start=4ns, stop=3000ns, steps=64
-init pulse on channel 4 at 0ns, square, 2000ns, 1.0
-MW pulse on channel 1 at 3000ns, square, pulse_duration, 1.0
-readout pulse on channel 4 at 6071ns, square, 8229ns, 1.0
-marker, reference_MW_1 on channel 1 at 3000ns, pulse_duration
-marker, reference_readout_1 on channel 4 at 6071ns, 8229ns
+sequence: name=T1, type=T1, duration=3006338ns, sample_rate=1GHz, repeat_count=10000
+variable pulse_duration, start=0ns, stop=3000048ns, steps=64
+init pulse on channel 4 at 0.003000048-pulse_duration, square, 2000ns, 1.0
+readout pulse on channel 4 at 3002108ns, square, 4230ns, 1.0
         """
         return sequence_text.strip()
 
     def create_example_rabi_sequence(self) -> str:
         """
-        Create an example Rabi sequence using the sequence language.
+        Create an example Rabi sequence using the sequence language .
 
         Returns:
             Sequence text in the sequence language format
@@ -1989,6 +2054,57 @@ class SequencePreviewWindow:
 
         # Show window
         self.window.mainloop()
+
+    def show_and_confirm(self) -> bool:
+        """Show the preview with a Proceed/Cancel bar. Returns True to proceed.
+        Closing the window (X) counts as Cancel, so hardware is never touched
+        unless the user explicitly clicks 'Yes, proceed'."""
+        self.proceed = False
+        self.window = tk.Tk()
+        self.window.title("ODMR Pulsed - Sequence Preview (confirm before hardware)")
+        self.window.geometry("820x680")
+
+        notebook = ttk.Notebook(self.window)
+        notebook.pack(fill='both', expand=True, padx=10, pady=(10, 0))
+
+        overview_frame = ttk.Frame(notebook)
+        notebook.add(overview_frame, text="Overview")
+        self._create_overview_tab(overview_frame)
+
+        plots_frame = ttk.Frame(notebook)
+        notebook.add(plots_frame, text="Plots")
+        self._create_plots_tab(plots_frame)
+
+        params_frame = ttk.Frame(notebook)
+        notebook.add(params_frame, text="Parameters")
+        self._create_parameters_tab(params_frame)
+
+        bar = ttk.Frame(self.window)
+        bar.pack(fill='x', padx=10, pady=10)
+        ttk.Label(
+            bar,
+            text=("This sequence was built in software. "
+                  "Proceed and program the hardware?"),
+        ).pack(side='left')
+
+        def _yes():
+            self.proceed = True
+            self.window.quit()
+
+        def _no():
+            self.proceed = False
+            self.window.quit()
+
+        ttk.Button(bar, text="No, cancel", command=_no).pack(side='right', padx=5)
+        ttk.Button(bar, text="Yes, proceed", command=_yes).pack(side='right', padx=5)
+        self.window.protocol("WM_DELETE_WINDOW", _no)
+
+        self.window.mainloop()
+        try:
+            self.window.destroy()
+        except Exception:
+            pass
+        return self.proceed
 
     def _create_overview_tab(self, parent):
         """Create overview tab."""
@@ -2102,11 +2218,12 @@ if __name__ == "__main__":
     else:
         print("Failed to generate AWG sequences")"""
 
-    """# full experiment part
+    # full experiment part
     experiment = ODMRPulsedExperiment(name="test_odmr")
+    #experiment.filter_wheel.update({'OD': experiment.settings['Filter Wheel OD']})
 
     # Set parameters
-    experiment.set_microwave_parameters(2.79354e9, 12.0, 0.0)
+    experiment.set_microwave_parameters( 2.81839E9, 12.0, 0.0)
     experiment.set_green_laser_parameters(1.0, 532)
     experiment.set_delay_parameters(0.0, 0.0, 0.0)
     # Create and load example sequence
@@ -2130,7 +2247,28 @@ if __name__ == "__main__":
     experiment.hardware_calibrator.update_calibration_delays(overrides)
 
     experiment.microwave_power = experiment.settings['microwave']['power']
-    #experiment.settings['microwave']['frequency range'] = [2.77e9, 2.771e9, 2.772e9, 2.773e9, 2.774e9, 2.775e9, 2.776e9, 2.777e9, 2.778e9, 2.779e9, 2.78e9, 2.781e9, 2.782e9, 2.783e9, 2.784e9, 2.785e9, 2.786e9, 2.787e9, 2.788e9, 2.789e9, 2.79e9, 2.791e9, 2.792e9, 2.793e9, 2.794e9, 2.795e9, 2.796e9, 2.797e9, 2.798e9, 2.799e9, 2.8e9, 2.801e9, 2.802e9, 2.803e9, 2.804e9, 2.805e9, 2.806e9, 2.807e9, 2.808e9, 2.809e9, 2.81e9, 2.811e9, 2.812e9, 2.813e9, 2.814e9, 2.815e9, 2.816e9, 2.817e9, 2.818e9]
+    """experiment.settings['microwave']['frequency range'] = [2.78e9, 2.781e9, 2.782e9, 2.783e9, 2.784e9, 2.785e9, 2.786e9, 2.787e9, 2.788e9, 2.789e9, 2.79e9, 2.791e9, 2.792e9,
+                                                           2.793e9, 2.794e9, 2.795e9, 2.796e9, 2.797e9, 2.798e9, 2.799e9, 2.8e9, 2.801e9, 2.802e9, 2.803e9, 2.804e9, 2.805e9,
+                                                           2.806e9, 2.807e9, 2.808e9, 2.809e9, 2.81e9, 2.811e9, 2.812e9, 2.813e9, 2.814e9, 2.815e9, 2.816e9, 2.817e9, 2.818e9]
+    experiment.settings['microwave']['frequency range'] = [2.79965e9, 2.79975e9, 2.79985e9, 2.79995e9, 2.80005e9, 2.80015e9, 2.80025e9, 2.80035e9, 2.80045e9, 2.80055e9, 2.80065e9,
+                                                           2.80075e9, 2.80085e9, 2.80095e9, 2.80105e9, 2.80115e9, 2.80125e9, 2.80135e9, 2.80145e9, 2.80155e9, 2.80165e9, 2.80175e9,
+                                                           2.80185e9, 2.80195e9, 2.80205e9, 2.80215e9, 2.80225e9, 2.80235e9, 2.80245e9, 2.80255e9, 2.80265e9, 2.80275e9, 2.80285e9,
+                                                           2.80295e9, 2.80305e9, 2.80315e9, 2.80325e9, 2.80335e9, 2.80345e9, 2.80355e9, 2.80365e9, 2.80375e9, 2.80385e9, 2.80395e9,
+                                                           2.80405e9, 2.80415e9, 2.80425e9, 2.80435e9, 2.80445e9, 2.80455e9, 2.80465e9, 2.80475e9, 2.80485e9, 2.80495e9, 2.80505e9,
+                                                           2.80515e9, 2.80525e9, 2.80535e9, 2.80545e9, 2.80555e9, 2.80565e9, 2.80575e9, 2.80585e9, 2.80595e9, 2.80605e9, 2.80615e9,
+                                                           2.80625e9, 2.80635e9, 2.80645e9, 2.80655e9, 2.80665e9, 2.80675e9, 2.80685e9, 2.80695e9, 2.80705e9, 2.80715e9, 2.80725e9,
+                                                           2.80735e9, 2.80745e9, 2.80755e9, 2.80765e9, 2.80775e9, 2.80785e9, 2.80795e9, 2.80805e9, 2.80815e9, 2.80825e9, 2.80835e9,
+                                                           2.80845e9, 2.80855e9, 2.80865e9, 2.80875e9, 2.80885e9, 2.80895e9, 2.80905e9, 2.80915e9, 2.80925e9, 2.80935e9, 2.80945e9,
+                                                           2.80955e9, 2.80965e9, 2.80975e9, 2.80985e9, 2.80995e9, 2.81005e9, 2.81015e9, 2.81025e9, 2.81035e9, 2.81045e9, 2.81055e9,
+                                                           2.81065e9, 2.81075e9, 2.81085e9, 2.81095e9, 2.81105e9, 2.81115e9, 2.81125e9, 2.81135e9, 2.81145e9, 2.81155e9, 2.81165e9,
+                                                           2.81175e9, 2.81185e9, 2.81195e9, 2.81205e9, 2.81215e9, 2.81225e9, 2.81235e9]"""
+
+    """experiment.settings['microwave']['frequency range'] = [2.795e9, 2.7954e9, 2.7958e9, 2.796e9, 2.7962e9, 2.7964e9, 2.7966e9, 2.7968e9, 2.797e9, 2.7972e9, 2.7974e9, 2.7976e9,
+                                                           2.7978e9, 2.798e9, 2.7982e9, 2.7984e9, 2.7986e9, 2.7988e9, 2.799e9, 2.7992e9, 2.7994e9, 2.7996e9, 2.7998e9, 2.8e9,
+                                                           2.8002e9, 2.8004e9, 2.8006e9, 2.8008e9, 2.801e9, 2.8012e9, 2.8014e9, 2.8016e9, 2.8018e9, 2.802e9, 2.8022e9, 2.8024e9,
+                                                           2.8026e9, 2.8028e9, 2.803e9, 2.8032e9, 2.8034e9, 2.8036e9, 2.8038e9, 2.804e9, 2.8042e9, 2.8044e9, 2.8046e9, 2.8048e9,
+                                                           2.805e9, 2.8052e9, 2.8054e9, 2.8056e9, 2.8058e9, 2.806e9, 2.8062e9, 2.8064e9, 2.8066e9, 2.8068e9, 2.807e9, 2.8072e9,
+                                                           2.8074e9, 2.8076e9, 2.8078e9, 2.808e9]"""
     experiment.mw_delay = experiment.settings['delays']['mw_delay']
     experiment.green_laser_delay = experiment.settings['delays']['green_laser_delay']
     experiment.counter_delay = experiment.settings['delays']['counter_delay']
@@ -2148,6 +2286,10 @@ if __name__ == "__main__":
     source = None
     sequence_loaded = False
     experiment.sequence_text = experiment.create_example_odmr_sequence()
+    if experiment.settings["tau_advisor"]["enable"]:
+        from tau_advisor import advise_tau
+        advise_tau(experiment.sequence_text, preset = experiment.settings["tau_advisor"]["preset"], b_field_G = experiment.settings["tau_advisor"]["b_field_G"],
+                   save_path = experiment.settings["tau_advisor"]["save_path"])
     print("Example ODMR Sequence:")
     print(experiment.sequence_text)
     print("\n" + "=" * 50 + "\n")
@@ -2163,11 +2305,11 @@ if __name__ == "__main__":
     else:
         experiment.logger.info(f"Failed to load sequence from {source}")
 
-    experiment.count_time = 300  # then 390 then 415
-    experiment.reset_time = 5320 # was 6320: decreasing it to make ref away from laser falling edge
-    experiment.readout_start_ns = 6000
-    experiment.trigger_duration = 150
-    experiment.gate_align_offset_ns = 2000 #1650
+    experiment.count_time = experiment.settings["adwin"]["count_time"] # 300
+    experiment.reset_time = experiment.settings["adwin"]["reset_time"] #2000 # was 5320: decreasing it to make ref away from laser falling edge
+    experiment.readout_start_ns = experiment.settings["adwin"]["readout_start_ns"] #3002000 #3002000 #502000 # 28312 # calibrated 3000 ns pulse_duration: 6224
+    experiment.trigger_duration = experiment.settings["adwin"]["trigger_duration"] #150
+    experiment.gate_align_offset_ns = experiment.settings["adwin"]["gate_align_offset_ns"] # 2000 #1650
     # Run experiment
     print("running exp")
     experiment.logger.info("Running experiment...")
@@ -2183,7 +2325,7 @@ if __name__ == "__main__":
     else:
         experiment.logger.info(f"Experiment failed: {results['error']}")
     #experiment.show_sequence_preview(10)
-    experiment.logger.info("\nODMR Pulsed Experiment ready!")"""
+    experiment.logger.info("\nODMR Pulsed Experiment ready!")
 
     """# Multiharp tester:
     experiment = ODMRPulsedExperiment(name="test_odmr", mode="testing")  # drop mode= for a real run
@@ -2267,10 +2409,10 @@ if __name__ == "__main__":
     experiment.save_hdf5()
     experiment.cleanup()"""
 
-    #Multiharp Rabi:
+    """#Multiharp Rabi:
     experiment = ODMRPulsedExperiment(name="test_odmr", mode="testing")  # drop mode= for a real run
     # Set parameters
-    experiment.set_microwave_parameters(2.7983e9, 12.0, 0.0)
+    experiment.set_microwave_parameters(2.8061e9, 12.0, 0.0)
     experiment.set_green_laser_parameters(1.0, 532)
     experiment.set_delay_parameters(0.0, 0.0, 0.0)
 
@@ -2348,7 +2490,7 @@ if __name__ == "__main__":
     rabi = out["rabi"]
     experiment.data = out["odmr"]  # FIX 2: hand the ADwin result to save_hdf5 (it saves self.data)
     experiment.save_hdf5()
-    experiment.cleanup()
+    experiment.cleanup()"""
 
     #1. Run IQCalibrationExperiment  →  writes iq_calibration_results.json
     #2. Run ODMRPulsedExperiment     →  reads iq_calibration_results.json at start
