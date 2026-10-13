@@ -62,6 +62,9 @@ class ODMRSweepContinuousExperiment(Experiment):
             Parameter('power', -10.0, float, 'Microwave power in dBm', units='dBm'),
             Parameter('step_freq', 1e6, float, 'Frequency step size in Hz', units='Hz'),
             Parameter('sweep_function', 'Triangle', str, 'sweep function'),
+            Parameter('Channel', 1, [1, 2], 'Channel to drive MW'),
+            Parameter('Mixer Control', 0.8, [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+                      "Mixer Control Level from Proteus [V]"),
             Parameter('MW off after experiment?', True, bool,
                       "Choose if you want to turn the MW off after the experiment finishes"),
         ]),
@@ -921,7 +924,8 @@ class ODMRSweepContinuousExperiment(Experiment):
         try:
             self.filter_wheel.update({'OD': self.settings['GREEN_LASER']['Filter Wheel OD']})
             self.log("Starting ODMR Phase Continuous Sweep Experiment")
-            self.proteus.set_channel_voltage_high(1, "MAX")
+            if self.settings["microwave"]["enable"]:
+                self.proteus.set_channel_voltage_high(self.settings['microwave']['Channel'], self.settings['microwave']['Mixer Control'])
             self.proteus.set_channel_voltage_high(4, self.settings['GREEN_LASER']["Laser Control"])
             # Setup experiment and devices first
             self.setup()
