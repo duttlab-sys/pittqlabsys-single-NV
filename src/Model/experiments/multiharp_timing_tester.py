@@ -61,6 +61,24 @@ It supports two comparisons:
          dropped edge drops only that one shot instead of shifting every later one.
          This is the bullet-proof way to run the "ADwin vs real drift" check.
 
+  case="t1_vs_spcm"   (T1: SPCM counted only after the readout marker)
+      trig  = ADwin DIGOUT 28 (copy of DIGOUT 21). Required, but used ONLY as a
+              clock: it groups the marker edges into shots and times
+              DO28 -> marker. No photon is ever counted relative to DO28.
+      start = Proteus ch4 MKR copying the LASER: one marker line on the init
+              pulse and one on the readout pulse (two rising edges per shot).
+      stop  = SPCM output
+      -> the DO28 -> marker durations give each shot its tau:
+         tau = (DO28->readout) - (DO28->init) - t1_gap. An SPCM photon is
+         registered ONLY if it falls inside the readout light after a shot's
+         readout-marker edge; the init pulse and the dark time are never
+         counted. Each shot's readout photons are binned under its measured
+         tau, so a missing or extra edge costs one shot instead of shifting
+         every later one. Also reported: DO28 -> readout jitter, which shot
+         order the Proteus really plays (interleaved/blocked, task-pointer start
+         per run), and the ADwin's PROGRAMMED gates replayed on the same readout
+         photons vs its own counts. See run_t1_with_experiment / analyze_t1.
+
 Which physical MultiHarp BNC is "start" and which is "stop" is up to us; set
 start_input / stop_input to the 0-based MultiHarp input-channel indices we
 plugged into (default 0 and 1). Channel numbering here is 0-based to match
@@ -287,6 +305,20 @@ class RabiResult:
     mw_snap_tol_ns: float = float("nan")      # snap tolerance actually used
     order_agreement: float = float("nan")     # fraction where MW tag == shot-order (cross-check)
 
+    # ---- optional ADwin-trigger cross-check (DIGOUT 28 on its own input) --- #
+    # DIGOUT 28 is a copy of DIGOUT 21 (the line that triggers the Proteus): one
+    # edge per ADwin trigger = one per shot, emitted by the MASTER. Comparing its
+    # count to the Proteus readout-marker count tests, in the SAME stream, whether
+    # every trigger yields exactly one Proteus sequence (1:1). A marker with no
+    # preceding trigger is a Proteus edge the ADwin never asked for (an init burst
+    # before the sweep); a trigger with no marker is a dropped/absent sequence.
+    trigger_input: Optional[int] = None
+    n_trigger_events: int = 0
+    n_orphan_markers: int = 0          # markers with NO preceding trigger (init burst / spurious)
+    n_triggers_no_marker: int = 0      # triggers with 0 markers before the next (dropped sequence)
+    n_triggers_multi_marker: int = 0   # triggers with >1 marker before the next (marker ringing)
+    trig_marker_latency_ns: float = float("nan")   # median (marker - preceding trigger)
+
     def summary(self) -> str:
         lines = [
             f"[MultiHarp Rabi] start=ch{self.start_input} ({self.reference_label})  "
@@ -322,6 +354,18 @@ class RabiResult:
                          "edge shifts every later shot). Treat the curve with care; "
                          "wire the MW line to a third input (mw_input=...) to remove "
                          "the ordering assumption entirely.")
+        if self.trigger_input is not None:
+            lines.append(f"  trigger cross-check (DO28 on ch{self.trigger_input}): "
+                         f"{self.n_trigger_events:,} triggers vs {self.n_ref_events:,} "
+                         f"markers (delta {self.n_ref_events - self.n_trigger_events:+,})")
+            if (self.n_orphan_markers or self.n_triggers_no_marker
+                    or self.n_triggers_multi_marker
+                    or self.n_ref_events != self.n_trigger_events):
+                lines.append(f"    NOT 1:1 -- {self.n_triggers_no_marker:,} dropped, "
+                             f"{self.n_triggers_multi_marker:,} ringing, "
+                             f"{self.n_orphan_markers:,} orphan markers")
+            else:
+                lines.append("    clean 1:1 (every trigger -> exactly one marker)")
         if self.fifo_overrun:
             lines.append("  WARNING: FIFO overrun occurred -- some events were lost.")
         if self.time_resolved and self.arrival_hist.size:
@@ -334,6 +378,223 @@ class RabiResult:
             lines.append("  saved: " + ", ".join(self.saved_files))
         return "\n".join(lines)
 
+
+@dataclass
+class T1Result:
+    """Everything the T1 analysis produces (case="t1_vs_spcm").
+
+    Registration rule: an SPCM photon is registered ONLY if it lands after a
+    shot's READOUT-marker edge, inside the readout light pulse. Nothing between
+    DO28 and the readout marker -- the init pulse, the dark time -- is counted.
+    DO28 is used purely as a clock: it groups the marker edges into shots and
+    times DO28 -> marker, and those durations give each shot its tau (with an
+    init + readout marker: tau = (DO28->readout) - (DO28->init) - t1_gap). The
+    shot's readout photons are then binned under that measured tau."""
+    trig_input: int
+    marker_input: int
+    stop_input: int
+    n_triggers: int                 # DO28 edges = shots the ADwin fired
+    n_marker_edges: int
+    n_spcm_events: int              # every SPCM event in the stream
+    n_iterations: int
+    repeat_count: Optional[int]
+    base_resolution_ps: float
+
+    # ---- marker pattern, and how cleanly it maps onto shots --------------- #
+    marker_layout: str = ""                  # "init+readout" | "readout" | "init" | "none"
+    edges_expected: int = 0                  # rising edges per shot for that layout
+    n_shots_good: int = 0                    # shots with exactly edges_expected edges
+    n_shots_no_marker: int = 0               # shots with no marker edge at all
+    n_shots_bad_count: int = 0               # a missing or an extra (ringing) edge
+    edges_per_shot_hist: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    n_orphan_markers: int = 0                # marker edges before the first DO28 edge
+    n_stray_markers: int = 0                 # marker edges outside every shot window
+    trigger_period_ns: float = float("nan")  # median DO28 -> DO28
+    shot_window_ns: float = float("nan")     # a marker edge later than this after DO28 is stray
+    n_runs: int = 0                          # sweeps, split where DO28 pauses
+    shots_per_run: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    expected_shots_per_run: Optional[int] = None
+
+    # ---- DO28 -> marker durations (DO28 is only a clock) ------------------- #
+    ro_delay_median_ns: float = float("nan")  # DO28 -> readout marker, median over shots
+    ro_jitter_ns: float = float("nan")        # its shot-to-shot std within one tau step
+    ro_delay_span_ns: float = float("nan")    # 0.1..99.9 percentile span of that jitter
+    ro_delay_hist_counts: np.ndarray = field(default_factory=lambda: np.empty(0))
+    ro_delay_hist_edges_ns: np.ndarray = field(default_factory=lambda: np.empty(0))  # vs each tau's median
+    readout_moves: bool = False               # True if DO28 -> readout changes with tau
+    ro_delay_by_tau_ns: np.ndarray = field(default_factory=lambda: np.empty(0))    # median per tau
+    init_delay_by_tau_ns: np.ndarray = field(default_factory=lambda: np.empty(0))  # median per tau
+    tag_offset_ns: float = float("nan")       # constant removed to get tau (see tau_assign_source)
+    tag_offset_auto_ns: float = float("nan")  # the same constant, estimated from the data
+    tau_residual_std_ns: float = float("nan") # spread of (measured tau - its snapped step)
+
+    # ---- tau assignment and the shot-order cross-checks -------------------- #
+    # marker_gap           : tau = (DO28->readout) - (DO28->init) - t1_gap
+    # marker_readout_delay : tau = (DO28->readout) - offset   (readout moves with tau)
+    # marker_init_delay    : tau = offset - (DO28->init)      (init moves with tau)
+    # shot_order_*         : tau from shot order (the marker can't carry it)
+    tau_assign_source: str = ""
+    n_matched: int = 0                        # shots that got a tau
+    n_unmatched: int = 0
+    snap_tol_ns: float = float("nan")
+    agree_interleaved: float = float("nan")          # measured tau == shot-in-run mod n
+    agree_interleaved_shifted: float = float("nan")  # ... allowing one task-pointer offset per run
+    run_pointer_offsets: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    agree_blocked: float = float("nan")              # measured tau == (shot-in-run // repeat_count) mod n
+    order_sample_measured: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    order_sample_interleaved: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    order_sample_blocked: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+
+    # ---- registered SPCM photons: the readout light only ------------------- #
+    n_spcm_registered: int = 0                # photons kept (inside ro_window after a readout marker)
+    ro_window_ns: Tuple[float, float] = (float("nan"), float("nan"))  # ns after the readout marker
+    ro_window_source: str = ""                # "given" | "auto (readout light)" | "fallback"
+    light_on_ns: float = float("nan")         # readout light 50% rise, ns after the readout marker
+    light_off_ns: float = float("nan")        # ... 50% fall
+    light_on10_ns: float = float("nan")       # 10% points: the auto registration window
+    light_off10_ns: float = float("nan")
+
+    # ---- T1 curve (registered photons, binned by each shot's tau) ---------- #
+    tau_ns: np.ndarray = field(default_factory=lambda: np.empty(0))
+    tau_is_index: bool = False
+    sig_window_ns: Tuple[float, float] = (float("nan"), float("nan"))
+    ref_window_ns: Tuple[float, float] = (float("nan"), float("nan"))
+    window_source: str = ""                   # "given" | "auto" | "fallback"
+    signal_mean: np.ndarray = field(default_factory=lambda: np.empty(0))
+    signal_sem: np.ndarray = field(default_factory=lambda: np.empty(0))
+    reference_mean: np.ndarray = field(default_factory=lambda: np.empty(0))
+    contrast: np.ndarray = field(default_factory=lambda: np.empty(0))
+    shots_per_tau: np.ndarray = field(default_factory=lambda: np.empty(0))
+    arrival_hist: np.ndarray = field(default_factory=lambda: np.empty((0, 0)))   # [n_tau, n_bins], ro_window only
+    arrival_edges_ns: np.ndarray = field(default_factory=lambda: np.empty(0))    # after the readout marker
+    arrival_profile_ns: np.ndarray = field(default_factory=lambda: np.empty(0))  # all used shots, any tau
+
+    # ---- the ADwin's programmed gates, replayed on the registered photons -- #
+    adwin_sig_start_ns: float = float("nan")  # after DO28 (= readout_start_ns + gate_align_offset_ns)
+    adwin_ref_start_ns: float = float("nan")
+    adwin_count_ns: float = float("nan")
+    adwin_readout_start_ns: float = float("nan")
+    adwin_gate_align_offset_ns: float = float("nan")
+    adwin_sig_rel_ns: float = float("nan")    # the same gates in readout-marker time
+    adwin_ref_rel_ns: float = float("nan")
+    adwin_replay_status: str = ""
+    adwin_replay_sig: Dict[str, np.ndarray] = field(default_factory=dict)  # binning -> counts per tau
+    adwin_replay_ref: Dict[str, np.ndarray] = field(default_factory=dict)  # "tau" = measured, else order
+    adwin_signal: np.ndarray = field(default_factory=lambda: np.empty(0))  # ADwin totals per tau
+    adwin_reference: np.ndarray = field(default_factory=lambda: np.empty(0))
+    adwin_corr: Dict[str, float] = field(default_factory=dict)         # r(ADwin, replay) per binning
+    adwin_count_ratio: Dict[str, float] = field(default_factory=dict)  # sum ADwin / sum replay
+    light_on_after_trig_ns: float = float("nan")
+    suggested_gate_align_offset_ns: float = float("nan")
+
+    fifo_overrun: bool = False
+    saved_files: List[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        def f(x, p=1):
+            return "n/a" if x is None or not np.isfinite(x) else f"{x:,.{p}f}"
+        L = [f"[MultiHarp T1] DO28 on ch{self.trig_input} = clock only | laser MKR on "
+             f"ch{self.marker_input} ({self.marker_layout or '?'}) | SPCM on ch{self.stop_input}"]
+        spr = ", ".join(f"{int(x):,}" for x in self.shots_per_run[:6])
+        if self.shots_per_run.size > 6:
+            spr += ", ..."
+        exp = self.expected_shots_per_run
+        L.append(f"  shots: {self.n_triggers:,} DO28 edges in {self.n_runs} run(s) [{spr}]"
+                 + (f", expected {exp:,}/run" if exp else "")
+                 + f"; trigger period {f(self.trigger_period_ns / 1000.0, 3)} us")
+        if exp and self.shots_per_run.size and np.any(self.shots_per_run != exp):
+            L.append("    WARNING: a run does not have repeat_count x tau steps shots -- cut short, "
+                     "or an internal DO28 pause was split as a run (raise t1_run_gap_factor).")
+        if self.edges_expected:
+            nt = max(1, self.n_triggers)
+            L.append(f"  marker -> shot: {self.n_shots_good:,} shots "
+                     f"({100.0 * self.n_shots_good / nt:.2f}%) with exactly "
+                     f"{self.edges_expected} edge(s), {self.n_shots_no_marker:,} with none, "
+                     f"{self.n_shots_bad_count:,} with a missing/extra edge; "
+                     f"{self.n_orphan_markers:,} orphan (before the first DO28), "
+                     f"{self.n_stray_markers:,} stray (outside every shot)")
+        else:
+            L.append("  no marker edges inside any shot -- nothing to time, nothing registered")
+        rb, ib = self.ro_delay_by_tau_ns, self.init_delay_by_tau_ns
+        if np.isfinite(self.ro_delay_median_ns):
+            if self.readout_moves and np.isfinite(rb).any():
+                L.append(f"  DO28 -> readout marker MOVES with tau: {f(np.nanmin(rb) / 1000, 3)} .. "
+                         f"{f(np.nanmax(rb) / 1000, 3)} us; jitter std {f(self.ro_jitter_ns, 2)} ns")
+            else:
+                L.append(f"  DO28 -> readout marker: {f(self.ro_delay_median_ns / 1000.0, 4)} us, "
+                         f"fixed (jitter std {f(self.ro_jitter_ns, 2)} ns, span "
+                         f"{f(self.ro_delay_span_ns, 1)} ns)")
+        if ib.size and np.isfinite(ib).any():
+            L.append(f"  DO28 -> init marker: {f(np.nanmin(ib) / 1000, 3)} .. "
+                     f"{f(np.nanmax(ib) / 1000, 3)} us across the sweep")
+        how = {"marker_gap": "(DO28->readout) - (DO28->init) - gap",
+               "marker_readout_delay": "(DO28->readout) - offset",
+               "marker_init_delay": "offset - (DO28->init)"}.get(self.tau_assign_source)
+        if how:
+            L.append(f"  tau READ from each shot = {how}: {self.n_matched:,} matched, "
+                     f"{self.n_unmatched:,} not (snap +/-{f(self.snap_tol_ns, 0)} ns), "
+                     f"residual std {f(self.tau_residual_std_ns, 2)} ns")
+            L.append(f"    {'gap' if self.tau_assign_source == 'marker_gap' else 'offset'} used "
+                     f"{f(self.tag_offset_ns)} ns; the data say {f(self.tag_offset_auto_ns)} ns")
+            parts = []
+            if np.isfinite(self.agree_interleaved):
+                parts.append(f"interleaved {100.0 * self.agree_interleaved:.1f}%")
+            if np.isfinite(self.agree_interleaved_shifted):
+                parts.append(f"interleaved w/ per-run pointer offset "
+                             f"{100.0 * self.agree_interleaved_shifted:.1f}%")
+            if np.isfinite(self.agree_blocked):
+                parts.append(f"blocked {100.0 * self.agree_blocked:.1f}%")
+            if parts:
+                L.append("  shot order vs measured tau: " + " | ".join(parts))
+            bad = [(i + 1, int(o)) for i, o in enumerate(self.run_pointer_offsets) if o > 0]
+            if bad:
+                L.append("    task pointer did NOT start at tau step 0 in run(s): "
+                         + ", ".join(f"run {r} -> +{o}" for r, o in bad[:10])
+                         + "  (anything binned by shot order is shifted there)")
+        elif self.tau_assign_source:
+            L.append(f"  tau from shot ORDER ({self.tau_assign_source.replace('shot_order_', '')}) "
+                     f"-- no DO28 -> marker duration changes with tau (add the init marker line)")
+        if np.isfinite(self.ro_window_ns[0]):
+            frac = (100.0 * self.n_spcm_registered / self.n_spcm_events) if self.n_spcm_events else 0.0
+            L.append(f"  SPCM registered ONLY in [{f(self.ro_window_ns[0], 0)}, "
+                     f"{f(self.ro_window_ns[1], 0)}) ns after each readout marker "
+                     f"({self.ro_window_source}): {self.n_spcm_registered:,} of "
+                     f"{self.n_spcm_events:,} SPCM events ({frac:.2f}%). Nothing between DO28 "
+                     f"and the readout marker is counted.")
+        if np.isfinite(self.light_on_ns):
+            extra = (f" = {f(self.light_on_after_trig_ns / 1000.0, 3)} us after DO28"
+                     if np.isfinite(self.light_on_after_trig_ns) else "")
+            L.append(f"  readout light on {f(self.light_on_ns, 0)} ns, off {f(self.light_off_ns, 0)} ns "
+                     f"(50%) after the readout marker{extra}")
+        if self.signal_mean.size and np.isfinite(self.signal_mean).any():
+            s0, s1 = self.sig_window_ns
+            msg = f"  MultiHarp windows ({self.window_source}): signal [{f(s0, 0)}, {f(s1, 0)}] ns"
+            if np.isfinite(self.ref_window_ns[0]):
+                msg += f", reference [{f(self.ref_window_ns[0], 0)}, {f(self.ref_window_ns[1], 0)}] ns"
+            L.append(msg + " after the readout marker")
+        if np.isfinite(self.adwin_sig_start_ns):
+            L.append(f"  ADwin gates as programmed: signal {f(self.adwin_sig_start_ns, 0)} ns, "
+                     f"reference {f(self.adwin_ref_start_ns, 0)} ns after its trigger, "
+                     f"{f(self.adwin_count_ns, 0)} ns wide"
+                     + (f" = {f(self.adwin_sig_rel_ns, 0)} / {f(self.adwin_ref_rel_ns, 0)} ns after "
+                        f"the readout marker" if np.isfinite(self.adwin_sig_rel_ns) else ""))
+            if self.adwin_replay_status:
+                L.append(f"    {self.adwin_replay_status}")
+            if self.adwin_corr:
+                parts = [f"{k}: r={f(v, 3)}, counts x{f(self.adwin_count_ratio.get(k), 2)}"
+                         for k, v in self.adwin_corr.items()]
+                L.append("    ADwin counts vs its gates replayed on readout photons -> "
+                         + " | ".join(parts))
+        if np.isfinite(self.suggested_gate_align_offset_ns):
+            L.append(f"  gate_align_offset_ns that puts the programmed signal gate on the light "
+                     f"onset: ~{f(self.suggested_gate_align_offset_ns, 0)} "
+                     f"(now {f(self.adwin_gate_align_offset_ns, 0)}; valid if the ADwin opens its "
+                     f"gate when programmed -- check with case='adwin_readout_vs_spcm')")
+        if self.fifo_overrun:
+            L.append("  WARNING: FIFO overrun occurred -- some events were lost.")
+        if self.saved_files:
+            L.append("  saved: " + ", ".join(self.saved_files))
+        return "\n".join(L)
 
 def rabi_curve_from_histogram(arrival_hist, arrival_edges_ns, shots_per_tau,
                               sig_window_ns, ref_window_ns=None):
@@ -642,9 +903,20 @@ class MultiHarpTimingTester:
             start_label="Proteus ch4 MKR readout (per-shot reference)",
             stop_label="SPCM",
         ),
+        # T1: trig_input = DO28 (required, clock only), start = ch4 MKR copying
+        # the laser (init + readout marker lines), stop = SPCM. DO28 -> marker
+        # durations give tau; SPCM is registered only after the readout marker.
+        "t1_vs_spcm": dict(
+            corr_mode="around",
+            window_ns=8000.0,
+            pre_window_ns=500.0,
+            start_label="Proteus ch4 MKR (laser copy: init + readout)",
+            stop_label="SPCM",
+        ),
     }
     # Cases that reconstruct a Rabi curve from MultiHarp tags (no ADwin gating).
     _RABI_CASES = ("rabi_vs_spcm", "rabi_mw_tagged")
+    _T1_LAYOUTS = ("auto", "init+readout", "readout", "init", "none")
 
     def __init__(
         self,
@@ -677,6 +949,8 @@ class MultiHarpTimingTester:
         rabi_ref_offset_ns: float = 5000.0,
         rabi_ref_width_ns: float = 300.0,
         rabi_n_iterations: Optional[int] = None,     # tau steps; auto-detected if None
+        rabi_order: str = "interleaved",             # one tau per trigger (your scope); "blocked" only
+                                                     # for a task table that loops each segment
         rabi_tau_values_ns: Optional[np.ndarray] = None,  # x-axis; auto-detected if None
         # ---- MW-tagged tau assignment (case="rabi_mw_tagged") -------------- #
         # Wire an attenuated copy of the MW line (the IQ/Proteus channel that
@@ -699,6 +973,13 @@ class MultiHarpTimingTester:
         mw_gap_ns: Optional[float] = None,           # readout-start - MW-start (GEOMETRY mode)
         mw_snap_tol_ns: Optional[float] = None,      # max |measured tau - step| to accept
         mw_lookback_ns: Optional[float] = None,      # how far before the marker to hunt MW edges
+        # ---- optional ADwin-trigger cross-check --------------------------- #
+        # Wire an attenuated copy of ADwin DIGOUT 28 (== DIGOUT 21, the Proteus
+        # trigger line) to its OWN free MultiHarp input. Its edge count is then
+        # compared to the readout-marker count so you can SEE, in one run, whether
+        # markers == triggers. It must be a different connector from start/stop/MW.
+        trig_input: Optional[int] = None,            # input carrying the DO28 copy (None = off)
+        trig_cfg: Optional[ChannelConfig] = None,    # its trigger level/edge
         # ---- time-resolved arrivals (keep the whole readout, re-window later) #
         # When on, analyze_rabi also builds a per-tau histogram of SPCM arrival
         # times relative to the marker over [0, rabi_tr_window_ns] in
@@ -716,7 +997,37 @@ class MultiHarpTimingTester:
         # (the reference/marker edges): if the marker multi-triggers into more
         # than this, analysis stops with a clear message instead of thrashing.
         decode_chunk_records: int = 50_000_000,
-        max_marker_edges: int = 200_000_000,
+        max_marker_edges: int = 1_000_000_000,
+        # ---- crash-safety / memory: stream raw T2 records to disk ---------- #
+        # When True (default) the FIFO is written to a .bin on disk as it is read
+        # and stop_acquisition returns a MEMORY-MAP over it, so the raw stream is
+        # never concatenated into a multi-GB RAM array and survives a crash. Set
+        # False to keep the original in-RAM behaviour (fine for short timing runs).
+        stream_raw_to_disk: bool = True,
+        raw_dir: Optional[str] = None,
+        # ---- T1 (case="t1_vs_spcm") ----------------------------------------- #
+        # trig_input (DO28) is REQUIRED but only a clock (shots + DO28 -> marker
+        # timing). start = ch4 MKR copying the laser, stop = SPCM. SPCM photons
+        # are registered ONLY after each readout marker. All values in ns.
+        t1_marker_layout: str = "auto",              # auto | init+readout | readout | init | none
+        t1_gap_ns: Optional[float] = None,           # readout-marker start - init-marker start at tau=0
+        t1_tau_values_ns: Optional[np.ndarray] = None,  # one per sweep step, IN SWEEP ORDER
+        t1_n_iterations: Optional[int] = None,
+        t1_snap_tol_ns: Optional[float] = None,      # default: half a tau step
+        t1_order: str = "interleaved",               # shot-order model, used only if tau can't be read
+        t1_sig_window_ns: Optional[Tuple[float, float]] = None,  # after the readout marker; None = auto
+        t1_ref_window_ns: Optional[Tuple[float, float]] = None,  # None = auto (late in the readout)
+        t1_count_ns: float = 300.0,                  # width of the auto windows
+        t1_ref_margin_ns: float = 300.0,             # auto reference ends this far before light-off
+        t1_ro_window_ns: Optional[Tuple[float, float]] = None,   # registered SPCM span after the
+                                                     # readout marker; None = auto (the readout light)
+        t1_tr_window_ns: float = 8000.0,             # how far after the readout marker to look for it
+        t1_tr_bin_ns: float = 10.0,
+        t1_shot_window_ns: Optional[float] = None,   # a marker edge later than this after DO28 is stray
+        t1_run_gap_factor: float = 3.0,              # DO28 pause > this x period starts a new run
+        t1_adwin_sig_start_ns: Optional[float] = None,  # override the ADwin gates read from the experiment
+        t1_adwin_ref_start_ns: Optional[float] = None,
+        t1_adwin_count_ns: Optional[float] = None,
     ):
         if case not in self._PRESETS:
             raise ValueError(f"case must be one of {list(self._PRESETS)}, got {case!r}")
@@ -766,6 +1077,9 @@ class MultiHarpTimingTester:
         self.rabi_ref_width_ns = float(rabi_ref_width_ns)
         self.rabi_n_iterations = (int(rabi_n_iterations)
                                   if rabi_n_iterations is not None else None)
+        if rabi_order not in ("interleaved", "blocked"):
+            raise ValueError(f"rabi_order must be 'interleaved' or 'blocked', got {rabi_order!r}")
+        self.rabi_order = rabi_order
         self.rabi_tau_values_ns = (np.asarray(rabi_tau_values_ns, dtype=float)
                                    if rabi_tau_values_ns is not None else None)
 
@@ -803,12 +1117,52 @@ class MultiHarpTimingTester:
         else:
             self.mw_mode = "off"
 
+        # ---- ADwin-trigger cross-check configuration ---------------------- #
+        self.trig_input = int(trig_input) if trig_input is not None else None
+        # DIGOUT goes HIGH to trigger -> RISING edge; level ~half the attenuated
+        # DO28 amplitude (measured 610 mV with 10+6 dB -> ~300 mV).
+        self.trig_cfg = trig_cfg or ChannelConfig(level_mV=300, edge=EDGE_RISING)
+
         # ---- time-resolved arrival settings ------------------------------- #
         self.rabi_time_resolved = bool(rabi_time_resolved)
         self.rabi_tr_window_ns = float(rabi_tr_window_ns)
         self.rabi_tr_bin_ns = float(rabi_tr_bin_ns)
         self.decode_chunk_records = int(decode_chunk_records)
         self.max_marker_edges = int(max_marker_edges)
+        self.stream_raw_to_disk = bool(stream_raw_to_disk)
+        self.raw_dir = raw_dir
+        self._raw_path = None          # path of the on-disk raw .bin (set at start)
+        self._raw_fh = None            # open write handle during acquisition
+        self._raw_count = 0            # number of uint32 records written so far
+
+        # ---- T1 configuration ----------------------------------------------- #
+        if t1_marker_layout not in self._T1_LAYOUTS:
+            raise ValueError(f"t1_marker_layout must be one of {self._T1_LAYOUTS}, "
+                             f"got {t1_marker_layout!r}")
+        if t1_order not in ("interleaved", "blocked"):
+            raise ValueError(f"t1_order must be 'interleaved' or 'blocked', got {t1_order!r}")
+        self.t1_marker_layout = t1_marker_layout
+        self.t1_gap_ns = float(t1_gap_ns) if t1_gap_ns is not None else None
+        self.t1_tau_values_ns = (np.asarray(t1_tau_values_ns, dtype=float).ravel()
+                                 if t1_tau_values_ns is not None else None)
+        self.t1_n_iterations = int(t1_n_iterations) if t1_n_iterations is not None else None
+        self.t1_snap_tol_ns = float(t1_snap_tol_ns) if t1_snap_tol_ns is not None else None
+        self.t1_order = t1_order
+        self.t1_sig_window_ns = (tuple(float(x) for x in t1_sig_window_ns)
+                                 if t1_sig_window_ns is not None else None)
+        self.t1_ref_window_ns = (tuple(float(x) for x in t1_ref_window_ns)
+                                 if t1_ref_window_ns is not None else None)
+        self.t1_count_ns = float(t1_count_ns)
+        self.t1_ref_margin_ns = float(t1_ref_margin_ns)
+        self.t1_tr_window_ns = float(t1_tr_window_ns)
+        self.t1_tr_bin_ns = float(t1_tr_bin_ns)
+        self.t1_shot_window_ns = float(t1_shot_window_ns) if t1_shot_window_ns is not None else None
+        self.t1_ro_window_ns = (tuple(float(x) for x in t1_ro_window_ns)
+                                if t1_ro_window_ns is not None else None)
+        self.t1_run_gap_factor = float(t1_run_gap_factor)
+        self.t1_adwin_sig_start_ns = t1_adwin_sig_start_ns
+        self.t1_adwin_ref_start_ns = t1_adwin_ref_start_ns
+        self.t1_adwin_count_ns = t1_adwin_count_ns
 
         self.hist_bin_ns = float(hist_bin_ns)
         self.n_drift_segments = int(n_drift_segments)
@@ -827,6 +1181,10 @@ class MultiHarpTimingTester:
 
     # ---- device bring-up -------------------------------------------------- #
     def open_and_configure(self):
+        if self.case == "t1_vs_spcm" and getattr(self, "trig_input", None) is None:
+            raise ValueError("case='t1_vs_spcm' needs the ADwin DO28 copy on its own input "
+                             "(trig_input=<ch>): it is the clock that groups the marker edges "
+                             "into shots and times DO28 -> marker for tau.")
         mh = MHLibWrapper(self.dll_path)
         print(f"[MultiHarp] MHLib version {mh.library_version()}")
         idx, serial = mh.open_first()
@@ -848,6 +1206,8 @@ class MultiHarpTimingTester:
             if self.mw_fall_input is not None:
                 mw_chans.append(self.mw_fall_input)
         active = [self.start_input, self.stop_input, *mw_chans]
+        if getattr(self, "trig_input", None) is not None:
+            active.append(self.trig_input)
 
         for ch in active:
             if not (0 <= ch < nchan):
@@ -855,9 +1215,11 @@ class MultiHarpTimingTester:
                 raise ValueError(f"input channel {ch} out of range (device has {nchan})")
         if len(set(active)) != len(active):
             mh.close()
-            raise ValueError(f"start/stop/MW inputs must all be different channels "
-                             f"(got start={self.start_input}, stop={self.stop_input}, "
-                             f"mw={mw_chans})")
+            raise ValueError(f"start/stop/MW/trigger inputs must all be different "
+                             f"channels (got start={self.start_input}, "
+                             f"stop={self.stop_input}, mw={mw_chans}, "
+                             f"trig={self.trig_input}). DIGOUT 28 needs its OWN free "
+                             f"connector -- it cannot share the marker/SPCM/MW input.")
 
         # T2 mode: sync divider must be 1. We don't use the sync channel here.
         mh.set_sync_div(self.sync_div)
@@ -904,23 +1266,50 @@ class MultiHarpTimingTester:
                       f"({ed(self.mw_cfg.edge)}, {self.mw_cfg.level_mV} mV); tau derived "
                       f"vs the readout marker with mw_gap_ns.")
 
+        # ADwin-trigger cross-check input: enable with its OWN level/edge (also
+        # overriding scan mode, so its count is never corrupted by a shared level).
+        if getattr(self, "trig_input", None) is not None:
+            mh.set_input_enable(self.trig_input, True)
+            mh.set_input_trigger(self.trig_input, self.trig_cfg.level_mV, self.trig_cfg.edge)
+            mh.set_input_offset(self.trig_input, self.trig_cfg.offset_ps)
+            ted = "rising" if self.trig_cfg.edge == EDGE_RISING else "falling"
+            if self.case == "t1_vs_spcm":
+                print(f"[MultiHarp] T1: DIGOUT 28 copy on ch{self.trig_input} ({ted}, "
+                      f"{self.trig_cfg.level_mV} mV) = CLOCK ONLY (shots + DO28 -> marker "
+                      f"timing for tau); laser marker on ch{self.start_input}, SPCM on "
+                      f"ch{self.stop_input}. SPCM is registered only after each readout marker.")
+            else:
+                print(f"[MultiHarp] ADwin-trigger cross-check: DIGOUT 28 copy on "
+                      f"ch{self.trig_input} ({ted}, {self.trig_cfg.level_mV} mV) -- its edge "
+                      f"count will be compared to the readout-marker count.")
+
         time.sleep(0.2)  # let the inputs settle after retriggering
         self._mh = mh
 
     # ---- acquisition (background FIFO reader) ----------------------------- #
+    def _store_chunk(self, arr):
+        """Persist one FIFO chunk. Streaming mode appends it to the on-disk .bin
+        so RAM stays chunk-sized (no multi-GB concatenate and it survives a
+        crash); otherwise keep it in the RAM list (original short-run behaviour)."""
+        if self.stream_raw_to_disk and self._raw_fh is not None:
+            arr.tofile(self._raw_fh)
+            self._raw_count += int(arr.size)
+        else:
+            self._chunks.append(arr)
+
     def _read_loop(self):
         buffer = (ct.c_uint * TTREADMAX)()
         while not self._stop_flag.is_set():
             n = self._mh.read_fifo(buffer)
             if n > 0:
-                self._chunks.append(np.frombuffer(buffer, dtype=np.uint32,
-                                                  count=n).copy())
+                self._store_chunk(np.frombuffer(buffer, dtype=np.uint32,
+                                                count=n).copy())
             else:
                 if self._mh.flags() & FLAG_FIFOFULL:
                     self._fifo_overrun = True
                 time.sleep(0.001)
 
-    def start_acquisition(self, tacq_ms: int = 360_000_00):
+    def start_acquisition(self, tacq_ms: int = 360_000_000):   # 100 h (was 360_000_00 = 10 h)
         """Start a long T2 acquisition and spin up the reader thread.
 
         tacq_ms just needs to outlast the ODMR run; we stop manually when the
@@ -928,6 +1317,17 @@ class MultiHarpTimingTester:
         if self._mh is None:
             self.open_and_configure()
         self._chunks = []
+        self._raw_count = 0
+        self._raw_fh = None
+        self._raw_path = None
+        if self.stream_raw_to_disk:
+            raw_dir = self.raw_dir or self.output_dir or os.getcwd()
+            os.makedirs(raw_dir, exist_ok=True)
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            self._raw_path = os.path.join(raw_dir, f"multiharp_raw_{stamp}.bin")
+            self._raw_fh = open(self._raw_path, "wb")
+            print(f"[MultiHarp] streaming raw T2 records to disk: {self._raw_path} "
+                  f"(RAM stays chunk-sized; survives a crash).")
         self._fifo_overrun = False
         self._stop_flag.clear()
         self._mh.start(tacq_ms)
@@ -936,20 +1336,35 @@ class MultiHarpTimingTester:
         print("[MultiHarp] acquisition started (listening while ODMR runs)")
 
     def stop_acquisition(self) -> np.ndarray:
-        """Stop the reader, stop the measurement, drain the FIFO, return records."""
+        """Stop the reader, stop the measurement, drain the FIFO, return records.
+
+        In streaming mode the records live in the on-disk .bin and this returns a
+        read-only np.memmap over it (not held in RAM); otherwise it returns the
+        concatenated in-RAM array as before."""
         self._stop_flag.set()
         if self._reader is not None:
             self._reader.join(timeout=10.0)
         self._mh.stop()
-        # Drain whatever is still in the FIFO after StopMeas.
+        # Drain whatever is still in the FIFO after StopMeas (reader has stopped,
+        # so this is the only writer now -- safe to reuse _store_chunk).
         buffer = (ct.c_uint * TTREADMAX)()
         while True:
             n = self._mh.read_fifo(buffer)
             if n <= 0:
                 break
-            self._chunks.append(np.frombuffer(buffer, dtype=np.uint32, count=n).copy())
+            self._store_chunk(np.frombuffer(buffer, dtype=np.uint32, count=n).copy())
         if self._mh.flags() & FLAG_FIFOFULL:
             self._fifo_overrun = True
+        if self.stream_raw_to_disk and self._raw_fh is not None:
+            self._raw_fh.flush()
+            self._raw_fh.close()
+            self._raw_fh = None
+            count = self._raw_count
+            records = (np.memmap(self._raw_path, dtype=np.uint32, mode="r")
+                       if count > 0 else np.empty(0, dtype=np.uint32))
+            print(f"[MultiHarp] acquisition stopped, {count:,} raw records captured "
+                  f"(on disk: {self._raw_path}; memory-mapped, not held in RAM).")
+            return records
         records = (np.concatenate(self._chunks) if self._chunks
                    else np.empty(0, dtype=np.uint32))
         print(f"[MultiHarp] acquisition stopped, {records.size} raw records captured")
@@ -1066,31 +1481,47 @@ class MultiHarpTimingTester:
         return {c: (np.concatenate(acc[c]) if acc[c] else np.empty(0)) for c in channels}
 
     def _report_channel_counts(self, counts: Dict[int, int],
-                               expected_markers: Optional[int] = None) -> None:
+                               expected_markers: Optional[int] = None,
+                               edges_per_shot: float = 1.0) -> None:
         if not counts:
             print("[MultiHarp] DIAGNOSTIC: 0 events on ALL channels. Nothing is "
                   "triggering. Check the signals are present, the level sits ~half "
                   "the ATTENUATED amplitude, and the edge matches.")
             return
+        t1 = self.case == "t1_vs_spcm"
         print("[MultiHarp] per-channel event counts (0-based input; connector = index+1):")
         for ch in sorted(counts):
             tags = []
-            if ch == self.start_input: tags.append("<-START/reference")
+            if ch == self.start_input:
+                tags.append("<-laser MKR (ch4)" if t1 else "<-START/reference")
             if ch == self.stop_input: tags.append("<-STOP/SPCM")
             if ch == self.mw_input: tags.append("<-MW")
             if ch == self.mw_fall_input: tags.append("<-MW fall")
+            if ch == getattr(self, "trig_input", None):
+                tags.append("<-DO28 (clock only)" if t1 else "<-ADwin trigger (DO28)")
             print(f"    input {ch}: {counts[ch]:>14,} events  {' '.join(tags)}")
-        if expected_markers:
-            n_start = counts.get(self.start_input, 0)
-            if n_start > 1.5 * expected_markers:
-                print(f"[MultiHarp] WARNING: the reference/START channel "
-                      f"(input {self.start_input}) has {n_start:,} edges but the sweep "
-                      f"only has ~{expected_markers:,} shots (repeat_count x tau steps). "
-                      f"That is ~{n_start / max(1, expected_markers):.1f}x too many -- the "
-                      f"marker is MULTI-TRIGGERING (ringing/reflection or the level set "
-                      f"too low). Raise its trigger level / fix termination so it fires "
-                      f"ONCE per shot. The MW tag will reject the spurious edges, but "
-                      f"you are wasting acquisition and memory.")
+
+        # count (one DO28 pulse per shot). repeat_count*tau_steps ignores the number
+        # of averages, so a healthy N-average run wrongly looks like Nx multi-trigger.
+        # edges_per_shot = 2 for a T1 marker that copies both laser pulses.
+        n_start = counts.get(self.start_input, 0)
+        n_trig = counts.get(getattr(self, "trig_input", None), 0)
+        ref_shots = n_trig if n_trig > 0 else (expected_markers or 0)
+        if ref_shots and n_start > (edges_per_shot + 0.5) * ref_shots:
+            print(f"[MultiHarp] WARNING: the reference/START channel "
+                  f"(input {self.start_input}) has {n_start:,} edges vs {ref_shots:,} "
+                  f"shots actually triggered -- ~{n_start / max(1, ref_shots):.1f}x"
+                  + (f" (expected {edges_per_shot:g} per shot)" if edges_per_shot != 1 else "")
+                  + ". The marker is MULTI-TRIGGERING (ringing/reflection or the level set "
+                  "too low). Raise its trigger level / fix termination so it fires ONCE per "
+                  "laser edge.")
+        elif ref_shots and edges_per_shot == 1:
+            print(f"[MultiHarp] START/marker vs ADwin triggers: {n_start:,} vs "
+                  f"{ref_shots:,} ({n_start / max(1, ref_shots):.3f}x) -- OK, ~1 per shot.")
+        elif ref_shots:
+            print(f"[MultiHarp] laser marker vs DO28: {n_start:,} edges vs {ref_shots:,} "
+                  f"shots ({n_start / max(1, ref_shots):.3f} per shot; 2 = init+readout, "
+                  f"1 = one marker line).")
 
     def _stream_spcm_windows(self, records: np.ndarray, ref_ps: np.ndarray,
                              tau_index: np.ndarray, matched: np.ndarray,
@@ -1389,34 +1820,41 @@ class MultiHarpTimingTester:
             tau = np.asarray(self.rabi_tau_values_ns, dtype=float)
             return n, tau, False
 
-        tau = None
-        try:
-            desc = getattr(experiment, "sequence_description", None)
-            variables = getattr(desc, "variables", None)
-            if variables:
-                v = variables[0] if not isinstance(variables, dict) \
-                    else list(variables.values())[0]
-
-                def get(names):
-                    for nm in names:
-                        if isinstance(v, dict) and nm in v:
-                            return v[nm]
-                        if hasattr(v, nm):
-                            return getattr(v, nm)
-                    return None
-
-                start = get(["start", "start_ns", "begin", "min"])
-                stop = get(["stop", "stop_ns", "end", "max"])
-                steps = get(["steps", "num_steps", "n_steps", "count", "n"])
-                if start is not None and stop is not None and steps:
-                    tau = np.linspace(float(start), float(stop), int(steps))
-        except Exception:
-            tau = None
+        tau = self._sweep_from_description(experiment)
 
         if tau is None or (n and tau.size != n):
             tau = np.arange(n, dtype=float)
             return n, tau, True
         return n, tau, False
+
+    @staticmethod
+    def _sweep_from_description(experiment: Any) -> Optional[np.ndarray]:
+        """Rebuild the sweep values from the first scan variable (raw units, as
+        the parser stores them), or None if they can't be read."""
+        try:
+            desc = getattr(experiment, "sequence_description", None)
+            variables = getattr(desc, "variables", None)
+            if not variables:
+                return None
+            v = variables[0] if not isinstance(variables, dict) \
+                else list(variables.values())[0]
+
+            def get(names):
+                for nm in names:
+                    if isinstance(v, dict) and nm in v:
+                        return v[nm]
+                    if hasattr(v, nm):
+                        return getattr(v, nm)
+                return None
+
+            start = get(["start", "start_ns", "begin", "min"])
+            stop = get(["stop", "stop_ns", "end", "max"])
+            steps = get(["steps", "num_steps", "n_steps", "count", "n"])
+            if start is not None and stop is not None and steps:
+                return np.linspace(float(start), float(stop), int(steps))
+        except Exception:
+            return None
+        return None
 
     def _mw_measure_tau(self, allch: Dict[int, np.ndarray], ref_ps: np.ndarray
                         ) -> Tuple[np.ndarray, str, Tuple[int, ...], float]:
@@ -1525,6 +1963,63 @@ class MultiHarpTimingTester:
                              "rabi_time_resolved=True to enable re-windowing)")
         return rabi_curve_from_histogram(H, edges, spt, sig_window_ns, ref_window_ns)
 
+    def _compare_trigger_vs_markers(self, trig_ps: np.ndarray, mark_ps: np.ndarray,
+                                    n_iterations: int, res: "RabiResult") -> None:
+        """Compare ADwin-trigger (DIGOUT 28) edges to Proteus readout-marker edges
+        from the SAME T2 stream. DO28 is one edge per ADwin trigger (emitted by the
+        master), so this tests in one run whether every trigger produced exactly one
+        Proteus sequence. Fills `res` and prints the count comparison plus a
+        per-trigger breakdown (dropped / clean / ringing) and any orphan markers
+        (a marker with no preceding trigger = a Proteus edge the ADwin never
+        triggered, e.g. the init burst you see before the sweep). Both inputs carry
+        one clean edge per shot, so these arrays are ~n_shots long (cheap)."""
+        n_trig = int(trig_ps.size)
+        n_mark = int(mark_ps.size)
+        res.trigger_input = self.trig_input
+        res.n_trigger_events = n_trig
+        rc = getattr(self, "_rabi_repeat_count", None)
+        expected = int(rc) * n_iterations if rc else None
+        print(f"\n[MultiHarp] TRIGGER vs MARKER cross-check (DO28 on "
+              f"ch{self.trig_input} vs readout marker on ch{self.start_input}):")
+        print(f"    ADwin triggers (DO28): {n_trig:,}")
+        print(f"    Proteus markers      : {n_mark:,}"
+              + (f"   (expected ~{expected:,})" if expected else ""))
+        print(f"    markers - triggers   : {n_mark - n_trig:+,}")
+        if n_trig == 0 or n_mark == 0:
+            print("    one channel is empty -- can't pair. Check its level/edge/wiring.")
+            return
+        # trigger at/just-before each marker (both are time-ordered)
+        j = np.searchsorted(trig_ps, mark_ps, side="right") - 1
+        orphan = j < 0
+        res.n_orphan_markers = int(np.count_nonzero(orphan))
+        lat_std = float("nan")
+        if np.any(~orphan):
+            lat = (mark_ps[~orphan] - trig_ps[j[~orphan]]) / 1000.0   # ps -> ns
+            res.trig_marker_latency_ns = float(np.median(lat))
+            lat_std = float(np.std(lat))
+        # markers falling in [trig_k, trig_{k+1}); 1 = clean, 0 = dropped, >1 = ringing
+        per = np.bincount(j[~orphan], minlength=n_trig) if n_trig else np.zeros(0, dtype=np.int64)
+        res.n_triggers_no_marker = int(np.count_nonzero(per == 0))
+        res.n_triggers_multi_marker = int(np.count_nonzero(per > 1))
+        print(f"    per-trigger: {int(np.count_nonzero(per == 1)):,} clean (exactly 1), "
+              f"{res.n_triggers_no_marker:,} with 0 (dropped sequence), "
+              f"{res.n_triggers_multi_marker:,} with >1 (marker ringing)")
+        if res.n_orphan_markers:
+            print(f"    {res.n_orphan_markers:,} ORPHAN markers have no preceding "
+                  f"trigger -- Proteus edges the ADwin never asked for (the init "
+                  f"burst before the sweep).")
+        if np.isfinite(res.trig_marker_latency_ns):
+            print(f"    trigger->marker latency: median "
+                  f"{res.trig_marker_latency_ns:.1f} ns, std {lat_std:.1f} ns "
+                  f"(= Proteus trigger latency + the marker's position in the "
+                  f"sequence; a tight std means clean, stable pairing)")
+        clean = (n_mark == n_trig and res.n_triggers_no_marker == 0
+                 and res.n_triggers_multi_marker == 0 and res.n_orphan_markers == 0)
+        print("    -> " + ("MATCH: markers == triggers, 1:1 (every trigger makes "
+                            "exactly one sequence)."
+                            if clean else
+                            "MISMATCH: NOT 1:1 -- see the breakdown above."))
+
     def analyze_rabi(self, records: np.ndarray, n_iterations: int,
                      tau_values_ns: np.ndarray, tau_is_index: bool = False
                      ) -> RabiResult:
@@ -1586,27 +2081,69 @@ class MultiHarpTimingTester:
                   f"level ~half amplitude). Try scan_all_channels=True to see who fires.")
             return res
 
-        # Guard the one array we must hold whole (the marker edges). If the marker
-        # multi-triggers into billions of edges, holding them (and the MW arrays)
-        # would thrash; stop with a clear message rather than crash.
-        if n_start > self.max_marker_edges:
+        # Guard the one array we must hold whole (the marker edges). A genuinely
+        # runaway (multi-triggering) marker would thrash; stop with a clear message
+        # rather than crash. But do NOT trip just because a long, LEGITIMATE
+        # multi-average run has many clean edges -- compare against the DO28 trigger
+        # count (the true shot count) when it is available.
+        n_trig_ct = counts.get(self.trig_input, 0) if self.trig_input is not None else 0
+        markers_clean = (n_trig_ct > 0 and n_start <= 1.5 * n_trig_ct)
+        if n_start > self.max_marker_edges and not markers_clean:
             raise RuntimeError(
                 f"[MultiHarp] Rabi: the reference/START channel (input "
                 f"{self.start_input}) has {n_start:,} edges, above the "
-                f"max_marker_edges={self.max_marker_edges:,} safety limit. This almost "
-                f"always means the marker is MULTI-TRIGGERING (ringing/reflection, or "
-                f"the trigger level set too low) -- fix that first so it fires once per "
-                f"shot. If you are sure the count is legitimate and you have the RAM, "
-                f"re-run with a larger max_marker_edges.")
+                f"max_marker_edges={self.max_marker_edges:,} safety limit"
+                + (f" and far above the {n_trig_ct:,} DO28 triggers"
+                   if n_trig_ct else ", with no DO28 trigger channel to confirm them")
+                + f". This usually means the marker is MULTI-TRIGGERING (ringing/"
+                f"reflection or the trigger level too low) -- fix that so it fires "
+                f"once per shot. If instead this is a very long legitimate run, reduce "
+                f"averages for the MultiHarp pass, re-analyze the saved raw .bin "
+                f"offline with analyze_records_file(), or raise max_marker_edges.")
 
         # ---- 2) sparse pass: materialise ONLY marker + MW edge times -------
         want = [self.start_input]
         if self.mw_mode != "off":
             want += [self.mw_input, self.mw_fall_input]
+        if self.trig_input is not None:
+            want.append(self.trig_input)
         sparse = self._collect_channel_times(records, want)
         ref_ps = sparse.get(self.start_input, np.empty(0))   # once-per-shot reference edges
         n_shots = ref_ps.size
-        order_index = np.arange(n_shots) % n_iterations      # shot-order fallback / cross-check
+        # Sweep order: the Proteus advances ONE tau step PER TRIGGER -- one TRG1-gated
+        # task per tau, next -> +1, set_task_loop left off in the ODMR task table, and
+        # confirmed on the scope -- i.e. INTERLEAVED. (rabi_order="blocked" is kept only
+        # for a task table that loops each segment repeat_count times.)
+        # With the DO28 copy wired, count TRIGGERS rather than marker edges: an orphan
+        # (e.g. a Proteus init burst) or doubled marker edge would otherwise shift every
+        # later shot by one tau. Such edges are left unassigned instead (order_ok).
+        _rc_o = int(getattr(self, "_rabi_repeat_count", 0) or 0)
+        _trig_o = (sparse.get(self.trig_input, np.empty(0))
+                   if self.trig_input is not None else np.empty(0))
+        order_ok = np.ones(n_shots, dtype=bool)
+        if _trig_o.size and n_shots:
+            _run_id, _local, _win = self._trigger_runs(_trig_o)[1:4]
+            _k = np.searchsorted(_trig_o, ref_ps, side="right") - 1   # trigger owning each edge
+            _kc = np.maximum(_k, 0)
+            _first = np.ones(n_shots, dtype=bool)
+            _first[1:] = _k[1:] != _k[:-1]                          # first edge after its trigger
+            order_ok = (_k >= 0) & ((ref_ps - _trig_o[_kc]) < _win[_kc]) & _first
+            _seq = _local[_kc]
+            if not np.all(order_ok):
+                print(f"[MultiHarp] shot order counted by DO28 triggers: "
+                      f"{int(np.count_nonzero(~order_ok)):,} marker edge(s) with no trigger of "
+                      f"their own (orphan / doubled) are left out instead of shifting later shots.")
+        else:
+            _seq = np.arange(n_shots)
+        if self.rabi_order == "blocked" and _rc_o > 0:
+            order_index = (_seq // _rc_o) % n_iterations
+        else:
+            order_index = _seq % n_iterations
+
+        # ---- optional: Proteus readout markers vs ADwin triggers (DO28) ----
+        if self.trig_input is not None:
+            self._compare_trigger_vs_markers(
+                sparse.get(self.trig_input, np.empty(0)), ref_ps, n_iterations, res)
 
         # ---- 3) assign shots -> tau steps (MW tag if available, else order)
         want_mw = self.mw_mode != "off"
@@ -1648,8 +2185,9 @@ class MultiHarpTimingTester:
                 res.mw_snap_tol_ns = tol
                 res.n_matched = n_match
                 res.n_unmatched = n_shots - n_match
-                res.order_agreement = float(
-                    np.mean(order_index[matched] == tau_index[matched]))
+                _mo = matched & order_ok
+                res.order_agreement = (float(np.mean(order_index[_mo] == tau_index[_mo]))
+                                       if np.any(_mo) else float("nan"))
                 print(f"[MultiHarp] Rabi MW-tag ({source}, tol +/-{tol:.0f} ns): matched "
                       f"{res.n_matched:,}/{n_shots:,} shots; {res.n_unmatched:,} unmatched. "
                       f"MW-tag vs shot-order agree on "
@@ -1674,11 +2212,11 @@ class MultiHarpTimingTester:
 
         if not use_mw_result:
             tau_index = order_index
-            matched = np.ones(n_shots, dtype=bool)
+            matched = order_ok.copy()
             res.tau_assign_source = "shot_order"
             res.mw_inputs = ()
-            res.n_matched = int(n_shots)
-            res.n_unmatched = 0
+            res.n_matched = int(np.count_nonzero(matched))
+            res.n_unmatched = int(n_shots - res.n_matched)
             if want_mw:
                 clean = (expected_markers and abs(n_shots - expected_markers) <= n_iterations)
                 print(f"[MultiHarp] Falling back to SHOT-ORDER (shot i -> tau i mod "
@@ -2129,33 +2667,47 @@ class MultiHarpTimingTester:
 
         self.open_and_configure()
         odmr_result: Dict[str, Any] = {}
+        rabi = None
+        raw_on_disk = None
         try:
             self.start_acquisition()
             try:
                 odmr_result = getattr(experiment, run_method)(frequency_range)
             finally:
                 records = self.stop_acquisition()
-            # Insurance: persist the raw stream before touching it, so a long run
-            # is never lost to an analysis error.
-            if raw_records_path:
+            # The raw stream is already on disk when streaming; otherwise persist it
+            # now so a long run is never lost to an analysis error.
+            raw_on_disk = self._raw_path if (self.stream_raw_to_disk and self._raw_path) else None
+            if raw_records_path and not raw_on_disk:
                 try:
                     np.save(raw_records_path, records)
+                    raw_on_disk = raw_records_path
                     print(f"[MultiHarp] raw records saved to {raw_records_path} "
-                          f"({records.size:,} records). Re-analyze later with "
-                          f"analyze_records_file().")
+                          f"({records.size:,} records).")
                 except Exception as e:
                     print(f"[MultiHarp] WARNING: could not save raw records "
                           f"({e}); continuing to analysis.")
             n_iter, tau_ns, tau_is_index = self._infer_rabi_axis(experiment)
             self._rabi_axis_cache = (n_iter, tau_ns, tau_is_index)   # for offline re-analysis
-            rabi = self.analyze_rabi(records, n_iter, tau_ns, tau_is_index)
-            if save:
-                self._save_rabi_outputs(rabi)
+            # Analysis must never lose the run: the raw is already on disk, so if it
+            # (or its memory) fails, report it and carry on -- the caller still saves
+            # the ADwin data, and you can re-analyze the raw offline.
+            try:
+                rabi = self.analyze_rabi(records, n_iter, tau_ns, tau_is_index)
+                if save:
+                    self._save_rabi_outputs(rabi)
+            except Exception as e:
+                print(f"[MultiHarp] WARNING: Rabi analysis failed ({e}). The raw "
+                      f"records are safe"
+                      + (f" on disk at {raw_on_disk}" if raw_on_disk else "")
+                      + f"; re-analyze offline with analyze_records_file(). The ADwin "
+                      f"data is unaffected and will still be saved.")
         finally:
             self.close()
 
-        print(rabi.summary())
-        return {"odmr": odmr_result, "rabi": rabi}
+        if rabi is not None:
+            print(rabi.summary())
+        return {"odmr": odmr_result, "rabi": rabi, "raw_path": raw_on_disk}
 
     def analyze_records_file(self, path: str, n_iterations: int,
                              tau_values_ns, tau_is_index: bool = False,
@@ -2166,7 +2718,7 @@ class MultiHarpTimingTester:
         and decoded in chunks, so even a 10-hour, tens-of-GB capture is analyzed
         without loading it whole. Pass the same n_iterations/tau_values_ns you
         used for the run (and repeat_count for the desync check)."""
-        records = np.load(path, mmap_mode="r")
+        records = self._open_records(path)
         if repeat_count is not None:
             self._rabi_repeat_count = repeat_count
         if self.output_dir is None:
@@ -2176,6 +2728,1202 @@ class MultiHarpTimingTester:
             self._save_rabi_outputs(rabi)
         print(rabi.summary())
         return rabi
+
+    # ======================================================================= #
+    # T1 (case="t1_vs_spcm"): SPCM registered after the readout marker ONLY
+    # ======================================================================= #
+    # Wiring:  trig_input  = ADwin DO28 (copy of DO21, the Proteus trigger)
+    #          start_input = Proteus ch4 MKR copying the laser: one marker line on
+    #                        the init pulse and one on the readout pulse
+    #          stop_input  = SPCM
+    # Rules:   DO28 is a CLOCK only. It groups the marker edges into shots and
+    #          times DO28 -> marker; those durations give each shot its tau.
+    #          An SPCM photon is registered only if it falls inside the readout
+    #          light after a readout-marker edge (auto: the light pulse's 10%
+    #          points). Nothing between DO28 and the readout marker -- the init
+    #          pulse, the dark time -- is ever counted, and no photon is ever
+    #          timed against DO28 itself.
+    # ======================================================================= #
+    @staticmethod
+    def _open_records(path: str) -> np.ndarray:
+        """Memory-map raw T2 records: a .npy (np.save) or the raw uint32 .bin that
+        stream_raw_to_disk writes. Nothing is loaded into RAM."""
+        if str(path).lower().endswith(".npy"):
+            return np.load(path, mmap_mode="r")
+        if os.path.getsize(path) == 0:
+            return np.empty(0, dtype=np.uint32)
+        return np.memmap(path, dtype=np.uint32, mode="r")
+
+    @staticmethod
+    def _robust_span(x, lo: float = 0.1, hi: float = 99.9) -> float:
+        x = np.asarray(x, dtype=float)
+        x = x[np.isfinite(x)]
+        if x.size == 0:
+            return float("nan")
+        a, b = np.percentile(x, [lo, hi])
+        return float(b - a)
+
+    @staticmethod
+    def _pearson(a, b) -> float:
+        a = np.asarray(a, dtype=float)
+        b = np.asarray(b, dtype=float)
+        if a.shape != b.shape:
+            return float("nan")
+        m = np.isfinite(a) & np.isfinite(b)
+        if np.count_nonzero(m) < 3:
+            return float("nan")
+        a, b = a[m], b[m]
+        if np.std(a) == 0 or np.std(b) == 0:
+            return float("nan")
+        return float(np.corrcoef(a, b)[0, 1])
+
+    @staticmethod
+    def _light_pulse(edges_ns, prof) -> Tuple[float, float, float, float]:
+        """Find the readout light pulse in a photon profile measured after the
+        readout marker: (on10, on50, off50, off10) in ns. The pulse is the LONGEST
+        run of bins above half the plateau, so a short init-light tail (a separate,
+        earlier blob at short tau) can't be taken for it. The 10% points are
+        searched at most 300 ns outside the 50% points and stop at a dip. All NaN
+        when there are too few photons."""
+        nan4 = (float("nan"),) * 4
+        p = np.asarray(prof, dtype=float)
+        e = np.asarray(edges_ns, dtype=float)
+        if p.size < 3 or p.sum() < 50 or p.max() <= 0:
+            return nan4
+        c = 0.5 * (e[:-1] + e[1:])
+        plateau = float(np.median(p[p >= 0.5 * p.max()]))
+        t50, t10 = 0.5 * plateau, 0.1 * plateau
+        d = np.diff(np.concatenate([[0], (p >= t50).astype(np.int8), [0]]))
+        starts = np.flatnonzero(d == 1)
+        ends = np.flatnonzero(d == -1) - 1
+        if starts.size == 0:
+            return nan4
+        k = int(np.argmax(ends - starts))
+        a, b = int(starts[k]), int(ends[k])
+
+        def cross(ib, ia, thr):        # thr crossing between bin ib (below) and ia (above)
+            c0, c1 = p[ib], p[ia]
+            if c1 == c0:
+                return float(c[ia])
+            return float(c[ib] + (thr - c0) * (c[ia] - c[ib]) / (c1 - c0))
+
+        on50 = cross(a - 1, a, t50) if a > 0 else float(e[a])
+        off50 = cross(b + 1, b, t50) if b + 1 < p.size else float(e[b + 1])
+        lim = max(1, int(round(300.0 / float(e[1] - e[0]))))
+        ps = np.convolve(p, np.ones(3) / 3.0, mode="same")
+        i = a
+        while i > 0 and a - i < lim and ps[i - 1] >= t10 and ps[i - 1] <= ps[i]:
+            i -= 1
+        j = b
+        while j + 1 < p.size and j - b < lim and ps[j + 1] >= t10 and ps[j + 1] <= ps[j]:
+            j += 1
+        return float(e[i]), on50, off50, float(e[j + 1])
+
+    @staticmethod
+    def _median_by_group(values, groups, n: int) -> np.ndarray:
+        """Median of `values` for each group 0..n-1 (NaN where a group is empty)."""
+        out = np.full(n, np.nan)
+        v = np.asarray(values, dtype=float)
+        g = np.asarray(groups, dtype=np.int64)
+        if v.size == 0:
+            return out
+        srt = np.argsort(g, kind="stable")
+        gs, vs = g[srt], v[srt]
+        b = np.searchsorted(gs, np.arange(n + 1))
+        for q in range(n):
+            if b[q + 1] > b[q]:
+                out[q] = float(np.median(vs[b[q]:b[q + 1]]))
+        return out
+
+    @classmethod
+    def _t1_auto_offset(cls, u_ns, steps_ns, tol_ns) -> float:
+        """Estimate c in  u = c + tau_step  from the data alone: start inside the
+        shortest-tau cluster (a low quantile), then refine with the median
+        residual of the shots that snap. A few bad shots can't move it."""
+        u = np.asarray(u_ns, dtype=float)
+        u = u[np.isfinite(u)]
+        st = np.asarray(steps_ns, dtype=float)
+        fin = st[np.isfinite(st)]
+        if u.size == 0 or fin.size == 0:
+            return float("nan")
+        if fin.size == 1:
+            return float(np.median(u) - fin[0])
+        q = 100.0 * min(0.5, 0.25 / fin.size)
+        c = float(np.percentile(u, q) - fin.min())
+        for _ in range(3):
+            k, m = cls._snap_to_steps(u - c, st, tol_ns)
+            if not np.any(m):
+                break
+            c = float(np.median(u[m] - st[k[m]]))
+        return c
+
+    @classmethod
+    def _t1_slope_sign(cls, delay_ns, order_idx: Dict[str, np.ndarray], steps) -> int:
+        """+1 if a single moving marker edge comes LATER for longer tau (a readout
+        that moves), -1 if EARLIER (an init that moves, as in your fixed-readout
+        sequences), 0 if no shot-order model explains it."""
+        best = 0.0
+        st = np.asarray(steps, dtype=float)
+        for oi in order_idx.values():
+            r = cls._pearson(delay_ns, st[oi])
+            if np.isfinite(r) and abs(r) > abs(best):
+                best = r
+        if abs(best) < 0.5:
+            return 0
+        return 1 if best > 0 else -1
+
+    @staticmethod
+    def _adwin_gates_from_experiment(experiment: Any) -> Optional[Dict[str, float]]:
+        """The ADwin's PROGRAMMED gates relative to its trigger, computed exactly as
+        configure_gates_v5 does. None if the experiment lacks them."""
+        try:
+            Y = int(round(float(experiment.count_time)))
+            rst = int(round(float(experiment.reset_time)))
+            align = int(round(float(getattr(experiment, "gate_align_offset_ns", 0) or 0)))
+            ro = int(round(float(experiment.readout_start_ns)))
+        except Exception:
+            return None
+        sig = ro + align
+        return dict(sig_start_ns=float(sig), ref_start_ns=float(sig + Y + rst),
+                    count_ns=float(Y), readout_start_ns=float(ro),
+                    gate_align_offset_ns=float(align))
+
+    @staticmethod
+    def _t1_adwin_totals(adwin_result: Any, n: int
+                         ) -> Optional[Tuple[np.ndarray, Optional[np.ndarray]]]:
+        """Total ADwin counts per tau step, summed over frequencies and averages,
+        from the dict run_experiment(_averaged) returns or adwin_partial_latest.npz."""
+        if adwin_result is None:
+            return None
+        try:
+            keys = list(adwin_result.keys())
+        except Exception:
+            return None
+
+        def total(prefix):
+            runs = [k for k in keys
+                    if k.startswith(prefix + "_") and k[len(prefix) + 1:].isdigit()]
+            if runs:                                    # signal_1, signal_2, ...: exact totals
+                return sum(np.atleast_2d(np.asarray(adwin_result[k], dtype=float)) for k in runs)
+            legacy = prefix + "_counts"
+            if legacy in keys:                          # one run, or the average x averages
+                avg = float(np.asarray(adwin_result["averages"])) if "averages" in keys else 1.0
+                return np.atleast_2d(np.asarray(adwin_result[legacy], dtype=float)) * avg
+            return None
+
+        try:
+            s, r = total("signal"), total("reference")
+        except Exception:
+            return None
+        if s is None:
+            return None
+        s = s.reshape(-1, s.shape[-1]).sum(axis=0)
+        if s.size != n:
+            return None
+        if r is not None:
+            r = r.reshape(-1, r.shape[-1]).sum(axis=0)
+            if r.size != n:
+                r = None
+        return s, r
+
+    def _infer_t1_axis(self, experiment: Any) -> Tuple[int, np.ndarray, bool]:
+        """(n_iterations, tau_values_ns, tau_is_index) for the T1 sweep. Explicit
+        t1_* values win; otherwise the sweep is read from the experiment and
+        converted from seconds if it plainly is in seconds."""
+        n = self.t1_n_iterations
+        if n is None:
+            n = getattr(experiment, "number_of_iterations", 0) or 0
+            if not n:
+                n = len(getattr(experiment, "scan_sequences", []) or [])
+            if not n and self.t1_tau_values_ns is not None:
+                n = self.t1_tau_values_ns.size
+        n = int(n) if n else 1
+        if self.t1_tau_values_ns is not None:
+            tau = self.t1_tau_values_ns
+            if tau.size != n:
+                print(f"[MultiHarp T1] t1_tau_values_ns has {tau.size} values but the sweep "
+                      f"has {n} steps -- using step indices instead.")
+                return n, np.arange(n, dtype=float), True
+            return n, tau.astype(float), False
+        tau = self._sweep_from_description(experiment)
+        if tau is None or tau.size != n:
+            print("[MultiHarp T1] could not read the tau sweep; using step indices. Pass "
+                  "t1_tau_values_ns (ns) so each shot's tau can be read from the marker.")
+            return n, np.arange(n, dtype=float), True
+        big = float(np.nanmax(np.abs(tau))) if tau.size else 0.0
+        if 0.0 < big < 1e-2:
+            print("[MultiHarp T1] the sweep looks like it is in SECONDS -- converted to ns. "
+                  "Pass t1_tau_values_ns explicitly to be sure.")
+            tau = tau * 1e9
+        return n, tau, False
+
+    def _trigger_runs(self, trig_ps: np.ndarray):
+        """Split the DO28 train into runs (one per ADwin sweep) at pauses longer
+        than t1_run_gap_factor x the median trigger period. Returns
+        (run_starts, run_id, local, win_ps, period_ps, wmax_ps): `local` is each
+        trigger's number within its run -- with one tau per trigger, its tau step
+        is local % n -- and win_ps how long after each trigger an edge still
+        belongs to that shot."""
+        n_shots = int(trig_ps.size)
+        gaps = np.diff(trig_ps)
+        period = float(np.median(gaps)) if gaps.size else float("nan")
+        if self.t1_shot_window_ns is not None:
+            wmax = self.t1_shot_window_ns * 1000.0
+        elif np.isfinite(period) and period > 0:
+            wmax = 1.5 * period
+        else:
+            wmax = 1e18                                  # a single shot: everything after it
+        win = np.full(n_shots, wmax)
+        if n_shots > 1:
+            win[:-1] = np.minimum(gaps, wmax)
+        if gaps.size and np.isfinite(period) and period > 0:
+            brk = np.flatnonzero(gaps > self.t1_run_gap_factor * period) + 1
+        else:
+            brk = np.empty(0, dtype=np.int64)
+        run_starts = np.concatenate([[0], brk]).astype(np.int64)
+        shot_no = np.arange(n_shots, dtype=np.int64)
+        run_id = np.searchsorted(run_starts, shot_no, side="right") - 1
+        local = shot_no - run_starts[run_id]
+        return run_starts, run_id, local, win, period, wmax
+
+    def _t1_stream_readout(self, records, ro_abs, ro_tau, ro_order, n, tr_nb, tr_bin_ps):
+        """One chunked pass over the SPCM channel (never holds every photon). A
+        photon is kept ONLY if it falls within tr_nb*tr_bin after the last usable
+        readout-marker edge before it; anything earlier (the init light, the dark
+        time) or later (the gap to the next shot) is skipped. Kept photons are
+        histogrammed vs time after their readout edge, under that shot's tau and
+        under each shot-order model (for the ADwin replay)."""
+        H = np.zeros(n * tr_nb, dtype=np.int64)
+        Ho = {k: np.zeros(n * tr_nb, dtype=np.int64) for k in ro_order}
+        prof = np.zeros(tr_nb, dtype=np.int64)
+        win_ps = tr_nb * tr_bin_ps
+        n_spcm = 0
+        for chunk in self._iter_channel_times(records, [self.stop_input]):
+            t = chunk[self.stop_input]
+            n_spcm += t.size
+            if t.size == 0 or ro_abs.size == 0:
+                continue
+            j = np.searchsorted(ro_abs, t, side="right") - 1   # last readout edge before it
+            ok = j >= 0
+            if not np.any(ok):
+                continue
+            j = j[ok]
+            off = t[ok] - ro_abs[j]                             # >= 0 by construction
+            keep = off < win_ps
+            if not np.any(keep):
+                continue
+            j = j[keep]
+            b = np.minimum((off[keep] // tr_bin_ps).astype(np.int64), tr_nb - 1)
+            prof += np.bincount(b, minlength=tr_nb)
+            H += np.bincount(ro_tau[j] * tr_nb + b, minlength=n * tr_nb)
+            for k, oi in ro_order.items():
+                Ho[k] += np.bincount(oi[j] * tr_nb + b, minlength=n * tr_nb)
+        return dict(n_spcm=n_spcm, H=H.reshape(n, tr_nb),
+                    Ho={k: v.reshape(n, tr_nb) for k, v in Ho.items()}, prof=prof)
+
+    def analyze_t1(self, records: np.ndarray, n_iterations: int, tau_values_ns,
+                   tau_is_index: bool = False, adwin_result: Any = None,
+                   adwin_gates: Optional[Dict[str, float]] = None) -> T1Result:
+        """T1 from raw T2 records. DO28 is a clock only; SPCM photons count only
+        inside the readout light after each shot's readout marker.
+
+          1. DO28 edges are the shots; a long DO28 pause starts a new run (sweep).
+          2. Marker edges are filed into shots ([DO28_k, DO28_k + window)) and
+             the layout (init+readout / readout / init) is found unless forced.
+          3. The DO28 -> marker durations give each shot its tau: with an init +
+             readout marker, tau = (DO28->readout) - (DO28->init) - t1_gap; with a
+             single edge that moves with tau, from its DO28 delay. Each value is
+             snapped to the nearest sweep step and checked against shot order.
+          4. One SPCM pass: a photon is kept only if it falls in the scan span
+             after the last readout-marker edge before it. The readout light pulse
+             is then located (10% points, from the long-tau shots so a short-tau
+             init tail can't fool it) and everything outside it is dropped.
+          5. The T1 curve is summed over the signal/reference windows. The ADwin's
+             programmed gates, mapped into readout-marker time, are replayed on
+             the same registered photons and compared with its own counts.
+
+        adwin_gates: dict(sig_start_ns, ref_start_ns, count_ns[, readout_start_ns,
+        gate_align_offset_ns]) after the ADwin's trigger -- filled from the
+        experiment by run_t1_with_experiment, as configure_gates_v5 computes them."""
+        if self.trig_input is None:
+            raise ValueError("case='t1_vs_spcm' needs the ADwin DO28 copy on trig_input=<ch>.")
+        n = max(1, int(n_iterations))
+        steps = np.asarray(tau_values_ns, dtype=float).ravel()
+        if steps.size != n:
+            print(f"[MultiHarp T1] {steps.size} tau values for {n} sweep steps -- using "
+                  f"the step index as the x-axis.")
+            steps = np.arange(n, dtype=float)
+            tau_is_index = True
+        rc = getattr(self, "_rabi_repeat_count", None)
+        rc = int(rc) if rc else None
+        trig_ch, mk_ch, sp_ch = self.trig_input, self.start_input, self.stop_input
+
+        # ---- 1) cheap count pass ---------------------------------------------
+        counts = self._channel_counts(records)
+        eps = {"readout": 1.0, "init": 1.0}.get(self.t1_marker_layout, 2.0)
+        self._report_channel_counts(counts, None, edges_per_shot=eps)
+        n_trig_ct = int(counts.get(trig_ch, 0))
+        n_mk_ct = int(counts.get(mk_ch, 0))
+        res = T1Result(
+            trig_input=trig_ch, marker_input=mk_ch, stop_input=sp_ch,
+            n_triggers=n_trig_ct, n_marker_edges=n_mk_ct,
+            n_spcm_events=int(counts.get(sp_ch, 0)), n_iterations=n, repeat_count=rc,
+            base_resolution_ps=self._base_res_ps, tau_ns=steps.copy(),
+            tau_is_index=bool(tau_is_index), fifo_overrun=self._fifo_overrun,
+            expected_shots_per_run=(rc * n if rc else None))
+        gates = dict(adwin_gates or {})
+        for key, val in (("sig_start_ns", self.t1_adwin_sig_start_ns),
+                         ("ref_start_ns", self.t1_adwin_ref_start_ns),
+                         ("count_ns", self.t1_adwin_count_ns)):
+            if val is not None:
+                gates[key] = float(val)
+        if n_trig_ct == 0:
+            print(f"[MultiHarp T1] DO28 (input {trig_ch}) saw 0 edges -- no shots, so no tau "
+                  f"and nothing to register. Check its attenuation/level/edge (~610 mV after "
+                  f"10+6 dB -> level ~300 mV, rising).")
+            return res
+        if n_mk_ct > self.max_marker_edges and n_mk_ct > 3 * n_trig_ct:
+            raise RuntimeError(
+                f"[MultiHarp T1] the laser-marker input ({mk_ch}) has {n_mk_ct:,} edges for "
+                f"{n_trig_ct:,} DO28 shots -- it is multi-triggering. Raise its trigger level / "
+                f"fix the termination, or raise max_marker_edges.")
+
+        # ---- 2) sparse pass: DO28 + marker edges (both ~shot-count long) ------
+        sparse = self._collect_channel_times(records, [trig_ch, mk_ch])
+        trig = sparse[trig_ch]
+        mk = sparse[mk_ch]
+        n_shots = int(trig.size)
+        # runs (one per ADwin sweep, split where DO28 pauses) and shot windows
+        run_starts, run_id, local, win, period, wmax = self._trigger_runs(trig)
+        res.trigger_period_ns = period / 1000.0
+        res.shot_window_ns = wmax / 1000.0
+        res.n_runs = int(run_starts.size)
+        res.shots_per_run = np.diff(np.concatenate([run_starts, [n_shots]])).astype(np.int64)
+        order = {"interleaved": local % n}
+        if rc:
+            order["blocked"] = (local // rc) % n
+
+        # ---- 3) marker edges -> shots (DO28 as the clock) ----------------------
+        j = np.searchsorted(trig, mk, side="right") - 1
+        orphan = j < 0
+        jc = np.maximum(j, 0)
+        inwin = (~orphan) & ((mk - trig[jc]) < win[jc])
+        res.n_orphan_markers = int(np.count_nonzero(orphan))
+        res.n_stray_markers = int(np.count_nonzero(~orphan & ~inwin))
+        per = np.bincount(j[inwin], minlength=n_shots).astype(np.int64)
+        first = np.searchsorted(mk, trig, side="left")  # first edge at/after each DO28
+        res.edges_per_shot_hist = np.bincount(np.minimum(per, 5), minlength=6).astype(np.int64)
+        tau_rng = 0.0 if tau_is_index else float(np.nanmax(steps) - np.nanmin(steps))
+        moving = max(50.0, 0.25 * tau_rng)            # ns an edge must move by to carry tau
+
+        # ---- which edge is the init, which is the readout --------------------
+        layout = self.t1_marker_layout
+        nz = per[per > 0]
+        if layout == "auto":
+            if nz.size == 0:
+                layout = "none"
+            elif int(np.argmax(np.bincount(nz))) >= 2:
+                layout = "init+readout"
+            else:
+                layout = "single"
+        expected = {"init+readout": 2, "readout": 1, "init": 1, "single": 1, "none": 0}[layout]
+        good = (per == expected) if expected else np.zeros(n_shots, dtype=bool)
+        gidx = np.flatnonzero(good)
+        tg = trig[gidx]
+        e1 = mk[first[gidx]] if expected else np.empty(0)
+        e_init = e_ro = None
+        if expected == 2:
+            e2 = mk[first[gidx] + 1]
+            sp_ns = (e2 - e1) / 1000.0
+            if tau_rng > 100.0 and self._robust_span(sp_ns) < moving:
+                ringing = (float(np.median(sp_ns)) < 100.0) if sp_ns.size else True
+                auto = self.t1_marker_layout == "auto"
+                print("[MultiHarp T1] every shot has 2 marker edges but their spacing does NOT "
+                      "change with tau -- " + ("ringing / a doubled edge" if ringing
+                                               else "two fixed marker pulses")
+                      + ", not an init + readout pair"
+                      + ((". Using the " + ("first" if ringing else "last")
+                          + " edge as the readout.") if auto else " (layout forced: kept)."))
+                if auto:
+                    layout = "readout"
+                    e_ro = e1 if ringing else e2
+                else:
+                    e_init, e_ro = e1, e2
+            else:
+                e_init, e_ro = e1, e2
+        elif expected == 1:
+            d1 = (e1 - tg) / 1000.0
+            mov = tau_rng > 100.0 and self._robust_span(d1) > moving
+            sgn = (self._t1_slope_sign(d1, {k: v[gidx] for k, v in order.items()}, steps)
+                   if mov else 0)
+            if layout == "single":
+                if not mov:
+                    layout = "readout"
+                    print("[MultiHarp T1] one marker edge per shot at a FIXED time after DO28 -> "
+                          "taken as the READOUT (photons are registered after it). If it marks "
+                          "the init pulse instead, set t1_marker_layout='init'.")
+                else:
+                    layout = "init" if sgn < 0 else "readout"
+                    print("[MultiHarp T1] one marker edge per shot that MOVES with tau: it comes "
+                          + ("EARLIER for longer tau, so it is the INIT pulse -- tau is read from "
+                             "it, but with no readout edge NO photon can be registered. Add the "
+                             "readout marker line." if sgn < 0 else
+                             "LATER for longer tau, so it is the READOUT -- tau from DO28 -> "
+                             "readout, photons registered after it." if sgn > 0 else
+                             "neither earlier nor later in any shot order -- taken as the READOUT; "
+                             "set t1_marker_layout explicitly to be sure."))
+            elif mov and ((layout == "readout" and sgn < 0) or (layout == "init" and sgn > 0)):
+                print(f"[MultiHarp T1] WARNING: t1_marker_layout='{layout}', but this edge comes "
+                      f"{'EARLIER' if sgn < 0 else 'LATER'} for longer tau, which is what "
+                      f"{'an init' if sgn < 0 else 'a readout'} edge does. Check the setting.")
+            if layout == "readout":
+                e_ro = e1
+            else:
+                e_init = e1
+        res.marker_layout = layout
+        res.edges_expected = expected
+        res.n_shots_good = int(gidx.size)
+        res.n_shots_no_marker = int(np.count_nonzero(per == 0))
+        res.n_shots_bad_count = (int(n_shots - res.n_shots_good - res.n_shots_no_marker)
+                                 if expected else 0)
+        if expected:
+            hist = ", ".join(f"{'5+' if i == 5 else i}: {int(c):,}"
+                             for i, c in enumerate(res.edges_per_shot_hist) if c)
+            print(f"[MultiHarp T1] marker layout '{layout}' ({expected} edge(s)/shot). Edges per "
+                  f"shot -> {hist}. Orphans before the 1st DO28: {res.n_orphan_markers:,}; "
+                  f"stray (outside every shot): {res.n_stray_markers:,}.")
+        d_ro = (e_ro - tg) / 1000.0 if e_ro is not None else None        # DO28 -> readout (ns)
+        d_init = (e_init - tg) / 1000.0 if e_init is not None else None  # DO28 -> init (ns)
+
+        # ---- tau per shot, from the DO28 -> marker durations ------------------
+        tau_g = np.zeros(gidx.size, dtype=np.int64)
+        m_g = np.zeros(gidx.size, dtype=bool)
+        u, src = None, ""
+        if gidx.size:
+            if d_ro is not None and d_init is not None:
+                u, src = d_ro - d_init, "marker_gap"                 # = gap + tau
+            elif d_ro is not None and tau_rng > 100.0 and self._robust_span(d_ro) > moving:
+                u, src = d_ro, "marker_readout_delay"                # = offset + tau
+            elif d_init is not None and tau_rng > 100.0 and self._robust_span(d_init) > moving:
+                u, src = -d_init, "marker_init_delay"                # = tau - offset
+        if u is not None and tau_is_index:
+            print("[MultiHarp T1] the DO28 -> marker durations carry each shot's tau, but the "
+                  "sweep values are unknown -- pass t1_tau_values_ns (ns). Using shot order.")
+            u = None
+        marker_tau = False
+        if u is not None:
+            if self.t1_snap_tol_ns is not None:
+                tol = self.t1_snap_tol_ns
+            elif n > 1:
+                ds = np.diff(np.sort(steps))
+                ds = ds[ds > 0]
+                tol = 0.5 * float(np.median(ds)) if ds.size else 1.0
+            else:
+                tol = float("inf")
+            auto_off = self._t1_auto_offset(u, steps, tol)
+            off = (self.t1_gap_ns if (src == "marker_gap" and self.t1_gap_ns is not None)
+                   else auto_off)
+            res.tag_offset_ns, res.tag_offset_auto_ns, res.snap_tol_ns = off, auto_off, tol
+            if n == 1:
+                k_g, mm_g = np.zeros(u.size, dtype=np.int64), np.isfinite(u)
+            else:
+                k_g, mm_g = self._snap_to_steps(u - off, steps, tol)
+            n_m = int(np.count_nonzero(mm_g))
+            if n_m >= max(1, int(0.02 * gidx.size)):
+                tau_g, m_g, marker_tau = k_g, mm_g, True
+                res.tau_assign_source = src
+                resid = (u - off - steps[k_g])[mm_g]
+                res.tau_residual_std_ns = float(np.std(resid)) if resid.size else float("nan")
+                if (src == "marker_gap" and self.t1_gap_ns is not None and np.isfinite(auto_off)
+                        and abs(auto_off - self.t1_gap_ns) > max(20.0, 0.25 * tol)):
+                    print(f"[MultiHarp T1] NOTE: t1_gap_ns={self.t1_gap_ns:g} but the data say "
+                          f"{auto_off:.1f} ns -- check the marker lines against the pulse lines.")
+            else:
+                um = (u - off)[np.isfinite(u)]
+                print(f"[MultiHarp T1] tau could NOT be read from the DO28 -> marker durations: "
+                      f"{n_m:,}/{gidx.size:,} shots snapped. Measured "
+                      + (f"{np.min(um):.0f}..{np.max(um):.0f} ns" if um.size else "nothing")
+                      + f" vs a sweep of {np.min(steps):.0f}..{np.max(steps):.0f} ns "
+                        f"(tol +/-{tol:.0f}). Check t1_tau_values_ns (units, order) and "
+                        f"t1_gap_ns. Falling back to shot order.")
+        if not marker_tau:
+            model = self.t1_order
+            if model not in order:
+                print("[MultiHarp T1] t1_order='blocked' needs repeat_count -- using interleaved.")
+                model = "interleaved"
+            tau_g = order[model][gidx].astype(np.int64)
+            m_g = np.ones(gidx.size, dtype=bool)
+            res.tau_assign_source = f"shot_order_{model}"
+        res.n_matched = int(np.count_nonzero(m_g))
+        res.n_unmatched = int(n_shots - res.n_matched)
+
+        if marker_tau:                                 # what order does the Proteus really play?
+            tau_full = np.full(n_shots, -1, dtype=np.int64)
+            tau_full[gidx[m_g]] = tau_g[m_g]
+            mm = tau_full >= 0
+            res.agree_interleaved = float(np.mean(order["interleaved"][mm] == tau_full[mm]))
+            if "blocked" in order:
+                res.agree_blocked = float(np.mean(order["blocked"][mm] == tau_full[mm]))
+            if n > 1:
+                dd = (tau_full - order["interleaved"]) % n
+                tab = np.bincount(run_id[mm] * n + dd[mm],
+                                  minlength=res.n_runs * n).reshape(res.n_runs, n)
+                offs = np.where(tab.sum(axis=1) > 0, tab.argmax(axis=1), -1).astype(np.int64)
+                res.run_pointer_offsets = offs
+                res.agree_interleaved_shifted = float(np.mean(dd[mm] == offs[run_id[mm]]))
+            else:
+                res.run_pointer_offsets = np.zeros(res.n_runs, dtype=np.int64)
+            K = int(min(res.shots_per_run[0] if res.shots_per_run.size else 0,
+                        max(3 * n, 60), 2000))
+            res.order_sample_measured = tau_full[:K].copy()
+            res.order_sample_interleaved = order["interleaved"][:K].astype(np.int64)
+            if "blocked" in order:
+                res.order_sample_blocked = order["blocked"][:K].astype(np.int64)
+
+        # ---- DO28 -> marker timing per tau (fixed or moving readout?) ---------
+        if d_ro is not None and np.any(m_g):
+            gsel, v = tau_g[m_g], d_ro[m_g]
+            med = self._median_by_group(v, gsel, n)
+            res.ro_delay_by_tau_ns = med
+            resid = v - med[gsel]
+            res.ro_jitter_ns = float(np.std(resid))
+            res.ro_delay_span_ns = self._robust_span(resid)
+            res.ro_delay_median_ns = float(np.median(v))
+            pr = np.percentile(resid, [0.1, 99.9])
+            lim = max(10.0, min(5000.0, 1.2 * float(np.max(np.abs(pr)))))
+            res.ro_delay_hist_counts, res.ro_delay_hist_edges_ns = np.histogram(
+                resid, bins=200, range=(-lim, lim))
+            fin = med[np.isfinite(med)]
+            res.readout_moves = bool(tau_rng > 100.0 and fin.size >= 2
+                                     and float(fin.max() - fin.min()) > moving)
+        if d_init is not None and np.any(m_g):
+            res.init_delay_by_tau_ns = self._median_by_group(d_init[m_g], tau_g[m_g], n)
+
+        # ---- 4) SPCM: registered ONLY after a readout-marker edge -------------
+        if e_ro is None:
+            res.ro_window_source = "none"
+            print("[MultiHarp T1] no readout-marker edge -> NO SPCM photon is registered (by "
+                  "design nothing is counted from DO28). Add `marker, laser_readout_1 on "
+                  "channel 4 at <readout>ns, <len>ns` to the sequence.")
+            self._t1_verdicts(res)
+            return res
+        usable = m_g                                   # good shot, tau known, readout edge
+        ro_abs = e_ro[usable]                          # time-ordered: one per shot, in shot order
+        n_use = int(ro_abs.size)
+        if n_use == 0:
+            res.ro_window_source = "none"
+            print("[MultiHarp T1] no shot has both a readout edge and a tau -- nothing registered.")
+            self._t1_verdicts(res)
+            return res
+        ro_tau = tau_g[usable]
+        ro_order = {k: v[gidx[usable]].astype(np.int64) for k, v in order.items()}
+        span = self.t1_tr_window_ns
+        if self.t1_ro_window_ns is not None:
+            span = max(span, float(self.t1_ro_window_ns[1]))
+        if n_use > 1:
+            spacing = float(np.median(np.diff(ro_abs))) / 1000.0
+            if span >= 0.9 * spacing:
+                span = 0.9 * spacing
+                print(f"[MultiHarp T1] readout scan span clipped to {span:.0f} ns (readouts are "
+                      f"{spacing:.0f} ns apart).")
+        bin_ns = self.t1_tr_bin_ns
+        tr_nb = max(1, int(np.ceil(span / bin_ns)))
+        tr_edges = np.arange(tr_nb + 1, dtype=float) * bin_ns
+        st = self._t1_stream_readout(records, ro_abs, ro_tau, ro_order, n, tr_nb, bin_ns * 1000.0)
+        res.n_spcm_events = int(st["n_spcm"])
+        H, Ho, prof = st["H"], st["Ho"], st["prof"]
+
+        # where is the readout light? judged on the long-tau shots, whose init light
+        # is far before the readout, so a short-tau init tail can't pass for it
+        rows = (steps >= np.median(steps)) if (not tau_is_index and n >= 2) else np.ones(n, bool)
+        on10, on50, off50, off10 = self._light_pulse(tr_edges, H[rows].sum(axis=0))
+        res.light_on10_ns, res.light_on_ns = on10, on50
+        res.light_off_ns, res.light_off10_ns = off50, off10
+        if self.t1_ro_window_ns is not None:
+            lo, hi = (float(v) for v in self.t1_ro_window_ns)
+            if lo < 0.0:
+                print("[MultiHarp T1] t1_ro_window_ns starts before the readout marker -- "
+                      "clipped to 0 (nothing before the readout marker is ever registered).")
+                lo = 0.0
+            res.ro_window_source = "given"
+        elif np.isfinite(on10) and np.isfinite(off10):
+            lo, hi = on10, off10
+            res.ro_window_source = "auto (readout light)"
+        else:
+            lo, hi = 0.0, float(tr_edges[-1])
+            res.ro_window_source = "fallback (no clear readout light)"
+            print("[MultiHarp T1] could not locate the readout light -- registering the whole "
+                  "scan span after the readout marker. Set t1_ro_window_ns to be strict.")
+        i0 = int(np.clip(np.floor(lo / bin_ns + 1e-9), 0, tr_nb))
+        i1 = int(np.clip(np.ceil(min(hi, tr_edges[-1]) / bin_ns - 1e-9), i0, tr_nb))
+        if i1 <= i0:
+            i0, i1 = 0, tr_nb
+        res.ro_window_ns = (float(tr_edges[i0]), float(tr_edges[i1]))
+        ec = tr_edges[i0:i1 + 1]
+        Hc = H[:, i0:i1]
+        Hoc = {k: v[:, i0:i1] for k, v in Ho.items()}
+        res.arrival_hist, res.arrival_edges_ns = Hc, ec
+        res.arrival_profile_ns = prof[i0:i1]
+        res.n_spcm_registered = int(prof[i0:i1].sum())
+        res.shots_per_tau = np.bincount(ro_tau, minlength=n).astype(np.int64)
+        if np.isfinite(on50) and np.isfinite(res.ro_delay_median_ns) and not res.readout_moves:
+            res.light_on_after_trig_ns = res.ro_delay_median_ns + on50
+        print(f"[MultiHarp T1] SPCM registered only in [{res.ro_window_ns[0]:.0f}, "
+              f"{res.ro_window_ns[1]:.0f}) ns after each readout marker "
+              f"({res.ro_window_source}): {res.n_spcm_registered:,} of {res.n_spcm_events:,} "
+              f"SPCM events; nothing between DO28 and the readout marker is counted.")
+
+        # ---- 5) the T1 curve ---------------------------------------------------
+        wlo, whi = res.ro_window_ns
+
+        def inside(w):
+            if w is None:
+                return None
+            a, b = max(float(w[0]), wlo), min(float(w[1]), whi)
+            return (a, b) if b > a else None
+
+        sig_w = inside(self.t1_sig_window_ns)
+        if sig_w is not None:
+            res.window_source = "given"
+        else:
+            if self.t1_sig_window_ns is not None:
+                print("[MultiHarp T1] t1_sig_window_ns lies outside the registered readout "
+                      "light -- using the auto window.")
+            if np.isfinite(on50):
+                sig_w, res.window_source = inside((on50, on50 + self.t1_count_ns)), "auto"
+            if sig_w is None:
+                sig_w, res.window_source = (wlo, min(whi, wlo + self.t1_count_ns)), "fallback"
+        ref_w = inside(self.t1_ref_window_ns)
+        if ref_w is None and self.t1_ref_window_ns is None and np.isfinite(off50):
+            rh = off50 - self.t1_ref_margin_ns
+            cand = inside((rh - self.t1_count_ns, rh))
+            ref_w = cand if (cand is not None and cand[0] >= sig_w[1]) else None
+        cur = rabi_curve_from_histogram(Hc, ec, res.shots_per_tau, sig_w, ref_w)
+        spt = res.shots_per_tau.astype(float)
+        res.sig_window_ns = tuple(float(v) for v in cur["sig_window_used_ns"])
+        res.signal_mean = cur["signal_mean"]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            res.signal_sem = np.where(spt > 0, np.sqrt(cur["signal_sum"]) / spt, np.nan)
+        if ref_w is not None:
+            res.ref_window_ns = tuple(float(v) for v in cur["ref_window_used_ns"])
+            res.reference_mean, res.contrast = cur["reference_mean"], cur["contrast"]
+
+        # ---- 6) the ADwin's programmed gates, on the same registered photons ---
+        if all(k in gates for k in ("sig_start_ns", "ref_start_ns", "count_ns")):
+            s0, r0, w = gates["sig_start_ns"], gates["ref_start_ns"], gates["count_ns"]
+            res.adwin_sig_start_ns, res.adwin_ref_start_ns, res.adwin_count_ns = s0, r0, w
+            res.adwin_readout_start_ns = float(gates.get("readout_start_ns", np.nan))
+            res.adwin_gate_align_offset_ns = float(gates.get("gate_align_offset_ns", np.nan))
+            if np.isfinite(res.adwin_readout_start_ns) and np.isfinite(res.light_on_after_trig_ns):
+                res.suggested_gate_align_offset_ns = (res.light_on_after_trig_ns
+                                                      - res.adwin_readout_start_ns)
+            if res.readout_moves:
+                res.adwin_replay_status = ("not replayed: the readout moves with tau but the "
+                                           "ADwin's gates sit at fixed times after its trigger.")
+            elif not np.isfinite(res.ro_delay_median_ns) or w <= 0:
+                res.adwin_replay_status = "not replayed: no readout-marker timing."
+            else:
+                sr, rr = s0 - res.ro_delay_median_ns, r0 - res.ro_delay_median_ns
+                res.adwin_sig_rel_ns, res.adwin_ref_rel_ns = sr, rr
+
+                def frac(g):
+                    return max(0.0, min(whi, g + w) - max(wlo, g)) / w
+
+                fs, fr = frac(sr), frac(rr)
+                if fs >= 0.9 and fr >= 0.9:
+                    mats = dict({"tau": Hc} if marker_tau else {})
+                    mats.update(Hoc)
+                    one = np.ones(n)
+                    for nm, Hm in mats.items():
+                        res.adwin_replay_sig[nm] = rabi_curve_from_histogram(
+                            Hm, ec, one, (max(wlo, sr), min(whi, sr + w)))["signal_sum"].astype(np.int64)
+                        res.adwin_replay_ref[nm] = rabi_curve_from_histogram(
+                            Hm, ec, one, (max(wlo, rr), min(whi, rr + w)))["signal_sum"].astype(np.int64)
+                    res.adwin_replay_status = (
+                        "replayed on the registered readout photons"
+                        + ("" if min(fs, fr) >= 0.999 else
+                           f" (gates clipped to the readout light, {100 * min(fs, fr):.0f}% inside)"))
+                    tot = self._t1_adwin_totals(adwin_result, n)
+                    if tot is not None:
+                        a_sig, a_ref = tot
+                        res.adwin_signal = a_sig
+                        res.adwin_reference = a_ref if a_ref is not None else np.empty(0)
+                        scale = n_shots / max(1, n_use)    # the ADwin counted every shot
+                        for nm, e in res.adwin_replay_sig.items():
+                            ee = e.astype(float) * scale
+                            res.adwin_corr[nm] = self._pearson(a_sig, ee)
+                            res.adwin_count_ratio[nm] = (float(a_sig.sum() / ee.sum())
+                                                         if ee.sum() > 0 else float("nan"))
+                    elif adwin_result is not None:
+                        print(f"[MultiHarp T1] ADwin result has no per-tau signal arrays with "
+                              f"{n} steps -- skipped the ADwin cross-check.")
+                else:
+                    where = []
+                    for nm, g, fx in (("signal", sr, fs), ("reference", rr, fr)):
+                        if fx >= 0.9:
+                            continue
+                        if g + w <= wlo:
+                            where.append(f"{nm} gate ends {wlo - (g + w):.0f} ns BEFORE the "
+                                         f"readout light starts")
+                        elif g >= whi:
+                            where.append(f"{nm} gate opens {g - whi:.0f} ns AFTER the readout "
+                                         f"light ends")
+                        else:
+                            where.append(f"{nm} gate is only {100 * fx:.0f}% inside the "
+                                         f"readout light")
+                    res.adwin_replay_status = (
+                        "not replayed: as programmed, the " + "; the ".join(where)
+                        + " -- so it would not be counting readout photons there. If the ADwin's "
+                          "own T1 looks fine, its REAL gate is offset from the programmed one "
+                          "(measure it with case='adwin_readout_vs_spcm').")
+        self._t1_verdicts(res)
+        return res
+
+    @staticmethod
+    def _t1_verdicts(res: T1Result) -> None:
+        """Plain-language reading of the order and ADwin cross-checks."""
+        if res.tau_assign_source.startswith("marker"):
+            ai, ash, ab = res.agree_interleaved, res.agree_interleaved_shifted, res.agree_blocked
+            if np.isfinite(ai) and ai > 0.95:
+                print("[MultiHarp T1] VERDICT order: the Proteus advances ONE tau step PER "
+                      "TRIGGER (interleaved) and every run starts at step 0.")
+            elif np.isfinite(ash) and ash > 0.95:
+                print("[MultiHarp T1] VERDICT order: interleaved, but in some runs the task "
+                      "pointer does NOT start at step 0 (run_pointer_offsets). Anything binned "
+                      "by shot order -- the ADwin's Data arrays -- is shifted there.")
+            elif np.isfinite(ab) and ab > 0.95:
+                print("[MultiHarp T1] VERDICT order: BLOCKED (tau changes every repeat_count "
+                      "shots).")
+            else:
+                print("[MultiHarp T1] VERDICT order: neither interleaved nor blocked explains "
+                      "the measured tau sequence (dropped triggers or a jumping task pointer) "
+                      "-- see the timing plot.")
+        if res.adwin_corr:
+            r = {k: (v if np.isfinite(v) else -1.0) for k, v in res.adwin_corr.items()}
+            best = max(r, key=r.get)
+            if r[best] < 0.5:
+                print(f"[MultiHarp T1] VERDICT ADwin: its counts do not follow the replay of "
+                      f"its programmed gates under any binning (best r={r[best]:.2f}). The real "
+                      f"gate is probably not where it is programmed -- measure it with "
+                      f"case='adwin_readout_vs_spcm' (DO16 copy).")
+            elif "tau" in r and r["tau"] >= r[best] - 0.02:
+                print(f"[MultiHarp T1] VERDICT ADwin: its counts follow the MEASURED tau "
+                      f"(r={r['tau']:.3f}) -> every Data_1/Data_2 bin holds the shots it should.")
+            elif "tau" in r:
+                print(f"[MultiHarp T1] VERDICT ADwin: its counts follow shot order '{best}' "
+                      f"(r={r[best]:.3f}) better than the measured tau (r={r['tau']:.3f}) -> "
+                      f"the ADwin bins shots differently from what the Proteus played; its T1 "
+                      f"curve is MIS-LINKED.")
+            else:
+                print(f"[MultiHarp T1] ADwin counts best match shot order '{best}' "
+                      f"(r={r[best]:.3f}); tau was not read per shot, so this can't confirm "
+                      f"the linking -- add the init marker line for that.")
+            ratio = res.adwin_count_ratio.get(best, float("nan"))
+            if np.isfinite(ratio) and not (0.8 <= ratio <= 1.25):
+                print(f"    counts ratio ADwin/replay = {ratio:.2f}: the ADwin does not count the "
+                      f"same time slice as its programmed gate (gate offset or counter "
+                      f"efficiency). The shape comparison above still holds.")
+        elif res.adwin_replay_status.startswith("not replayed"):
+            print(f"[MultiHarp T1] ADwin cross-check {res.adwin_replay_status}")
+
+    # ---- T1 plots ---------------------------------------------------------- #
+    @staticmethod
+    def _t1_x(res: T1Result) -> Tuple[np.ndarray, str]:
+        x = np.asarray(res.tau_ns, dtype=float)
+        if res.tau_is_index:
+            return x, "tau step index"
+        if x.size and np.nanmax(np.abs(x)) >= 1e4:
+            return x / 1000.0, "dark time tau (us)"
+        return x, "dark time tau (ns)"
+
+    @staticmethod
+    def _edges_from_centers(c) -> np.ndarray:
+        c = np.asarray(c, dtype=float)
+        if c.size == 1:
+            return np.array([c[0] - 0.5, c[0] + 0.5])
+        mid = 0.5 * (c[:-1] + c[1:])
+        return np.concatenate([[2 * c[0] - mid[0]], mid, [2 * c[-1] - mid[-1]]])
+
+    _T1_BINNING_LABEL = {"tau": "measured tau", "interleaved": "shot order, interleaved",
+                         "blocked": "shot order, blocked"}
+
+    def _plot_t1_curve(self, res: T1Result):
+        x, xl = self._t1_x(res)
+        n = res.n_iterations
+        has_mh = res.signal_mean.size == n and np.isfinite(res.signal_mean).any()
+        has_c = res.contrast.size == n and np.isfinite(res.contrast).any()
+        key = ("tau" if "tau" in res.adwin_replay_sig
+               else (next(iter(res.adwin_replay_sig)) if res.adwin_replay_sig else None))
+        has_adw = res.adwin_signal.size == n and bool(res.adwin_corr)
+        rows = [r for r, on in (("counts", has_mh), ("contrast", has_c or key is not None),
+                                ("adwin", has_adw)) if on]
+        if not rows:
+            return None
+        fig, axes = plt.subplots(len(rows), 1, sharex=True,
+                                 figsize=(8.5, 2.8 * len(rows) + 0.8))
+        axes = np.atleast_1d(axes)
+        spt = res.shots_per_tau.astype(float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            for ax, row in zip(axes, rows):
+                if row == "counts":
+                    m = np.isfinite(res.signal_mean)
+                    ax.errorbar(x[m], res.signal_mean[m], yerr=res.signal_sem[m], fmt="-o",
+                                ms=3.5, lw=1.2, capsize=2,
+                                label=f"signal [{res.sig_window_ns[0]:.0f}, "
+                                      f"{res.sig_window_ns[1]:.0f}] ns")
+                    if res.reference_mean.size == n and np.isfinite(res.reference_mean).any():
+                        ax.plot(x, res.reference_mean, "-s", ms=3, lw=1, alpha=0.8,
+                                label=f"reference [{res.ref_window_ns[0]:.0f}, "
+                                      f"{res.ref_window_ns[1]:.0f}] ns")
+                    if key is not None and spt.size == n:
+                        ax.plot(x, np.where(spt > 0, res.adwin_replay_sig[key] / spt, np.nan),
+                                "--^", ms=3, lw=1, label="ADwin signal gate replayed")
+                    ax.set_ylabel("SPCM counts / shot")
+                    ax.set_title(f"MultiHarp T1 | readout photons only, {res.ro_window_ns[0]:.0f}-"
+                                 f"{res.ro_window_ns[1]:.0f} ns after each readout marker | tau: "
+                                 f"{res.tau_assign_source}", fontsize=9)
+                elif row == "contrast":
+                    if has_c:
+                        ax.plot(x, res.contrast, "-o", ms=3.5, lw=1.2,
+                                label="MultiHarp signal / reference")
+                    if key is not None:
+                        s = res.adwin_replay_sig[key].astype(float)
+                        r = res.adwin_replay_ref[key].astype(float)
+                        ax.plot(x, np.where(r > 0, s / r, np.nan), "--^", ms=3, lw=1,
+                                label="ADwin gates replayed: signal / reference")
+                    ax.set_ylabel("contrast")
+                else:
+                    a = res.adwin_signal.astype(float)
+                    ax.plot(x, a / np.nanmean(a), "-o", color="k", ms=3.5, lw=1.5,
+                            label="ADwin Data (signal)")
+                    for k, v in res.adwin_replay_sig.items():
+                        e = v.astype(float)
+                        if e.sum() > 0:
+                            ax.plot(x, e / np.nanmean(e), "--", lw=1.1,
+                                    label=f"replay by {self._T1_BINNING_LABEL.get(k, k)} "
+                                          f"(r={res.adwin_corr.get(k, float('nan')):.3f})")
+                    ax.set_ylabel("signal / mean")
+                    ax.set_title("ADwin counts vs its programmed gates replayed on the same "
+                                 "readout photons", fontsize=9)
+                ax.legend(fontsize=7, loc="best")
+        axes[-1].set_xlabel(xl)
+        fig.tight_layout()
+        return fig
+
+    def _plot_t1_timing(self, res: T1Result):
+        fig, axes = plt.subplots(1, 3, figsize=(15.5, 4.3))
+        ax = axes[0]
+        if res.ro_delay_hist_counts.size:
+            e = res.ro_delay_hist_edges_ns
+            ax.bar(0.5 * (e[:-1] + e[1:]), res.ro_delay_hist_counts, width=e[1] - e[0])
+            ax.set_xlabel("DO28 -> readout marker, minus that tau's median (ns)")
+            ax.set_ylabel("shots")
+            ax.set_title(f"readout after DO28: {res.ro_delay_median_ns / 1000.0:.4f} us"
+                         + (" (moves with tau)" if res.readout_moves else "")
+                         + f"\njitter std {res.ro_jitter_ns:.2f} ns, span "
+                           f"{res.ro_delay_span_ns:.1f} ns", fontsize=9)
+        else:
+            ax.text(0.5, 0.5, "no per-shot readout edge", ha="center", transform=ax.transAxes)
+        ax = axes[1]
+        x, xl = self._t1_x(res)
+        n = res.n_iterations
+        drew = False
+        if res.init_delay_by_tau_ns.size == n and np.isfinite(res.init_delay_by_tau_ns).any():
+            ax.plot(x, res.init_delay_by_tau_ns / 1000.0, "o", ms=3.5, label="DO28 -> init marker")
+            drew = True
+        if res.ro_delay_by_tau_ns.size == n and np.isfinite(res.ro_delay_by_tau_ns).any():
+            ax.plot(x, res.ro_delay_by_tau_ns / 1000.0, "s", ms=3.5, label="DO28 -> readout marker")
+            if res.tau_assign_source == "marker_gap" and np.isfinite(res.tag_offset_ns):
+                ax.plot(x, (res.ro_delay_by_tau_ns - res.tag_offset_ns - res.tau_ns) / 1000.0,
+                        "-", lw=1, label="readout - gap - tau (expected init)")
+            drew = True
+        if drew:
+            ax.set_xlabel(xl)
+            ax.set_ylabel("DO28 -> marker (us)")
+            ax.legend(fontsize=7)
+            ax.set_title(f"the DO28 -> marker durations that give tau\nresidual std "
+                         f"{res.tau_residual_std_ns:.2f} ns", fontsize=9)
+        else:
+            ax.text(0.5, 0.5, "no marker timing", ha="center", transform=ax.transAxes)
+        ax = axes[2]
+        if res.order_sample_measured.size:
+            s = np.arange(res.order_sample_measured.size)
+            m = res.order_sample_measured >= 0
+            ax.plot(s, res.order_sample_interleaved, "-", lw=1, label="interleaved model")
+            if res.order_sample_blocked.size:
+                ax.plot(s, res.order_sample_blocked, "-", lw=1, label="blocked model")
+            ax.plot(s[m], res.order_sample_measured[m], "o", ms=3, label="measured from marker")
+            ax.set_xlabel("shot number in run 1")
+            ax.set_ylabel("tau step index")
+            ax.legend(fontsize=7, loc="upper left", framealpha=0.9)
+            ai, ash, ab = res.agree_interleaved, res.agree_interleaved_shifted, res.agree_blocked
+            ax.set_title(f"which order does the Proteus play?\ninterleaved {100 * ai:.1f}%"
+                         + (f" ({100 * ash:.1f}% with a per-run pointer offset)"
+                            if np.isfinite(ash) and ash - ai > 0.005 else "")
+                         + (f", blocked {100 * ab:.1f}%" if np.isfinite(ab) else ""), fontsize=9)
+        else:
+            ax.text(0.5, 0.5, "tau not read per shot", ha="center", transform=ax.transAxes)
+        fig.tight_layout()
+        return fig
+
+    def _plot_t1_readout_map(self, res: T1Result):
+        if res.arrival_hist.size == 0 or res.shots_per_tau.size != res.n_iterations:
+            return None
+        spt = res.shots_per_tau.astype(float)
+        spt[spt == 0] = np.nan
+        Z = res.arrival_hist / spt[:, None]
+        xe = res.arrival_edges_ns
+        y, yl = self._t1_x(res)
+        fig, (ax0, ax1) = plt.subplots(2, 1, sharex=True, figsize=(9.5, 6.8),
+                                       gridspec_kw=dict(height_ratios=[1.0, 2.2]),
+                                       constrained_layout=True)
+        ax0.plot(0.5 * (xe[:-1] + xe[1:]), res.arrival_profile_ns, lw=1)
+        ax0.set_ylabel("photons, all shots")
+        pc = ax1.pcolormesh(xe, self._edges_from_centers(y), Z, shading="flat", cmap="viridis")
+        fig.colorbar(pc, ax=[ax0, ax1]).set_label("SPCM counts / shot / bin")
+        for ax in (ax0, ax1):
+            if np.isfinite(res.sig_window_ns[0]):
+                ax.axvspan(*res.sig_window_ns, color="w" if ax is ax1 else "C2", alpha=0.25)
+            if np.isfinite(res.ref_window_ns[0]):
+                ax.axvspan(*res.ref_window_ns, color="orange", alpha=0.25)
+            for t in (res.light_on_ns, res.light_off_ns):
+                if np.isfinite(t):
+                    ax.axvline(t, color="grey", ls=":", lw=1)
+        note = ""
+        if res.adwin_replay_sig:
+            for g, col in ((res.adwin_sig_rel_ns, "r"), (res.adwin_ref_rel_ns, "m")):
+                for ax in (ax0, ax1):
+                    ax.axvspan(max(g, xe[0]), min(g + res.adwin_count_ns, xe[-1]),
+                               color=col, alpha=0.35)
+            note = "; red/magenta: ADwin gates as programmed"
+        elif np.isfinite(res.adwin_sig_rel_ns):
+            note = (f"; ADwin gates as programmed sit at {res.adwin_sig_rel_ns:.0f} / "
+                    f"{res.adwin_ref_rel_ns:.0f} ns (outside the readout light)")
+        ax1.set_xlabel("time after THIS shot's readout marker (ns)")
+        ax1.set_ylabel(yl)
+        ax0.set_title(f"SPCM registered ONLY here: {res.ro_window_ns[0]:.0f}-"
+                      f"{res.ro_window_ns[1]:.0f} ns after each readout marker "
+                      f"({res.ro_window_source}); nothing between DO28 and the readout marker\n"
+                      f"shaded: MultiHarp signal / reference windows; dotted: light on/off (50%)"
+                      + note, fontsize=8)
+        return fig
+
+    def _save_t1_outputs(self, res: T1Result) -> None:
+        outdir = self.output_dir or os.getcwd()
+        os.makedirs(outdir, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        base = os.path.join(outdir, f"multiharp_t1_{stamp}")
+        nan = float("nan")
+        if self.save_npz:
+            flat = {}
+            for nm in ("tau", "interleaved", "blocked"):
+                if nm in res.adwin_replay_sig:
+                    flat[f"adwin_replay_sig_{nm}"] = res.adwin_replay_sig[nm]
+                    flat[f"adwin_replay_ref_{nm}"] = res.adwin_replay_ref[nm]
+                if nm in res.adwin_corr:
+                    flat[f"adwin_corr_{nm}"] = res.adwin_corr[nm]
+                    flat[f"adwin_count_ratio_{nm}"] = res.adwin_count_ratio.get(nm, nan)
+            npz = base + ".npz"
+            np.savez_compressed(
+                npz, case=self.case,
+                trig_input=res.trig_input, marker_input=res.marker_input,
+                stop_input=res.stop_input, base_resolution_ps=res.base_resolution_ps,
+                n_triggers=res.n_triggers, n_marker_edges=res.n_marker_edges,
+                n_spcm_events=res.n_spcm_events, n_spcm_registered=res.n_spcm_registered,
+                n_iterations=res.n_iterations, repeat_count=(res.repeat_count or 0),
+                marker_layout=res.marker_layout, edges_expected=res.edges_expected,
+                n_shots_good=res.n_shots_good, n_shots_no_marker=res.n_shots_no_marker,
+                n_shots_bad_count=res.n_shots_bad_count,
+                edges_per_shot_hist=res.edges_per_shot_hist,
+                n_orphan_markers=res.n_orphan_markers, n_stray_markers=res.n_stray_markers,
+                trigger_period_ns=res.trigger_period_ns, shot_window_ns=res.shot_window_ns,
+                n_runs=res.n_runs, shots_per_run=res.shots_per_run,
+                expected_shots_per_run=(res.expected_shots_per_run or 0),
+                ro_delay_median_ns=res.ro_delay_median_ns, ro_jitter_ns=res.ro_jitter_ns,
+                ro_delay_span_ns=res.ro_delay_span_ns,
+                ro_delay_hist_counts=res.ro_delay_hist_counts,
+                ro_delay_hist_edges_ns=res.ro_delay_hist_edges_ns,
+                readout_moves=int(res.readout_moves),
+                ro_delay_by_tau_ns=res.ro_delay_by_tau_ns,
+                init_delay_by_tau_ns=res.init_delay_by_tau_ns,
+                tag_offset_ns=res.tag_offset_ns, tag_offset_auto_ns=res.tag_offset_auto_ns,
+                tau_residual_std_ns=res.tau_residual_std_ns,
+                tau_assign_source=res.tau_assign_source, n_matched=res.n_matched,
+                n_unmatched=res.n_unmatched, snap_tol_ns=res.snap_tol_ns,
+                agree_interleaved=res.agree_interleaved,
+                agree_interleaved_shifted=res.agree_interleaved_shifted,
+                agree_blocked=res.agree_blocked, run_pointer_offsets=res.run_pointer_offsets,
+                ro_window_ns=np.asarray(res.ro_window_ns, dtype=float),
+                ro_window_source=res.ro_window_source,
+                light_on_ns=res.light_on_ns, light_off_ns=res.light_off_ns,
+                light_on10_ns=res.light_on10_ns, light_off10_ns=res.light_off10_ns,
+                tau_ns=res.tau_ns, tau_is_index=int(res.tau_is_index),
+                sig_window_ns=np.asarray(res.sig_window_ns, dtype=float),
+                ref_window_ns=np.asarray(res.ref_window_ns, dtype=float),
+                window_source=res.window_source,
+                signal_mean=res.signal_mean, signal_sem=res.signal_sem,
+                reference_mean=res.reference_mean, contrast=res.contrast,
+                shots_per_tau=res.shots_per_tau,
+                # same keys as the Rabi .npz, so recompute_rabi() re-windows it offline
+                # (within the registered readout window)
+                arrival_hist=res.arrival_hist, arrival_edges_ns=res.arrival_edges_ns,
+                arrival_profile_ns=res.arrival_profile_ns,
+                adwin_sig_start_ns=res.adwin_sig_start_ns,
+                adwin_ref_start_ns=res.adwin_ref_start_ns, adwin_count_ns=res.adwin_count_ns,
+                adwin_readout_start_ns=res.adwin_readout_start_ns,
+                adwin_gate_align_offset_ns=res.adwin_gate_align_offset_ns,
+                adwin_sig_rel_ns=res.adwin_sig_rel_ns, adwin_ref_rel_ns=res.adwin_ref_rel_ns,
+                adwin_replay_status=res.adwin_replay_status,
+                adwin_signal=res.adwin_signal, adwin_reference=res.adwin_reference,
+                light_on_after_trig_ns=res.light_on_after_trig_ns,
+                suggested_gate_align_offset_ns=res.suggested_gate_align_offset_ns,
+                fifo_overrun=int(res.fifo_overrun), **flat)
+            res.saved_files.append(npz)
+        if self.save_hdf5:
+            try:
+                import h5py  # noqa: F401
+                from src.core.struct_hdf5 import MyStruct, save_data
+                s = MyStruct()
+                s.data = MyStruct(tau_ns=res.tau_ns, signal_mean=res.signal_mean,
+                                  signal_sem=res.signal_sem, reference_mean=res.reference_mean,
+                                  contrast=res.contrast, shots_per_tau=res.shots_per_tau,
+                                  arrival_hist=res.arrival_hist,
+                                  arrival_edges_ns=res.arrival_edges_ns,
+                                  ro_delay_by_tau_ns=res.ro_delay_by_tau_ns,
+                                  init_delay_by_tau_ns=res.init_delay_by_tau_ns,
+                                  adwin_signal=res.adwin_signal,
+                                  adwin_replay_sig_tau=res.adwin_replay_sig.get("tau", np.empty(0)),
+                                  adwin_replay_ref_tau=res.adwin_replay_ref.get("tau", np.empty(0)))
+                s.meta = MyStruct(case=self.case, marker_layout=res.marker_layout,
+                                  trig_input=res.trig_input, marker_input=res.marker_input,
+                                  stop_input=res.stop_input,
+                                  base_resolution_ps=res.base_resolution_ps,
+                                  n_triggers=res.n_triggers, n_runs=res.n_runs,
+                                  n_shots_good=res.n_shots_good, n_matched=res.n_matched,
+                                  n_spcm_events=res.n_spcm_events,
+                                  n_spcm_registered=res.n_spcm_registered,
+                                  ro_window_lo_ns=res.ro_window_ns[0],
+                                  ro_window_hi_ns=res.ro_window_ns[1],
+                                  ro_window_source=res.ro_window_source,
+                                  tau_assign_source=res.tau_assign_source,
+                                  agree_interleaved=res.agree_interleaved,
+                                  agree_blocked=res.agree_blocked,
+                                  ro_delay_median_ns=res.ro_delay_median_ns,
+                                  ro_jitter_ns=res.ro_jitter_ns,
+                                  readout_moves=int(res.readout_moves),
+                                  tag_offset_ns=res.tag_offset_ns,
+                                  sig_lo_ns=res.sig_window_ns[0], sig_hi_ns=res.sig_window_ns[1],
+                                  ref_lo_ns=res.ref_window_ns[0], ref_hi_ns=res.ref_window_ns[1],
+                                  light_on_ns=res.light_on_ns,
+                                  adwin_sig_start_ns=res.adwin_sig_start_ns,
+                                  adwin_ref_start_ns=res.adwin_ref_start_ns,
+                                  adwin_replay_status=res.adwin_replay_status,
+                                  suggested_gate_align_offset_ns=res.suggested_gate_align_offset_ns,
+                                  fifo_overrun=int(res.fifo_overrun),
+                                  timestamp=time.strftime("%Y-%m-%d %H:%M:%S"))
+                save_data(base + ".h5", s)
+                res.saved_files.append(base + ".h5")
+            except Exception as e:
+                print(f"[MultiHarp T1] HDF5 save skipped ({e}); the .npz has everything.")
+        if self.make_plots:
+            for suffix, maker in (("", self._plot_t1_curve), ("_timing", self._plot_t1_timing),
+                                  ("_readout_map", self._plot_t1_readout_map)):
+                try:
+                    fig = maker(res)
+                    if fig is not None:
+                        png = base + suffix + ".png"
+                        fig.savefig(png, dpi=130)
+                        plt.close(fig)
+                        res.saved_files.append(png)
+                except Exception as e:  # never let plotting kill a good measurement
+                    print(f"[MultiHarp T1] plot warning ({suffix or '_curve'}): {e}")
+
+    def run_t1_with_experiment(
+        self,
+        experiment: Any,
+        frequency_range: Optional[List[float]] = None,
+        save: bool = True,
+        run_method: str = "run_experiment",
+    ) -> Dict[str, Any]:
+        """Run the T1 sweep UNCHANGED while the MultiHarp tags DO28, the laser
+        marker and the SPCM, then analyze: DO28 times the marker edges (tau per
+        shot), and only the SPCM photons inside the readout light after each
+        shot's readout marker are registered.
+
+        Wire trig_input to the attenuated DO28 copy, start_input to the attenuated
+        Proteus ch4 MKR, and give the sequence two marker lines that copy the init
+        and readout pulses. The ADwin gates are read from the experiment
+        (readout_start_ns, gate_align_offset_ns, count_time, reset_time -- exactly
+        as configure_gates_v5 uses them) for the cross-check.
+        Returns {'odmr': ..., 't1': T1Result, 'raw_path': ...}."""
+        if self.trig_input is None:
+            raise ValueError("case='t1_vs_spcm' needs trig_input=<input carrying DO28>.")
+        if frequency_range is None:
+            frequency_range = experiment.settings['microwave']['frequency range']
+        if not hasattr(experiment, run_method):
+            raise AttributeError(f"experiment has no method {run_method!r}")
+        if self.output_dir is None:
+            self.output_dir = getattr(experiment, "output_dir", None) or os.getcwd()
+        self._rabi_repeat_count = getattr(experiment, "repeat_count", None)
+
+        self.open_and_configure()
+        odmr_result: Dict[str, Any] = {}
+        t1 = None
+        raw_on_disk = None
+        try:
+            self.start_acquisition()
+            try:
+                odmr_result = getattr(experiment, run_method)(frequency_range)
+            finally:
+                records = self.stop_acquisition()
+            raw_on_disk = self._raw_path if (self.stream_raw_to_disk and self._raw_path) else None
+            try:
+                n_iter, tau_ns, tau_is_index = self._infer_t1_axis(experiment)
+                gates = self._adwin_gates_from_experiment(experiment)
+                self._t1_axis_cache = (n_iter, tau_ns, tau_is_index, gates)  # for offline re-runs
+                t1 = self.analyze_t1(records, n_iter, tau_ns, tau_is_index,
+                                     adwin_result=odmr_result, adwin_gates=gates)
+                if save:
+                    self._save_t1_outputs(t1)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"[MultiHarp T1] WARNING: analysis failed ({e}). The raw records are safe"
+                      + (f" on disk at {raw_on_disk}" if raw_on_disk else "")
+                      + "; re-analyze offline with analyze_t1_records_file(). The ADwin data "
+                        "is unaffected and will still be saved.")
+        finally:
+            self.close()
+
+        if t1 is not None:
+            print(t1.summary())
+        return {"odmr": odmr_result, "t1": t1, "raw_path": raw_on_disk}
+
+    def analyze_t1_records_file(self, path: str, n_iterations: int, tau_values_ns,
+                                repeat_count: Optional[int] = None, adwin_result: Any = None,
+                                adwin_gates: Optional[Dict[str, float]] = None,
+                                base_resolution_ps: Optional[float] = None,
+                                save: bool = True) -> T1Result:
+        """Re-run the T1 analysis offline on a finished run's raw records -- the
+        multiharp_raw_*.bin streamed during acquisition, or a .npy. The file is
+        memory-mapped and decoded in chunks. Pass the same sweep (tau_values_ns,
+        in ns), repeat_count (for the order checks), the ADwin gates as
+        dict(sig_start_ns=..., ref_start_ns=..., count_ns=...) and, to compare
+        counts, adwin_result = the run's dict or np.load('adwin_partial_latest.npz').
+        base_resolution_ps: the value printed at the start of the run (default 5)."""
+        records = self._open_records(path)
+        if base_resolution_ps is not None:
+            self._base_res_ps = float(base_resolution_ps)
+        if repeat_count is not None:
+            self._rabi_repeat_count = int(repeat_count)
+        if self.output_dir is None:
+            self.output_dir = os.path.dirname(os.path.abspath(path)) or os.getcwd()
+        t1 = self.analyze_t1(records, n_iterations, np.asarray(tau_values_ns, dtype=float),
+                             False, adwin_result=adwin_result, adwin_gates=adwin_gates)
+        if save:
+            self._save_t1_outputs(t1)
+        print(t1.summary())
+        return t1
 
     # ---- top-level entry point ------------------------------------------- #
     def run_with_experiment(
@@ -2199,6 +3947,10 @@ class MultiHarpTimingTester:
         """
         if self.case in self._RABI_CASES:
             return self.run_rabi_with_experiment(
+                experiment, frequency_range=frequency_range,
+                save=save, run_method=run_method)
+        if self.case == "t1_vs_spcm":
+            return self.run_t1_with_experiment(
                 experiment, frequency_range=frequency_range,
                 save=save, run_method=run_method)
 
@@ -2433,3 +4185,7 @@ class MultiHarpTimingTester:
         finally:
             self.close()
         return {"odmr": odmr_result, "map": results}
+
+if __name__ == "__main__":
+    MHTT = MultiHarpTimingTester()
+    MHTT.recompute_rabi(r"D:\Duttlab\Experiments\AQuISS_default_save_location\data\test_odmr\odmr_pulsed_output\multiharp_rabi_mw_tagged_20260916_134559.npz", [1100, 1400], ref_window_ns=[5000, 5300])
