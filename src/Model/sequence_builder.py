@@ -13,7 +13,7 @@ import numpy as np
 from .sequence_description import SequenceDescription, PulseDescription, LoopDescription, ConditionalDescription, MarkerDescription
 from .pulses import (Pulse, GaussianPulse, SechPulse, LorentzianPulse, SquarePulse,
                      DataPulse, MarkerEvent, ChirpPulse, HyperbolicSecantPulse,
-                     AsymmetricHyperbolicSecantPulse)
+                     AsymmetricHyperbolicSecantPulse, GeronoPulse)
 from .sequence import Sequence
 
 def _display_envelope(pulse) -> np.ndarray:
@@ -556,7 +556,8 @@ class SequenceBuilder:
             return DataPulse(
                 name=pulse_desc.name,
                 length=pulse_length,
-                filename=filename
+                filename=filename,
+                amplitude=pulse_desc.amplitude
             )
         elif pulse_desc.shape.value == "chirp":
             bandwidth = pulse_desc.get_parameter("bandwidth")
@@ -600,6 +601,16 @@ class SequenceBuilder:
                 quadrature=pulse_desc.get_parameter("quadrature", "I"),
                 center_freq=float(pulse_desc.get_parameter("center_freq", 0.0)),
                 phase0=float(pulse_desc.get_parameter("phase0", 0.0)),
+                fixed_timing=getattr(pulse_desc, 'fixed_timing', False)
+            )
+
+        elif pulse_desc.shape.value == "gerono":
+            # rounded, not truncated: a 167 ns pulse must not come out 166 samples long
+            return GeronoPulse(
+                name=pulse_desc.name,
+                length=int(round(pulse_desc.duration * self.sample_rate)),
+                amplitude=pulse_desc.amplitude,
+                kind=str(pulse_desc.get_parameter("kind", "lobe")),
                 fixed_timing=getattr(pulse_desc, 'fixed_timing', False)
             )
         

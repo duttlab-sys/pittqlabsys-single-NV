@@ -107,9 +107,10 @@ class DataPulse(Pulse):
     Pulse defined by external data file (e.g. CSV of time vs amplitude).
     Automatically resamples to `length`.
     """
-    def __init__(self, name: str, length: int, filename: str):
+    def __init__(self, name: str, length: int, filename: str, amplitude: float = 1.0):
         super().__init__(name, length)
         self.filename = filename
+        self.amplitude = amplitude  # multiplies the file's samples (lets an index expression switch the pulse on or off)
 
     def generate_samples(self) -> np.ndarray:
         # Load data, skipping the first row (header) and using comma delimiter
@@ -120,7 +121,7 @@ class DataPulse(Pulse):
         # resample uniformly across times
         resampled_times = np.linspace(times[0], times[-1], num=self.length)
         envelope = np.interp(resampled_times, times, amps)
-        return envelope.astype(float)
+        return (self.amplitude * envelope).astype(float)
 
 
 class MarkerEvent:
@@ -285,3 +286,72 @@ def adiabaticity_Q(bandwidth_hz: float, duration_s: float, rabi_hz: float) -> fl
     sweep_rate = 2.0 * np.pi * bandwidth_hz / duration_s
     omega1 = 2.0 * np.pi * rabi_hz
     return (omega1 ** 2) / sweep_rate
+
+# ======================================================================
+# Space-curve (SCQC) robust gates: Gerono-lemniscate pulses.
+# A drive along one axis (x) with Rabi amplitude Omega(t) and a static detuning delta has
+# first-order error  delta/2 * int_0^T (0, sin theta, cos theta) dt,  theta(t) = int_0^t Omega.
+# That integral is a curve whose curvature is Omega(t); it vanishes when the curve CLOSES.
+# One lobe of the Gerono lemniscate (x = cos u, y = sin u cos u, u from pi/2 to 3pi/2) is a
+# closed curve that turns its tangent by 3pi/2, so its curvature used as Omega(t) gives
+#     R_x(3pi/2) = -R_x(-pi/2)   ->  a -pi/2 gate (up to a global phase), robust to first
+#                                    order in a static detuning.
+# 'double' (two same-sign lobes) gives R_x(3pi) = -R_x(pi), a robust pi gate; 'full' (+lobe
+# then -lobe, the figure eight) gives a robust identity. Amplitude errors are NOT corrected:
+# a lobe rotates 3x further than a square pi/2, so it is 3x more sensitive to amplitude error.
+# ======================================================================
+
+def _gerono_lobe(n_fine: int = 20001):
+    """One Gerono lobe sampled on n_fine points: normalized arc length u (0..1), normalized
+    curvature k = |kappa|/max|kappa| (0 at both ends, single-signed), max|kappa|, lobe length."""
+    phi = np.linspace(np.pi / 2, 3 * np.pi / 2, n_fine)
+    xp, yp = -np.sin(phi), np.cos(2 * phi)
+    xpp, ypp = -np.cos(phi), -2 * np.sin(2 * phi)
+    v = np.hypot(xp, yp)
+    kappa = np.abs((xp * ypp - yp * xpp) / v ** 3)
+    s = np.concatenate([[0.0], np.cumsum(0.5 * (v[1:] + v[:-1]) * np.diff(phi))])
+    return s / s[-1], kappa / kappa.max(), float(kappa.max()), float(s[-1])
+
+
+_GERONO_U, _GERONO_K, GERONO_KMAX, GERONO_LENGTH = _gerono_lobe()
+# mean of the normalized lobe envelope; rotation of one lobe = 2*pi*Rabi*T*GERONO_MEAN = 3*pi/2
+GERONO_MEAN = float(np.sum(0.5 * (_GERONO_K[1:] + _GERONO_K[:-1]) * np.diff(_GERONO_U)))
+
+
+def gerono_lobe_duration(rabi_hz: float) -> float:
+    """Lobe length (s) for its 3pi/2 rotation when amplitude 1.0 drives Rabi frequency rabi_hz.
+    (= max|kappa| * lobe length / (2 pi rabi); 232.4 ns at 10 MHz.) Fine-tune by calibration."""
+    return GERONO_KMAX * GERONO_LENGTH / (2 * np.pi * rabi_hz)
+
+
+class GeronoPulse(Pulse):
+    """Gerono-lemniscate SCQC pulse, one quadrature (I channel = x axis, Q channel = y axis).
+    kind 'lobe'   one lobe: rotation +3pi/2 at the calibrated length (robust -pi/2 gate)
+         'double' two same-sign lobes: rotation 3pi (robust pi gate)
+         'full'   +lobe then -lobe (figure eight): identity (robust)
+    A negative amplitude reverses the rotation. Peak |envelope| = |amplitude|. Each lobe is
+    sampled at sample centres, so stretching the duration keeps the shape (closure) exact."""
+    KINDS = {"lobe": (1,), "double": (1, 1), "full": (1, -1)}
+
+    def __init__(self, name: str, length: int, amplitude: float = 1.0, kind: str = "lobe",
+                 fixed_timing: bool = False):
+        super().__init__(name, length, fixed_timing)
+        kind = str(kind).strip().lower()
+        if kind not in self.KINDS:
+            raise ValueError(f"GeronoPulse kind must be one of {sorted(self.KINDS)} (got {kind!r})")
+        self.amplitude = float(amplitude)
+        self.kind = kind
+
+    def generate_samples(self) -> np.ndarray:
+        n = self.length
+        if n <= 0:
+            return np.zeros(0, dtype=float)
+        signs = self.KINDS[self.kind]
+        edges = np.round(np.linspace(0, n, len(signs) + 1)).astype(int)
+        out = np.zeros(n, dtype=float)
+        for j, sgn in enumerate(signs):
+            a, b = edges[j], edges[j + 1]
+            if b > a:
+                u = (np.arange(b - a) + 0.5) / (b - a)
+                out[a:b] = sgn * np.interp(u, _GERONO_U, _GERONO_K)
+        return (self.amplitude * out).astype(float)

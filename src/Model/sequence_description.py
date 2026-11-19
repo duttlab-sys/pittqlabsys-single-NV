@@ -23,6 +23,7 @@ class PulseShape(Enum):
     CHIRP = "chirp"  # linear frequency-swept adiabatic inversion pulse
     HS = "hs"  # symmetric hyperbolic secant (sech/tanh, HS1)
     ASYMM_HS = "asymm_hs"  # asymmetric hyperbolic secant HS{n_left, n_right}
+    GERONO = "gerono"  # SCQC Gerono-lemniscate robust gate (kind=lobe|double|full)
 
 
 class TimingType(Enum):
